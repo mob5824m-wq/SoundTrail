@@ -15,6 +15,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
@@ -52,6 +53,14 @@ class YouTubeConsentRequiredException : YouTubeDataException(
 /** The Data API rejected the current access token. The OAuth path refreshes once before surfacing this. */
 internal class YouTubeAuthExpiredException(message: String) : YouTubeDataException(message)
 
+/**
+ * Google no longer accepts the saved grant, so this device cannot use the connection until the
+ * listener signs in again. The saved tokens and the account label are deliberately **kept**:
+ * that is what makes reconnecting a single tap (the Client ID and the channel name are still
+ * there), and it means a transient outage can never be mistaken for a lost login.
+ */
+class YouTubeReconnectRequiredException(message: String) : YouTubeDataException(message)
+
 /** One playlist item as pulled from the YouTube Data API, ready to turn into a Soundtrail entry. */
 internal data class YouTubeImportedItem(
     val videoId: String,
@@ -77,6 +86,13 @@ internal data class YouTubeImportedPlaylist(
 internal class YouTubeDataService(context: Context) {
     private val appContext = context.applicationContext
     private val settings = appContext.getSharedPreferences("soundtrail_settings", Context.MODE_PRIVATE)
+    /**
+     * Connection *status* only — timestamps and two flags. No token value is ever written here;
+     * the tokens themselves live in [SecretStore], encrypted with a device key. Keeping the
+     * status outside the encrypted store means the Connect tab can still explain what happened
+     * to a connection whose ciphertext this device can no longer read.
+     */
+    private val statusPrefs = appContext.getSharedPreferences("soundtrail_google_auth", Context.MODE_PRIVATE)
     private val secrets = SecretStore(appContext)
     private val oauthMutex = Mutex()
 
@@ -93,10 +109,130 @@ internal class YouTubeDataService(context: Context) {
     private val gmsConnected: Boolean
         get() = accountName != null && secrets.get("youtube_data_account_name") != null
 
-    val oauthConnected: Boolean get() = readOAuthToken() != null
+    /**
+     * A saved browser-OAuth connection counts as connected as long as its tokens are readable
+     * and Google has not rejected the grant. It stays "connected" through network outages and
+     * app updates: only Google itself can clear it.
+     */
+    val oauthConnected: Boolean get() = readOAuthToken() != null && !needsReconnect
 
     /** The user's own Desktop OAuth client ID, mirrored in the Connect tab's Client ID field. */
     val oauthClientId: String get() = settings.getString("youtube_oauth_client_id", "").orEmpty()
+
+    // ----- Connection status: kept outside the encrypted store, never a token value -----
+
+    private var needsReconnect: Boolean
+        get() = statusPrefs.getBoolean(KEY_NEEDS_RECONNECT, false)
+        set(value) {
+            statusPrefs.edit().putBoolean(KEY_NEEDS_RECONNECT, value).commit()
+        }
+
+    private var unreachable: Boolean
+        get() = statusPrefs.getBoolean(KEY_UNREACHABLE, false)
+        set(value) {
+            statusPrefs.edit().putBoolean(KEY_UNREACHABLE, value).commit()
+        }
+
+    /** Records that Google answered, which is the only thing that clears a failure flag. */
+    private fun recordVerified(now: Long = System.currentTimeMillis()) {
+        statusPrefs.edit()
+            .putBoolean(KEY_NEEDS_RECONNECT, false)
+            .putBoolean(KEY_UNREACHABLE, false)
+            .putLong(KEY_VERIFIED_AT, now)
+            .commit()
+    }
+
+    /**
+     * The connection's health for the Connect tab. Reads only local metadata: the label, two
+     * flags, and timestamps. Nothing here touches the network, so it is safe to call on every
+     * screen refresh.
+     */
+    fun authHealth(): GoogleAuthHealth {
+        val now = System.currentTimeMillis()
+        val token = readOAuthToken()
+        val tokenState = secrets.state("youtube_oauth_token")
+        val gms = gmsConnected
+        val method = when {
+            gms -> "Google account"
+            tokenState != SecretState.ABSENT -> "Client ID (browser)"
+            else -> null
+        }
+        val state = when {
+            gms -> if (unreachable) GoogleAuthState.OFFLINE else GoogleAuthState.CONNECTED
+            tokenState == SecretState.UNREADABLE -> GoogleAuthState.UNREADABLE
+            tokenState == SecretState.ABSENT -> GoogleAuthState.NOT_CONNECTED
+            needsReconnect -> GoogleAuthState.NEEDS_RECONNECT
+            unreachable -> GoogleAuthState.OFFLINE
+            else -> GoogleAuthState.CONNECTED
+        }
+        val verified = statusPrefs.getLong(KEY_VERIFIED_AT, 0L).takeIf { it > 0L }
+        val testingExpiry = statusPrefs.getBoolean(KEY_TESTING_EXPIRY, false)
+        val detail = when (state) {
+            GoogleAuthState.CONNECTED -> buildString {
+                append(accountName ?: "Saved on this device")
+                GoogleAuthPolicy.describeAge(now, verified)?.let { append(" \u00b7 last verified $it") }
+                if (gms) append(" \u00b7 access token requested on demand, never stored")
+                else if (token != null && token.refreshCount > 0) {
+                    append(" \u00b7 renewed by itself ${token.refreshCount}\u00d7")
+                }
+            }
+            GoogleAuthState.OFFLINE -> buildString {
+                append(accountName ?: "Saved on this device")
+                GoogleAuthPolicy.describeAge(now, verified)?.let { append(" \u00b7 last verified $it") }
+                append(" \u00b7 Google was not reachable just now")
+            }
+            GoogleAuthState.NEEDS_RECONNECT ->
+                "Google stopped accepting this grant" +
+                    (GoogleAuthPolicy.describeAge(now, statusPrefs.getLong(KEY_FAILED_AT, 0L).takeIf { it > 0L })
+                        ?.let { " $it" } ?: "") +
+                    ". The saved sign-in was kept, so reconnecting needs no re-typing."
+            GoogleAuthState.UNREADABLE ->
+                "Saved tokens are on this device but its key store could not read them; they were kept, not deleted."
+            GoogleAuthState.NOT_CONNECTED -> "No Google connection is saved on this device."
+        }
+        return GoogleAuthHealth(
+            state = state,
+            account = accountName,
+            method = method,
+            issuedAt = token?.issuedAt?.takeIf { it > 0L },
+            lastRefreshedAt = token?.lastRefreshedAt?.takeIf { it > 0L },
+            lastVerifiedAt = verified,
+            detail = detail,
+            hint = GoogleAuthPolicy.helpText(
+                state = state,
+                method = method,
+                clientIdRemembered = oauthClientId.isNotBlank(),
+                testingExpirySuspected = testingExpiry
+            ),
+            testingExpirySuspected = testingExpiry
+        )
+    }
+
+    /**
+     * Renews the saved access token quietly in the background. Called when the app starts, so a
+     * session that outlived its access token (or the app update that installed it) is already
+     * healthy by the time the listener taps anything. Failures are recorded in the health
+     * status, never by deleting the saved sign-in.
+     */
+    suspend fun warmUp() {
+        if (!oauthConnected) return
+        runCatching { oauthAccessToken() }
+    }
+
+    /**
+     * Fails the call with the most useful sentence available: when Google has already rejected
+     * the grant, the listener is told that reconnecting is one tap, instead of being told to
+     * "connect" an account they have already connected.
+     */
+    private fun requireConnected(message: String) {
+        if (connected) return
+        if (authHealth().state == GoogleAuthState.NEEDS_RECONNECT) {
+            throw YouTubeReconnectRequiredException(
+                authHealth().hint ?: "Google no longer accepts this connection. Reconnect to continue."
+            )
+        }
+        throw YouTubeDataException(message)
+    }
 
     /** Connects a microG/Google account chosen by the user or found on the device. */
     suspend fun connect(account: Account, label: String?): String {
@@ -117,9 +253,16 @@ internal class YouTubeDataService(context: Context) {
         val name = label?.takeIf(String::isNotBlank)
             ?: account.name.takeIf(String::isNotBlank)
             ?: "YouTube account"
-        secrets.put("youtube_data_account_name", account.name)
-        secrets.put("youtube_data_account_type", account.type)
-        secrets.put("youtube_data_account", name)
+        // The label and the account name are what make an update a no-op for this sign-in method:
+        // microG/Play services keeps the grant itself, so nothing here has to be re-authorised.
+        secrets.putAll(
+            mapOf(
+                "youtube_data_account_name" to account.name,
+                "youtube_data_account_type" to account.type,
+                "youtube_data_account" to name
+            )
+        )
+        recordVerified()
         return name
     }
 
@@ -135,6 +278,13 @@ internal class YouTubeDataService(context: Context) {
         secrets.remove("youtube_data_account")
         secrets.remove("youtube_data_account_name")
         secrets.remove("youtube_data_account_type")
+        statusPrefs.edit()
+            .remove(KEY_NEEDS_RECONNECT)
+            .remove(KEY_UNREACHABLE)
+            .remove(KEY_VERIFIED_AT)
+            .remove(KEY_FAILED_AT)
+            .remove(KEY_TESTING_EXPIRY)
+            .commit()
         runCatching { GoogleSignIn.getClient(appContext, signInOptions()).revokeAccess() }
         return oauthAccess
     }
@@ -154,11 +304,18 @@ internal class YouTubeDataService(context: Context) {
      * de-Googled devices, and anyone without a device Google account — it needs only a browser.
      */
     fun beginOAuthSignIn(inputId: String): Uri {
-        val id = YouTubeOAuth.checkClientId(inputId)
-        if (oauthClientId != id) {
+        // An empty field means "reconnect with the Client ID you already know", which is what the
+        // one-tap reconnect does. The Client ID is remembered in settings, so a reconnect never
+        // asks the listener to paste it again.
+        val remembered = oauthClientId
+        val id = YouTubeOAuth.checkClientId(inputId.trim().ifBlank { remembered })
+        if (remembered.isNotBlank() && remembered != id) {
+            // A different Cloud project's client ID cannot refresh the old project's tokens.
             secrets.remove("youtube_oauth_token")
-            settings.edit().putString("youtube_oauth_client_id", id).apply()
+            secrets.remove("youtube_data_account")
+            needsReconnect = false
         }
+        settings.edit().putString("youtube_oauth_client_id", id).apply()
         val verifier = Pkce.verifier()
         val state = Pkce.state()
         secrets.put("youtube_oauth_pending", JSONObject().apply {
@@ -206,11 +363,13 @@ internal class YouTubeDataService(context: Context) {
             "Google did not return a refresh token. Remove Soundtrail's access at " +
                 "myaccount.google.com/permissions and connect again."
         )
+        val now = System.currentTimeMillis()
         val token = YouTubeOAuthToken(
             access = parsed.access,
             refresh = refresh,
             clientId = oauthClientId,
-            expiresAt = System.currentTimeMillis() + parsed.expiresInSec.coerceAtLeast(60L) * 1_000L
+            expiresAt = now + parsed.expiresInSec.coerceAtLeast(60L) * 1_000L,
+            issuedAt = now
         )
         // Verify that the grant and the YouTube Data API configuration work before saving.
         apiGet(
@@ -225,6 +384,7 @@ internal class YouTubeDataService(context: Context) {
         cachedLibrary = null
         val label = channelLabel(token.access)
         secrets.put("youtube_data_account", label)
+        recordVerified(now)
         return label
     }
 
@@ -239,35 +399,108 @@ internal class YouTubeDataService(context: Context) {
     }.getOrNull() ?: "YouTube account"
 
     private suspend fun oauthAccessToken(forceRefresh: Boolean = false): String = oauthMutex.withLock {
-        val old = readOAuthToken()
-            ?: throw YouTubeDataException("Connect your YouTube account to search your playlists.")
-        if (!forceRefresh && old.expiresAt > System.currentTimeMillis() + 60_000) {
-            return@withLock old.access
-        }
-        val response = httpRequest(
-            GOOGLE_OAUTH_TOKEN_URL, "POST",
-            body = form(
-                "grant_type" to "refresh_token",
-                "refresh_token" to old.refresh,
-                "client_id" to old.clientId
-            )
+        val stored = readOAuthToken() ?: throw YouTubeDataException(
+            "Connect your YouTube account to search your playlists."
         )
-        if (response.code !in 200..299) {
-            if (response.code == 400 || response.code == 401) {
-                secrets.remove("youtube_oauth_token")
-                secrets.remove("youtube_data_account")
-                throw YouTubeDataException("YouTube session expired. Connect again.")
-            }
-            throw response.tokenError()
+        if (!forceRefresh && stored.expiresAt > System.currentTimeMillis() + 60_000) {
+            return@withLock stored.access
         }
+        refreshOAuthToken(stored)
+    }
+
+    /**
+     * Renews the access token, and only ever loses the saved connection when Google itself says
+     * the grant is gone.
+     *
+     * Rotation is write-ahead: the new refresh token is committed to disk *before* the caller is
+     * given the access token that belongs to it. If the process dies, or Android installs an
+     * app update while this is in flight, the device still holds a token Google accepts. The old
+     * code wrote asynchronously and cleared everything on any 400/401, which is what turned a
+     * transient failure (or a crash at the wrong moment) into "sign in to Google again".
+     */
+    private suspend fun refreshOAuthToken(stored: YouTubeOAuthToken): String {
+        var lastFailure = ""
+        for (attempt in 0..1) {
+            val response = try {
+                httpRequest(
+                    GOOGLE_OAUTH_TOKEN_URL, "POST",
+                    body = form(
+                        "grant_type" to "refresh_token",
+                        "refresh_token" to stored.refresh,
+                        "client_id" to stored.clientId
+                    )
+                )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // A timeout or a dropped socket: keep everything and try once more below.
+                null
+            }
+
+            if (response == null) {
+                lastFailure = "no connection"
+            } else if (response.code in 200..299) {
+                return saveRefreshed(stored, response)
+            } else {
+                val failure = OAuthFailure.from(response)
+                if (GoogleAuthPolicy.isPermanentGrantFailure(response.code, failure.error, failure.description)) {
+                    markNeedsReconnect(stored)
+                    throw YouTubeReconnectRequiredException(reconnectMessage(stored))
+                }
+                lastFailure = failure.description.ifBlank { "HTTP ${response.code}" }
+                // Rate limits and server errors are worth one more try; anything else is not.
+                if (response.code != 429 && response.code < 500) break
+            }
+            if (attempt == 0) delay(400)
+        }
+        unreachable = true
+        throw YouTubeDataException(
+            "Couldn't renew the YouTube connection just now (${lastFailure.ifBlank { "unavailable" }}). " +
+                "The saved sign-in is intact, so try again when you have a connection."
+        )
+    }
+
+    /** Commits a rotated token durably, then hands back the access token it belongs to. */
+    private fun saveRefreshed(stored: YouTubeOAuthToken, response: HttpResponse): String {
         val parsed = YouTubeOAuth.parseToken(response.body)
-        val refreshed = old.copy(
+        val now = System.currentTimeMillis()
+        val refreshed = stored.copy(
             access = parsed.access,
-            refresh = parsed.refresh ?: old.refresh,
-            expiresAt = System.currentTimeMillis() + parsed.expiresInSec.coerceAtLeast(60L) * 1_000L
+            refresh = parsed.refresh ?: stored.refresh,
+            expiresAt = now + parsed.expiresInSec.coerceAtLeast(60L) * 1_000L,
+            lastRefreshedAt = now,
+            refreshCount = stored.refreshCount + 1
         )
         saveOAuthToken(refreshed)
-        refreshed.access
+        recordVerified(now)
+        return refreshed.access
+    }
+
+    /**
+     * Google refused the grant. The tokens and the account label stay exactly where they are:
+     * the Client ID and the channel name are what make reconnecting one tap, and a future Google
+     * change (or a fixed Cloud project) can only be retried if the grant was not thrown away.
+     */
+    private fun markNeedsReconnect(stored: YouTubeOAuthToken) {
+        val now = System.currentTimeMillis()
+        statusPrefs.edit()
+            .putBoolean(KEY_NEEDS_RECONNECT, true)
+            .putBoolean(KEY_UNREACHABLE, false)
+            .putLong(KEY_FAILED_AT, now)
+            .putBoolean(KEY_TESTING_EXPIRY, GoogleAuthPolicy.testingExpirySuspected(stored.issuedAt, now))
+            .commit()
+    }
+
+    private fun reconnectMessage(stored: YouTubeOAuthToken): String {
+        val suspected = GoogleAuthPolicy.testingExpirySuspected(stored.issuedAt, System.currentTimeMillis())
+        return if (suspected) {
+            "Google expired this YouTube grant. Cloud projects whose OAuth consent screen is still in " +
+                "Testing lose grants after 7 days — publish the project to stop it repeating. " +
+                "Reconnect now: your Client ID is remembered, so it is one tap."
+        } else {
+            "Google no longer accepts this YouTube grant. Reconnect to continue — your Client ID is " +
+                "remembered, and nothing on this device was deleted."
+        }
     }
 
     private fun readOAuthToken(): YouTubeOAuthToken? {
@@ -275,21 +508,33 @@ internal class YouTubeDataService(context: Context) {
         return runCatching {
             val json = JSONObject(raw)
             YouTubeOAuthToken(
-                json.getString("access"), json.getString("refresh"),
-                json.getString("clientId"), json.getLong("expiresAt")
+                access = json.getString("access"),
+                refresh = json.getString("refresh"),
+                clientId = json.getString("clientId"),
+                expiresAt = json.getLong("expiresAt"),
+                issuedAt = json.optLong("issuedAt", 0L),
+                lastRefreshedAt = json.optLong("lastRefreshedAt", 0L),
+                refreshCount = json.optInt("refreshCount", 0)
             )
         }.getOrElse {
-            secrets.remove("youtube_oauth_token")
+            // The ciphertext decrypted but is not a token record. Keep it (it is the listener's
+            // data, and a fixed key store could still read it) and ask for a one-tap reconnect
+            // rather than appearing connected while doing nothing.
+            needsReconnect = true
             null
         }
     }
 
+    /** Durably commits the token record; the write completes before the caller uses the token. */
     private fun saveOAuthToken(token: YouTubeOAuthToken) {
         secrets.put("youtube_oauth_token", JSONObject().apply {
             put("access", token.access)
             put("refresh", token.refresh)
             put("clientId", token.clientId)
             put("expiresAt", token.expiresAt)
+            put("issuedAt", token.issuedAt)
+            put("lastRefreshedAt", token.lastRefreshedAt)
+            put("refreshCount", token.refreshCount)
         }.toString())
     }
 
@@ -318,7 +563,7 @@ internal class YouTubeDataService(context: Context) {
      * [MAX_IMPORT_ITEMS_PER_PLAYLIST] items per list to bound bandwidth and token use.
      */
     suspend fun importPlaylists(): List<YouTubeImportedPlaylist> {
-        if (!connected) throw YouTubeDataException("Connect a Google account to import your YouTube playlists.")
+        requireConnected("Connect a Google account to import your YouTube playlists.")
 
         // Only one method is ever connected; the browser-OAuth token refreshes itself.
         val useOAuth = oauthConnected
@@ -352,7 +597,7 @@ internal class YouTubeDataService(context: Context) {
      */
     suspend fun searchTracks(query: String): List<TrackResult> {
         if (query.isBlank()) return emptyList()
-        if (!connected) throw YouTubeDataException("Connect your YouTube account to search your playlists.")
+        requireConnected("Connect your YouTube account to search your playlists.")
 
         // Only one method is ever connected; the browser-OAuth token refreshes itself.
         val useOAuth = oauthConnected
@@ -520,6 +765,13 @@ internal class YouTubeDataService(context: Context) {
     }
 
     companion object {
+        /** Status keys for the plain-text connection record (never a token value). */
+        private const val KEY_NEEDS_RECONNECT = "needs_reconnect"
+        private const val KEY_UNREACHABLE = "unreachable"
+        private const val KEY_VERIFIED_AT = "verified_at"
+        private const val KEY_FAILED_AT = "failed_at"
+        private const val KEY_TESTING_EXPIRY = "testing_expiry"
+
         private const val PAGE_SIZE = "50"
         private const val MAX_PLAYLIST_PAGES = 4            // 4 * 50 = 200 playlists
         private const val MAX_ITEM_PAGES = 40               // 40 * 50 = 2000 items/playlist
@@ -623,8 +875,28 @@ internal object YouTubeApiParser {
 }
 
 private data class YouTubeOAuthToken(
-    val access: String, val refresh: String, val clientId: String, val expiresAt: Long
+    val access: String,
+    val refresh: String,
+    val clientId: String,
+    val expiresAt: Long,
+    /** When Google first issued this grant; used to spot its 7-day Testing-mode expiry. */
+    val issuedAt: Long = 0L,
+    val lastRefreshedAt: Long = 0L,
+    /** How many times the app renewed this grant by itself, shown on the Connect tab. */
+    val refreshCount: Int = 0
 )
+
+/** The error fields of a failed token-endpoint response. */
+internal data class OAuthFailure(val error: String?, val description: String?) {
+    companion object {
+        fun from(response: HttpResponse): OAuthFailure = runCatching {
+            val json = JSONObject(response.body)
+            val error = json.optString("error").takeIf(String::isNotBlank)
+            val description = json.optString("error_description").takeIf(String::isNotBlank)
+            OAuthFailure(error, description)
+        }.getOrElse { OAuthFailure(null, null) }
+    }
+}
 
 /** Pure browser-OAuth pieces (URL building, redirect checks, token parsing) kept testable. */
 internal object YouTubeOAuth {

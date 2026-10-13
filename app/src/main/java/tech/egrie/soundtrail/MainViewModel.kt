@@ -39,11 +39,24 @@ import tech.egrie.soundtrail.integrations.SongInfo
 import tech.egrie.soundtrail.integrations.SoundCloudService
 import tech.egrie.soundtrail.integrations.SpotifyService
 import tech.egrie.soundtrail.integrations.TrackResult
+import tech.egrie.soundtrail.integrations.GoogleAuthHealth
+import tech.egrie.soundtrail.integrations.GoogleAuthState
 import tech.egrie.soundtrail.integrations.YouTubeConsentRequiredException
 import tech.egrie.soundtrail.integrations.YouTubeDataService
 import tech.egrie.soundtrail.integrations.YouTubeImportedPlaylist
+import tech.egrie.soundtrail.integrations.YouTubeReconnectRequiredException
 import tech.egrie.soundtrail.integrations.YouTubeSearch
 import tech.egrie.soundtrail.location.DeviceLocation
+import tech.egrie.soundtrail.mood.MoodAiException
+import tech.egrie.soundtrail.mood.MoodAiService
+import tech.egrie.soundtrail.mood.MoodCandidate
+import tech.egrie.soundtrail.mood.MoodContext
+import tech.egrie.soundtrail.mood.MoodEngine
+import tech.egrie.soundtrail.mood.MoodMixTrack
+import tech.egrie.soundtrail.mood.MoodMixer
+import tech.egrie.soundtrail.mood.MoodProfile
+import tech.egrie.soundtrail.mood.MoodStore
+import tech.egrie.soundtrail.mood.TrackMoodTags
 import tech.egrie.soundtrail.playback.JellyfinPlayer
 import tech.egrie.soundtrail.sync.CloudSyncException
 import tech.egrie.soundtrail.sync.CloudSyncService
@@ -115,7 +128,39 @@ internal data class AppState(
     val youtubeAppInstalled: Boolean = false,
     val servicesLabel: String = "Checking services…",
     val gmsSignInAvailable: Boolean = false,
-    val microGReInstalled: Boolean = false
+    val microGReInstalled: Boolean = false,
+    /** The mood reader: what the listener typed, what it meant, and the mix it produced. */
+    val mood: MoodUiState = MoodUiState(),
+    /** Health of the saved Google connection; never contains a token value. */
+    val youtubeAuth: GoogleAuthHealth = GoogleAuthHealth(GoogleAuthState.NOT_CONNECTED)
+)
+
+/**
+ * Everything the Mood tab renders. Kept next to the screen's other state so the UI stays a pure
+ * function of [AppState].
+ */
+internal data class MoodUiState(
+    val text: String = "",
+    /** 0–100 "how much energy do you want", or null for "let the words decide". */
+    val energyHint: Int? = null,
+    val analyzing: Boolean = false,
+    val profile: MoodProfile? = null,
+    val mix: List<MoodMixTrack> = emptyList(),
+    val error: String? = null,
+    /** Index into [mix] while the mix is playing, or -1. */
+    val queueIndex: Int = -1,
+    val queuePlaying: Boolean = false,
+    val aiEnabled: Boolean = false,
+    val aiModel: String = MoodStore.DEFAULT_AI_MODEL,
+    val aiKeySet: Boolean = false,
+    val aiKeySaved: Boolean = false,
+    val enrichEnabled: Boolean = false,
+    val enriching: Boolean = false,
+    val enrichProgress: Int = 0,
+    val enrichTotal: Int = 0,
+    val librarySize: Int = 0,
+    val untaggedCount: Int = 0,
+    val savedPlaylistName: String? = null
 )
 
 internal data class JellyfinDownloadProgress(val receivedBytes: Long, val totalBytes: Long)
@@ -132,6 +177,9 @@ internal data class OfflineAudioItem(
     val detail: String,
     val sizeBytes: Long
 )
+
+/** How many TheAudioDB lookups one mood refinement may make; keeps it quick and polite. */
+private const val MAX_MOOD_TAG_LOOKUPS = 12
 
 internal data class PinInput(
     val title: String,
@@ -156,6 +204,14 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     private val apps = DeviceApps(application)
     private val cloudSync = CloudSyncService(application, pins, playlists, automations, files)
     private val youtubePrefs = application.getSharedPreferences("soundtrail_youtube", android.content.Context.MODE_PRIVATE)
+    private val moodPrefs = MoodStore(application)
+
+    // The optional AI reader, and the on-device engine that always backs it up.
+    private val moodAi = MoodAiService(moodPrefs)
+
+    /** The mix currently playing through the shared player, and where it is. */
+    private var moodQueue: List<MoodMixTrack> = emptyList()
+    private var moodQueueIndex = -1
 
     /**
      * The app's one player, shared with [tech.egrie.soundtrail.playback.PlaybackService] so
@@ -191,7 +247,16 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             syncConnected = cloudSync.connected,
             syncHasRecoveryKey = cloudSync.hasRecoveryKey,
             syncAutoEnabled = cloudSync.autoSyncEnabled,
-            syncLastSyncAt = cloudSync.lastSyncAt
+            syncLastSyncAt = cloudSync.lastSyncAt,
+            mood = MoodUiState(
+                text = moodPrefs.lastText,
+                energyHint = moodPrefs.lastEnergyHint,
+                aiEnabled = moodPrefs.aiEnabled,
+                aiModel = moodPrefs.aiModel,
+                aiKeySet = moodPrefs.aiKeySet,
+                enrichEnabled = moodPrefs.tagLookupEnabled
+            ),
+            youtubeAuth = youtubeData.authHealth()
         )
     )
     val state = _state.asStateFlow()
@@ -212,8 +277,25 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         if (youtubeData.connected && youtubePrefs.getBoolean("auto_import", true)) {
             viewModelScope.launch { runCatching { runYouTubeImport(showMessages = false) } }
         }
+        // Renew the saved Google access token in the background. Nothing here can sign the
+        // listener out: a failure only changes the status line on the Connect tab, and the tokens
+        // stay put for a one-tap reconnect.
+        if (youtubeData.oauthConnected) {
+            viewModelScope.launch {
+                youtubeData.warmUp()
+                _state.update { it.copy(youtubeAuth = youtubeData.authHealth()) }
+            }
+        }
         viewModelScope.launch {
             LocationWatchService.status.collect { live -> _state.update { it.copy(watchStatus = live) } }
+        }
+        // A mood mix plays on through the shared player: when a song ends, the next one starts.
+        viewModelScope.launch {
+            player.state.collect { current ->
+                if (current?.completed == true && moodQueue.isNotEmpty()) {
+                    playMixAt(moodQueueIndex + 1, announceEnd = true)
+                }
+            }
         }
     }
 
@@ -236,6 +318,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 youtubeOAuthClientId = youtubeData.oauthClientId,
                 youtubeAutoImportEnabled = youtubePrefs.getBoolean("auto_import", true),
                 youtubeLastImportedAt = youtubePrefs.getLong("last_imported_at", 0L),
+                youtubeAuth = youtubeData.authHealth(),
                 syncServer = cloudSync.serverUrl,
                 syncEffectiveServer = cloudSync.effectiveServerUrl,
                 syncUsingCustomServer = cloudSync.isUsingCustomServer,
@@ -577,6 +660,331 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         }
     }
 
+    // ----- Mood: how you feel in, music out -----
+
+    fun setMoodText(text: String) {
+        val trimmed = text.take(400)
+        moodPrefs.lastText = trimmed
+        _state.update { it.copy(mood = it.mood.copy(text = trimmed, error = null)) }
+    }
+
+    /** 0–100, or null for "let my words decide how much energy I want". */
+    fun setMoodEnergyHint(percent: Int?) {
+        val bounded = percent?.coerceIn(0, 100)
+        moodPrefs.lastEnergyHint = bounded
+        _state.update { it.copy(mood = it.mood.copy(energyHint = bounded)) }
+    }
+
+    /**
+     * Reads the mood and builds a mix from the listener's own library.
+     *
+     * When the optional AI model is switched on and has a key, it reads the description; every
+     * failure (no network, quota, a refusal, unreadable output) falls back to the on-device
+     * engine with a short explanation, so the feature never depends on the model being up.
+     * A quick-pick mood skips reading altogether.
+     */
+    fun analyzeMood(quickMoodId: String? = null) {
+        val mood = _state.value.mood
+        if (mood.analyzing) return
+        val context = moodContext()
+        _state.update { it.copy(mood = it.mood.copy(analyzing = true, error = null, savedPlaylistName = null)) }
+        viewModelScope.launch {
+            val profile = try {
+                when {
+                    quickMoodId != null ->
+                        MoodEngine.forMood(quickMoodId, context) ?: MoodEngine.analyze(mood.text, context)
+                    mood.aiEnabled && mood.aiKeySet -> moodAi.readMood(mood.text, context)
+                    else -> MoodEngine.analyze(mood.text, context)
+                }
+            } catch (e: MoodAiException) {
+                notify("${e.message} Reading it on the device instead.")
+                MoodEngine.analyze(mood.text, context)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                MoodEngine.analyze(mood.text, context)
+            }
+            val candidates = moodCandidates()
+            val mix = MoodMixer.build(profile, candidates)
+            val untagged = MoodMixer.untagged(candidates).size
+            _state.update {
+                it.copy(
+                    mood = it.mood.copy(
+                        analyzing = false,
+                        profile = profile,
+                        mix = mix,
+                        librarySize = candidates.size,
+                        untaggedCount = untagged,
+                        error = if (mix.isEmpty()) {
+                            "Nothing in your library yet — add a song or a link, or search YouTube Music below."
+                        } else null,
+                        queueIndex = -1,
+                        queuePlaying = false
+                    )
+                )
+            }
+            // With tag lookups switched on, improve the mix in the background rather than
+            // pretending the first pass knows more than it does.
+            if (moodPrefs.tagLookupEnabled && untagged > 0) improveMoodMix(quiet = true)
+        }
+    }
+
+    /** Plays the whole mix in order, reusing the same in-app player as everything else. */
+    fun playMoodMix() {
+        val mix = _state.value.mood.mix
+        if (mix.isEmpty()) {
+            notify("Build a mood mix first.")
+            return
+        }
+        moodQueue = mix
+        playMixAt(0, announceEnd = true)
+    }
+
+    /** Jumps to one song in the mix; playback continues through the rest of it. */
+    fun playMoodTrack(track: MoodMixTrack) {
+        if (moodQueue.isEmpty()) moodQueue = _state.value.mood.mix
+        val index = moodQueue.indexOfFirst { it.key == track.key }.takeIf { it >= 0 }
+            ?: run {
+                moodQueue = _state.value.mood.mix
+                moodQueue.indexOfFirst { it.key == track.key }
+            }
+        playMixAt(if (index >= 0) index else 0, announceEnd = true)
+    }
+
+    fun stopMoodMix() {
+        moodQueue = emptyList()
+        moodQueueIndex = -1
+        player.stop()
+        _state.update { it.copy(mood = it.mood.copy(queueIndex = -1, queuePlaying = false)) }
+    }
+
+    /**
+     * Saves the current mix as a playlist called "Mood · <label>". Re-saving the same mood
+     * replaces the songs the mix generated and keeps anything added by hand, so the playlist
+     * tracks how you feel today instead of growing forever.
+     */
+    fun saveMoodMixAsPlaylist() {
+        if (rejectMutationWhileSyncing()) return
+        val mood = _state.value.mood
+        val profile = mood.profile
+        if (profile == null || mood.mix.isEmpty()) {
+            notify("Build a mood mix first.")
+            return
+        }
+        val now = System.currentTimeMillis()
+        val name = "Mood \u00b7 ${profile.label}".take(80)
+        val existing = _state.value.playlists.firstOrNull { it.name == name }
+        val generated = mood.mix.map { track ->
+            PlaylistItem(
+                id = "mood:${profile.id}:${track.key.hashCode().toUInt().toString(16)}",
+                title = track.title,
+                artist = track.artist,
+                url = track.url,
+                provider = track.provider,
+                createdAt = now
+            )
+        }
+        val handAdded = existing?.items.orEmpty().filterNot { it.id.startsWith("mood:") }
+        val playlist = Playlist(
+            id = existing?.id ?: "mood-pl:${profile.id}",
+            name = name,
+            items = handAdded + generated,
+            createdAt = existing?.createdAt ?: now
+        )
+        val updated = (_state.value.playlists.filterNot { it.id == playlist.id } + playlist)
+            .sortedBy { it.createdAt }
+        playlists.replaceAll(updated)
+        _state.update {
+            it.copy(playlists = updated, mood = it.mood.copy(savedPlaylistName = name))
+        }
+        recordCloudSyncChanges()
+        notify("\u201C$name\u201D saved with ${generated.size} songs.")
+    }
+
+    /**
+     * Learns genre/mood tags for the songs the app knows nothing about, using TheAudioDB's free
+     * metadata API (no account, nothing stored about who asked). Capped per run, sequential, and
+     * entirely opt-in: the switch in the Mood tab is what decides whether artist and title ever
+     * leave the device.
+     */
+    fun improveMoodMix(quiet: Boolean = false) {
+        val mood = _state.value.mood
+        if (mood.enriching) return
+        val candidates = moodCandidates()
+        val targets = MoodMixer.untagged(candidates)
+            .filter { it.artist.isNotBlank() && !it.artist.equals("Unknown artist", ignoreCase = true) }
+            .take(MAX_MOOD_TAG_LOOKUPS)
+        if (targets.isEmpty()) {
+            if (!quiet) notify("Every song the mix looked at already has sound tags.")
+            return
+        }
+        _state.update {
+            it.copy(mood = it.mood.copy(enriching = true, enrichProgress = 0, enrichTotal = targets.size))
+        }
+        viewModelScope.launch {
+            val learned = mutableMapOf<String, TrackMoodTags.Tags>()
+            targets.forEach { candidate ->
+                runCatching {
+                    val info = audioDb.searchTracks(candidate.artist, candidate.title).firstOrNull()
+                    if (info != null) {
+                        val tags = TrackMoodTags.fromMetadata(info.genre, info.mood)
+                        if (!tags.isEmpty) learned[MoodStore.keyOf(candidate)] = tags
+                    }
+                }
+                _state.update { it.copy(mood = it.mood.copy(enrichProgress = it.mood.enrichProgress + 1)) }
+            }
+            if (learned.isNotEmpty()) moodPrefs.saveTags(learned)
+            _state.update { it.copy(mood = it.mood.copy(enriching = false, enrichEnabled = true)) }
+            // Re-score with what was just learned, so the mix visibly improves.
+            val profile = _state.value.mood.profile
+            if (profile != null) {
+                val refreshed = moodCandidates()
+                _state.update {
+                    it.copy(
+                        mood = it.mood.copy(
+                            mix = MoodMixer.build(profile, refreshed),
+                            untaggedCount = MoodMixer.untagged(refreshed).size,
+                            librarySize = refreshed.size
+                        )
+                    )
+                }
+            }
+            if (!quiet || learned.isNotEmpty()) {
+                notify(
+                    if (learned.isEmpty()) "No sound tags found for those songs — titles alone still count."
+                    else "Learned sound tags for ${learned.size} song${if (learned.size == 1) "" else "s"}."
+                )
+            }
+        }
+    }
+
+    fun setMoodTagLookup(enabled: Boolean) {
+        moodPrefs.tagLookupEnabled = enabled
+        _state.update { it.copy(mood = it.mood.copy(enrichEnabled = enabled)) }
+        notify(
+            if (enabled) "Tag lookups on: artist and title go to TheAudioDB's free metadata API when a mix is built."
+            else "Tag lookups off. Mixes use what is already on this device."
+        )
+    }
+
+    fun setMoodAiEnabled(enabled: Boolean) {
+        moodPrefs.aiEnabled = enabled
+        _state.update { it.copy(mood = it.mood.copy(aiEnabled = enabled)) }
+        notify(
+            if (enabled && !moodPrefs.aiKeySet) "Add an API key below, or the on-device engine will read your mood."
+            else if (enabled) "AI mood reading on. Only your mood description leaves the device."
+            else "AI mood reading off. The on-device engine still works offline."
+        )
+    }
+
+    fun saveMoodAiKey(key: String) {
+        moodPrefs.saveAiKey(key)
+        moodPrefs.aiModel = _state.value.mood.aiModel
+        val saved = moodPrefs.aiKeySet
+        _state.update { it.copy(mood = it.mood.copy(aiKeySet = saved, aiKeySaved = saved)) }
+        if (saved) {
+            notify("API key saved, encrypted with this device's key store. Test it with a mood reading.")
+            viewModelScope.launch {
+                runCatching { moodAi.testKey() }
+                    .onSuccess { notify(it) }
+                    .onFailure { notify(it.message ?: "The AI model could not be reached with that key.") }
+            }
+        } else {
+            notify("Key cleared. The on-device engine reads your mood.")
+        }
+    }
+
+    fun setMoodAiModel(model: String) {
+        moodPrefs.aiModel = model
+        _state.update { it.copy(mood = it.mood.copy(aiModel = moodPrefs.aiModel)) }
+    }
+
+    fun clearMoodAiKey() {
+        moodPrefs.clearAiKey()
+        _state.update { it.copy(mood = it.mood.copy(aiKeySet = false, aiKeySaved = false)) }
+        notify("API key removed from this device.")
+    }
+
+    /** Hands the current mood's search phrases to YouTube Music; never needs a Google sign-in. */
+    fun openMoodInYouTubeMusic(): Boolean {
+        val profile = _state.value.mood.profile
+        val query = profile?.query.orEmpty().ifBlank { _state.value.mood.text }
+        return apps.searchYouTubeMusicForMood(query)
+    }
+
+    /** Every song the mood engine can choose from: pins first, then each playlist. */
+    private fun moodCandidates(): List<MoodCandidate> {
+        val seen = HashSet<String>()
+        val candidates = mutableListOf<MoodCandidate>()
+        fun add(id: String, title: String, artist: String, url: String?, origin: String, createdAt: Long) {
+            if (title.isBlank()) return
+            val cacheKey = url ?: "text:" + MoodEngine.normalize("$title $artist")
+            if (!seen.add(cacheKey)) return
+            val learned = moodPrefs.tags(cacheKey)
+            candidates += MoodCandidate(
+                id = id,
+                title = title,
+                artist = artist,
+                url = url,
+                provider = url?.let { MusicLinkParser.parse(it)?.provider },
+                origin = origin,
+                tags = learned?.tags.orEmpty(),
+                valence = learned?.valence,
+                energy = learned?.energy,
+                tempo = learned?.tempo,
+                tagSource = learned?.origin,
+                createdAt = createdAt
+            )
+        }
+        _state.value.pins.forEach { pin ->
+            add(pin.id, pin.title, pin.artist, pin.url, "Pin", pin.createdAt)
+        }
+        _state.value.playlists.forEach { playlist ->
+            playlist.items.forEach { item ->
+                add(item.id, item.title, item.artist, item.url, playlist.name, item.createdAt)
+            }
+        }
+        return candidates
+    }
+
+    /** Time of day and (when the watch is on) motion, for the mood engine's gentle tilts. */
+    private fun moodContext(): MoodContext {
+        val watch = LocationWatchService.status.value
+        return MoodContext(
+            hourOfDay = runCatching { java.time.LocalTime.now().hour }.getOrNull(),
+            motion = if (watch.running) watch.motion.label else null,
+            energyHint = _state.value.mood.energyHint?.let { it / 100.0 }
+        )
+    }
+
+    /**
+     * Plays the mix from [index] onwards, skipping songs that have no playable link, and stops
+     * when the mix runs out. Every entry goes through the same player as a tap on a pin would.
+     */
+    private fun playMixAt(index: Int, announceEnd: Boolean) {
+        var cursor = index
+        while (cursor in moodQueue.indices) {
+            val track = moodQueue[cursor]
+            val link = track.url?.let(MusicLinkParser::parse)
+            if (link != null) {
+                moodQueueIndex = cursor
+                _state.update { it.copy(mood = it.mood.copy(queueIndex = cursor, queuePlaying = true)) }
+                if (link.provider == MusicProvider.JELLYFIN) {
+                    playJellyfin(link, track.title, track.artist)
+                } else {
+                    playLink(link, track.title, track.artist, track.key)
+                }
+                return
+            }
+            cursor += 1
+        }
+        val wasPlaying = moodQueue.isNotEmpty()
+        moodQueue = emptyList()
+        moodQueueIndex = -1
+        _state.update { it.copy(mood = it.mood.copy(queueIndex = -1, queuePlaying = false)) }
+        if (wasPlaying && announceEnd) notify("That's the end of the mood mix.")
+    }
+
     /** A link to the item in Jellyfin's own web client, for sharing with people on that server. */
     fun jellyfinWebUrl(link: MusicLink): String? {
         val itemId = JellyfinRef.itemId(link.url) ?: return null
@@ -643,14 +1051,19 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                     it.copy(
                         connectingYouTubeData = false,
                         youtubeDataConnected = youtubeData.connected,
-                        youtubeDataAccount = youtubeData.accountName
+                        youtubeDataAccount = youtubeData.accountName,
+                        youtubeAuth = youtubeData.authHealth()
                     )
                 }
             }
         }
     }
 
-    /** Starts the browser OAuth flow with the user's own Desktop client ID (no GMS needed). */
+    /**
+     * Starts the browser OAuth flow with the user's own Desktop client ID (no GMS needed).
+     * A blank [clientId] means "reconnect with the Client ID this device already remembers",
+     * which is what the Connect tab's one-tap reconnect uses — the ID is never re-typed.
+     */
     fun beginYouTubeOAuth(clientId: String): Uri {
         val uri = youtubeData.beginOAuthSignIn(clientId)
         _state.update { it.copy(youtubeOAuthClientId = youtubeData.oauthClientId) }
@@ -671,12 +1084,23 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                         youtubeDataConnected = true,
                         youtubeDataAccount = label,
                         youtubeOAuthClientId = youtubeData.oauthClientId,
+                        youtubeAuth = youtubeData.authHealth(),
                         youtubeAutoImportEnabled = youtubePrefs.getBoolean("auto_import", true),
                         youtubeLastImportedAt = youtubePrefs.getLong("last_imported_at", 0L)
                     )
                 }
                 notify("YouTube read-only access connected. Playlists will import automatically if that option is on.")
                 maybeAutoImportYouTube()
+            } catch (e: YouTubeReconnectRequiredException) {
+                notify(e.message ?: "Google no longer accepts this connection. Reconnect to continue.")
+                _state.update {
+                    it.copy(
+                        youtubeDataConnected = youtubeData.connected,
+                        youtubeDataAccount = youtubeData.accountName,
+                        youtubeOAuthClientId = youtubeData.oauthClientId,
+                        youtubeAuth = youtubeData.authHealth()
+                    )
+                }
             } catch (e: Exception) {
                 _state.update {
                     it.copy(
@@ -692,7 +1116,8 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                         connectingYouTubeOAuth = false,
                         youtubeDataConnected = youtubeData.connected,
                         youtubeDataAccount = youtubeData.accountName,
-                        youtubeOAuthClientId = youtubeData.oauthClientId
+                        youtubeOAuthClientId = youtubeData.oauthClientId,
+                        youtubeAuth = youtubeData.authHealth()
                     )
                 }
             }
@@ -708,6 +1133,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 youtubeDataConnected = false,
                 youtubeDataAccount = null,
                 youtubeImporting = false,
+                youtubeAuth = youtubeData.authHealth(),
                 results = if (it.searchProvider == SearchProvider.YOUTUBE_DATA) emptyList() else it.results,
                 searchError = null
             )

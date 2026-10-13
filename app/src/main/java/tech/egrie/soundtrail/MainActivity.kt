@@ -35,6 +35,7 @@ import tech.egrie.soundtrail.integrations.YouTubeDataService
 import tech.egrie.soundtrail.integrations.YouTubeSearch
 import tech.egrie.soundtrail.location.DeviceLocation
 import tech.egrie.soundtrail.ui.ListsActions
+import tech.egrie.soundtrail.ui.MoodActions
 import tech.egrie.soundtrail.ui.Palette
 import tech.egrie.soundtrail.ui.PinDraft
 import tech.egrie.soundtrail.ui.SoundtrailApp
@@ -195,6 +196,27 @@ class MainActivity : ComponentActivity() {
                         },
                         onSaveRule = { rule -> model.saveAutomation(rule) },
                         onDeleteRule = model::deleteAutomation
+                    ),
+                    mood = MoodActions(
+                        onTextChange = model::setMoodText,
+                        onEnergyHint = model::setMoodEnergyHint,
+                        onAnalyze = { model.analyzeMood() },
+                        onQuickMood = { moodId -> model.analyzeMood(moodId) },
+                        onPlayMix = model::playMoodMix,
+                        onPlayTrack = model::playMoodTrack,
+                        onStopMix = model::stopMoodMix,
+                        onSaveMix = model::saveMoodMixAsPlaylist,
+                        onImproveTags = { model.improveMoodMix() },
+                        onSetTagLookup = model::setMoodTagLookup,
+                        onSetAiEnabled = model::setMoodAiEnabled,
+                        onSetAiModel = model::setMoodAiModel,
+                        onSaveAiKey = model::saveMoodAiKey,
+                        onClearAiKey = model::clearMoodAiKey,
+                        onOpenInYouTubeMusic = {
+                            if (!model.openMoodInYouTubeMusic()) {
+                                model.notify("No YouTube Music app or browser found.")
+                            }
+                        }
                     ),
                     onLocate = onLocate,
                     onSearch = model::search,

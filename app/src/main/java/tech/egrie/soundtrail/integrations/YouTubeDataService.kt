@@ -447,7 +447,8 @@ internal class YouTubeDataService(context: Context) {
                     markNeedsReconnect(stored)
                     throw YouTubeReconnectRequiredException(reconnectMessage(stored))
                 }
-                lastFailure = failure.description.ifBlank { "HTTP ${response.code}" }
+                lastFailure = failure.description?.takeIf { it.isNotBlank() }
+                    ?: "HTTP ${response.code}"
                 // Rate limits and server errors are worth one more try; anything else is not.
                 if (response.code != 429 && response.code < 500) break
             }

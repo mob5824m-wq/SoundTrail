@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Keep the complete pin and note inside the adaptive-icon safe area so launcher masks do not crop it. -->
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.8"
+        android:scaleY="0.8">
+        <path
+            android:fillColor="#D9F67A"
+            android:pathData="M54,17C35.8,17 21,31.8 21,50c0,22.6 33,43 33,43s33,-20.4 33,-43C87,31.8 72.2,17 54,17z" />
+        <path
+            android:fillColor="#101114"
+            android:pathData="M54,32a18,18 0,1 0,0 36a18,18 0,1 0,0 -36" />
+        <path
+            android:fillColor="#D9F67A"
+            android:pathData="M59,39v18.2c-1.5,-0.8 -3.3,-1.1 -5.1,-0.7 -3.7,0.8 -6.2,3.7 -5.6,6.5 1,10.3 6.5,7.2 2.7,-1.5 3.2,-3.9 3.2,-6.4V47l10,-2.2v9.1c-1.6,-0.8 -3.4,-1.1 -5.2,-0.7 -3.6,0.8 -6.2,3.7 -5.6,6.5 1.1,10.3 6.6,7.2 2.7,-1.5 3.2,-3.9 3.2,-6.4V36z" />
+    </group>
+</vector>

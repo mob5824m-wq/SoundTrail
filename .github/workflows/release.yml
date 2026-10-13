@@ -1,9 +1,10 @@
 name: Release on merge
 
-# Every pull request merged into main bumps the patch version (versionCode +1,
+# The first release uses the version already configured in Gradle (v1.0.9 here).
+# After that tag exists, each merged pull request bumps the patch (versionCode +1,
 # versionName +0.0.1) and publishes a release with generated notes and the debug APK.
-# This cannot loop: the bump is pushed by the workflow token, and pushes made with that
-# token do not start further workflow runs.
+# This cannot loop: version bumps are pushed by the workflow token, and pushes made
+# with that token do not start further workflow runs.
 on:
   pull_request:
     types: [closed]
@@ -22,39 +23,52 @@ jobs:
   release:
     # Closing a pull request without merging must not release anything.
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
           fetch-tags: true
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+      - uses: gradle/actions/setup-gradle@v6
 
-      - name: Bump the patch version
+      # Keep the release gate complete even if repository branch rules are relaxed.
+      - name: Run server API tests
+        run: python -m unittest discover -s server -v
+
+      - name: Select the release version
         id: bump
         run: python3 .github/scripts/bump_version.py
 
-      # Built before anything is pushed: a broken build must leave main untouched.
-      - name: Build the release APK
-        run: ./gradlew :app:assembleDebug --stacktrace
+      # Tests and APK build finish before anything is pushed, so a failure leaves main untouched.
+      - name: Test and build the release APK
+        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug --stacktrace
 
-      - name: Commit, tag, and push the bump
+      - name: Commit, tag, and push the release version
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "Bump version to ${{ steps.bump.outputs.version }} [skip ci]"
-          git tag "v${{ steps.bump.outputs.version }}"
-          if ! git push origin HEAD:main; then
-            echo "::error title=Cannot push the version bump::Direct pushes to main were rejected. Allow GitHub Actions to bypass the branch protection rule for main (Settings, Branches), or push the version bump yourself."
-            exit 1
+          if git diff --quiet -- app/build.gradle.kts; then
+            echo "Using existing version $VERSION; no version bump commit is needed."
+          else
+            git commit -am "Bump version to $VERSION [skip ci]"
+            if ! git push origin HEAD:main; then
+              echo "::error title=Cannot push the version bump::Direct pushes to main were rejected. Allow GitHub Actions to bypass the branch protection rule for main (Settings, Branches), or push the version bump yourself."
+              exit 1
+            fi
           fi
-          git push origin "v${{ steps.bump.outputs.version }}"
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
 
       - name: Publish the release
         env:
@@ -66,7 +80,7 @@ jobs:
         run: |
           set -euo pipefail
           cp app/build/outputs/apk/debug/app-debug.apk "$ASSET"
-          notes="Soundtrail $VERSION — version bumped and released automatically when the pull request was merged. The attached APK is the debug build, signed with the shared debug key committed at keystore/soundtrail-debug.p12, so it installs as an update over earlier releases (an APK installed before that key existed needs one uninstall first — see the README)."
+          notes="Soundtrail $VERSION — published automatically after the release checks. The first release uses the configured version; later releases increment the patch. Earlier releases (v1.0.1–v1.0.8) remain at https://github.com/egrie-tech/Geotagged-Music-App/releases. The attached APK is the debug build, signed with the shared debug key committed at keystore/soundtrail-debug.p12, so it installs as an update over earlier releases (an APK installed before that key existed needs one uninstall first — see the README)."
           if [ -n "${PR_NUMBER:-}" ]; then
             notes="$notes"$'\n\n'"Merged: #$PR_NUMBER $PR_TITLE"
           fi

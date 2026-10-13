@@ -206,7 +206,7 @@ class SoundCloudService(context: Context) {
             }
             val chosen = progressiveUrl ?: hlsUrl ?: return null
             // This transcoding url needs to be fetched with auth to get the actual stream url
-            val resolved = JSONObject(apiGet(chosen.removePrefix(\"$API_BASE/\")))
+            val resolved = JSONObject(apiGet(chosen.removePrefix("$API_BASE/")))
             resolved.optString("url").takeIf { it.isNotBlank() }
         } catch (_: Exception) {
             null
@@ -220,8 +220,8 @@ class SoundCloudService(context: Context) {
             for (i in 0 until arr.length()) {
                 val t = arr.optJSONObject(i) ?: continue
                 val format = t.optJSONObject("format")
-                if (format?.optString("protocol") == \"progressive\") {
-                    t.optString(\"url\").takeIf { it.isNotBlank() }?.let { return it }
+                if (format?.optString("protocol") == "progressive") {
+                    t.optString("url").takeIf { it.isNotBlank() }?.let { return it }
                 }
             }
         }

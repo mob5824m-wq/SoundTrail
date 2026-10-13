@@ -157,11 +157,11 @@ It is a one-off. Every APK built from this repository — locally or by CI — i
 
 ## Releases
 
-Every pull request **merged into `main`** bumps the version by one patch and publishes a release. The `Release on merge` workflow (`.github/workflows/release.yml`):
+The first release published from this repository is **v1.0.9** (`versionCode` 10). Releases published before the repository move (v1.0.1–v1.0.8) remain at the [Geotagged-Music-App releases page](https://github.com/egrie-tech/Geotagged-Music-App/releases). The `Release on merge` workflow (`.github/workflows/release.yml`) uses the configured version for its first untagged release; after that tag exists, each merged pull request or manual run increments the patch version and `versionCode`:
 
-1. adds 1 to `versionCode` and `0.0.1` to `versionName` in `app/build.gradle.kts` (via `.github/scripts/bump_version.py`, which also skips any patch whose `vX.Y.Z` tag already exists),
-2. builds `:app:assembleDebug` **before** pushing anything, so a broken build leaves `main` untouched,
-3. commits `Bump version to X.Y.Z [skip ci]` to `main`, tags `vX.Y.Z`, and pushes both,
+1. selects the current version for its first release, then adds 1 to `versionCode` and `0.0.1` to `versionName` on later releases (via `.github/scripts/bump_version.py`, which skips patches whose `vX.Y.Z` tags already exist),
+2. runs the server API tests and Android unit tests, then builds `:app:assembleDebug` **before** pushing anything, so a failed check leaves `main` untouched,
+3. commits a version bump when needed, tags `vX.Y.Z`, and pushes the commit (if any) and tag,
 4. creates the GitHub Release `Soundtrail X.Y.Z` with generated notes (the merged pull requests) and the debug APK attached as `soundtrail-X.Y.Z-debug.apk`.
 
 Details worth knowing:
@@ -169,10 +169,11 @@ Details worth knowing:
 - **It cannot loop.** The bump is pushed with the workflow's own token, and pushes made with `GITHUB_TOKEN` do not start further workflow runs.
 - **Closing a pull request without merging does nothing**; the job is skipped unless `pull_request.merged` is true. A pull request merged into a branch other than `main` is ignored too.
 - **Concurrent merges are serialized** by a `concurrency` group, so two merges cannot claim the same version number.
-- **Branch protection:** the workflow needs to be allowed to push to `main`. If a rule requires pull requests for `main`, allow the GitHub Actions bot to bypass it (Settings → Branches → the `main` rule), otherwise the job fails with a message saying exactly that. The workflow requests `permissions: contents: write` for the same reason.
-- **Manual runs:** the workflow also has `workflow_dispatch`, so *Actions → Release on merge → Run workflow* bumps and releases on demand (it always operates on `main`).
+- **Branch protection:** releases after v1.0.9 need the workflow to push its version-bump commit to `main`. If a rule requires pull requests for `main`, allow the GitHub Actions bot to bypass it (Settings → Branches → the `main` rule), otherwise the job fails with a message saying exactly that. The workflow requests `permissions: contents: write` for the same reason.
+- **Manual runs:** the workflow also has `workflow_dispatch`, so *Actions → Release on merge → Run workflow* publishes the first untagged version or increments and releases the next patch (it always operates on `main`).
 - The attached APK is the **debug** build, signed with the shared debug key committed at `keystore/soundtrail-debug.p12`, so each release installs as a normal update over the previous one (the first install over an APK built before that key existed still needs one uninstall — see *Updating an installed build* above). It is **not** a Play-ready build: that key is public and no release signing is configured here.
 - The `Android build` workflow checks the APK it built against the committed keystore and fails if the signing certificate does not match, so the "updates install in place" guarantee cannot regress silently.
+- The `Server tests` workflow runs the API suite on Python 3.10 and 3.14 for pushes and pull requests; the release workflow also reruns the suite against `main` before changing the version or publishing.
 - CI note: because the bump is pushed with `GITHUB_TOKEN`, the separate `Android build` workflow does not re-run for that commit — the release workflow compiles the same code itself.
 
 ## Permissions, and why
@@ -215,6 +216,6 @@ Details worth knowing:
 python3 -m unittest discover -s server -v
 ```
 
-Unit tests cover the existing URL/provider, backup, map, playlist, and automation behavior plus Jellyfin download validation, YouTube video-ID parsing, YouTube browser-OAuth URL/redirect/token handling, recovery-key encoding, AES-GCM event encryption, tamper rejection, deterministic tombstone merges, and sync-payload handling (including keeping local audio filenames out of ciphertext). Python `unittest` coverage exercises account/session isolation and deletion, opaque event pagination/idempotency, checkpoint compaction, rate limits including trusted-proxy IP handling, and authorized audio-route validation/stream cleanup. The GitHub Actions Android workflow runs the Android build and uploads a debug APK.
+Unit tests cover the existing URL/provider, backup, map, playlist, and automation behavior plus Jellyfin download validation, YouTube video-ID parsing, YouTube browser-OAuth URL/redirect/token handling, recovery-key encoding, AES-GCM event encryption, tamper rejection, deterministic tombstone merges, and sync-payload handling (including keeping local audio filenames out of ciphertext). Python `unittest` coverage exercises account/session isolation and deletion, opaque event pagination/idempotency, checkpoint compaction, rate limits including trusted-proxy IP handling, and authorized audio-route validation/stream cleanup. GitHub Actions runs the Android build and uploads a debug APK, plus the server API tests across Python 3.10 and 3.14.
 
 Documentation: [YouTube Data API v3](https://developers.google.com/youtube/v3) · [Google OAuth for Android](https://developers.google.com/identity/sign-in/android/start-integrating) · [Google OAuth for installed apps](https://developers.google.com/identity/protocols/oauth2/native-app) · [Google Cloud Console](https://console.cloud.google.com/) · [Jellyfin API](https://api.jellyfin.org/) · [Jellyfin authentication](https://jellyfin.org/docs/general/administration/configuration/#security) · [Spotify PKCE](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow) · [SoundCloud API guide](https://developers.soundcloud.com/docs/api/guide) · [SoundCloud app registration](https://developers.soundcloud.com/docs/api/register-app) · [TheAudioDB free music API](https://www.theaudiodb.com/free_music_api) · [Foreground service types](https://developer.android.com/about/versions/14/changes/fgs-types-required) · [microG](https://microg.org/) · [OpenStreetMap](https://www.openstreetmap.org/copyright) · [CARTO map tiles](https://carto.com/developers/maps/)

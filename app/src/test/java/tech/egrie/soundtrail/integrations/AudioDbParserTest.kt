@@ -26,7 +26,7 @@ class AudioDbParserTest {
         assertEquals("Pop-Rock", song.genre)
         assertEquals("Relaxed", song.mood)
         assertEquals("https://open.spotify.com/track/3AJwUDP919kvQ9QcozQPxg", song.spotifyUrl)
-        assertEquals("https://music.youtube.com/watch?v=yKNxeF4KMsY", song.youtubeUrl)
+        assertEquals("https://www.youtube.com/watch?v=yKNxeF4KMsY", song.youtubeUrl)
         assertEquals("https://open.spotify.com/track/3AJwUDP919kvQ9QcozQPxg", song.url)
     }
 
@@ -61,8 +61,8 @@ class AudioDbParserTest {
         """.trimIndent()
         val song = AudioDbParser.parse(payload).single()
         assertNull(song.spotifyUrl)
-        assertEquals("https://music.youtube.com/watch?v=dQw4w9WgXcQ", song.youtubeUrl)
-        assertEquals("https://music.youtube.com/watch?v=dQw4w9WgXcQ", song.url)
+        assertEquals("https://www.youtube.com/watch?v=dQw4w9WgXcQ", song.youtubeUrl)
+        assertEquals("https://www.youtube.com/watch?v=dQw4w9WgXcQ", song.url)
     }
 
     @Test fun `duplicates collapse and the list stays short`() {

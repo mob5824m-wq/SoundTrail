@@ -24,7 +24,12 @@ internal data class AssistantHit(
     /** The same song in the YouTube Music app, when there is such a link. */
     val musicUrl: String? = null,
     /** The name of the attached offline copy, when the stored song has one. */
-    val localFile: String? = null
+    val localFile: String? = null,
+    /**
+     * A stream the search already resolved — Spotify's 30-second preview, a SoundCloud stream —
+     * so playing this row does not have to ask the service for it a second time.
+     */
+    val streamUrl: String? = null
 ) {
     /** True when the player has something to work with. */
     val playable: Boolean

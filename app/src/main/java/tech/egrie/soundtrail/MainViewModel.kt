@@ -56,6 +56,7 @@ import tech.egrie.soundtrail.integrations.YouTubeSearch
 import tech.egrie.soundtrail.location.DeviceLocation
 import tech.egrie.soundtrail.mood.DEFAULT_OLLAMA_MODEL
 import tech.egrie.soundtrail.mood.MoodAiException
+import tech.egrie.soundtrail.mood.MoodAiOutcome
 import tech.egrie.soundtrail.mood.MoodAiProvider
 import tech.egrie.soundtrail.mood.MoodAiService
 import tech.egrie.soundtrail.mood.MoodAiUrls
@@ -64,8 +65,11 @@ import tech.egrie.soundtrail.mood.MoodContext
 import tech.egrie.soundtrail.mood.MoodEngine
 import tech.egrie.soundtrail.mood.MoodMixTrack
 import tech.egrie.soundtrail.mood.MoodMixer
+import tech.egrie.soundtrail.mood.MoodPickResolver
 import tech.egrie.soundtrail.mood.MoodProfile
+import tech.egrie.soundtrail.mood.MoodPickSearch
 import tech.egrie.soundtrail.mood.MoodStore
+import tech.egrie.soundtrail.mood.MoodSearchTarget
 import tech.egrie.soundtrail.mood.TrackMoodTags
 import tech.egrie.soundtrail.playback.JellyfinPlayer
 import tech.egrie.soundtrail.playback.LibraryMedia
@@ -191,13 +195,37 @@ internal data class MoodUiState(
     val queueIndex: Int = -1,
     val queuePlaying: Boolean = false,
     val aiEnabled: Boolean = false,
-    /** Where a reading comes from when [aiEnabled]: on-device, Ollama, or a hosted model. */
+    /**
+     * Where a reading comes from when [aiEnabled]: on-device, Ollama, an OpenAI-compatible
+     * endpoint, or the fixed hosted model.
+     */
     val aiProvider: MoodAiProvider = MoodAiProvider.ON_DEVICE,
     val aiModel: String = MoodStore.DEFAULT_AI_MODEL,
     val ollamaUrl: String = "",
     val ollamaModel: String = DEFAULT_OLLAMA_MODEL,
     /** Models the listener's Ollama server reported on the last check. */
     val ollamaModels: List<String> = emptyList(),
+    /** An OpenAI-compatible endpoint, as typed. */
+    val openAiUrl: String = "",
+    /** The model asked for there; blank until the listener names one. */
+    val openAiModel: String = "",
+    /** Models that endpoint listed on the last check. */
+    val openAiModels: List<String> = emptyList(),
+    /**
+     * What the endpoint calls those models, when it gave names of its own — Arena lists the model
+     * a request must ask for (`coding-router-preview`) as `(Arena) Coding Router`. Display only:
+     * the id is what gets sent.
+     */
+    val openAiModelLabels: Map<String, String> = emptyMap(),
+    /** Where a reading goes looking for music: the listener's own library, or a provider. */
+    val searchTarget: MoodSearchTarget = MoodSearchTarget.default,
+    /**
+     * The songs the last reading turned up, resolved to something real: a stored song, a search
+     * result with a link, or a row that opens the app that owns it.
+     */
+    val found: List<AssistantHit> = emptyList(),
+    /** A sentence about the search: what it could not match, or why it found nothing. */
+    val foundNote: String? = null,
     /** True while a connection test or a model check is running. */
     val aiBusy: Boolean = false,
     /** A sentence from the last test, shown under the provider picker. */
@@ -268,6 +296,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
      * different song.
      */
     private val hub = PlaybackHub.shared(application)
+    private val moodPicks = MoodPickResolver(youtubeData, jellyfin, spotify, soundcloud)
 
     /**
      * The app's one player, shared with [tech.egrie.soundtrail.playback.PlaybackService] so
@@ -315,6 +344,9 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 aiModel = moodPrefs.aiModel,
                 ollamaUrl = moodPrefs.ollamaUrl,
                 ollamaModel = moodPrefs.ollamaModel,
+                openAiUrl = moodPrefs.openAiUrl,
+                openAiModel = moodPrefs.openAiModel,
+                searchTarget = moodPrefs.searchTarget,
                 aiKeySet = moodPrefs.keySet(moodPrefs.aiProvider),
                 aiReady = moodAi.configured,
                 enrichEnabled = moodPrefs.tagLookupEnabled
@@ -684,6 +716,28 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             answer("Say or type what you would like to hear.", emptyList(), said)
             return
         }
+        // "find music on Spotify that fits: rainy sunday" is the request the Mood tab builds for
+        // a model, so the same sentence typed or spoken here goes the same way: the service it
+        // names becomes the reading's target, and the words after "that fits" become the mood —
+        // rather than the whole sentence being searched for as if it were a song title.
+        AssistantParser.findMusic(said)?.let { find ->
+            find.provider?.let { provider ->
+                val target = MoodSearchTarget.forProvider(provider)
+                if (target != _state.value.mood.searchTarget) {
+                    applyMoodSearchTarget(target, announce = false)
+                }
+            }
+            setMoodText(find.text)
+            _state.update {
+                it.copy(
+                    assistant = it.assistant.copy(
+                        input = "", question = said, hits = emptyList(), reply = null
+                    )
+                )
+            }
+            analyzeMood(announce = true)
+            return
+        }
         val request = AssistantParser.parse(said)
         if (request == null) {
             answer("Say or type the song you would like to hear.", emptyList(), said)
@@ -820,34 +874,59 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             notify(missingProviderSetting(mood.aiProvider))
         }
         _state.update { it.copy(mood = it.mood.copy(analyzing = true, error = null, savedPlaylistName = null)) }
+        val target = mood.searchTarget
         viewModelScope.launch {
-            val profile = try {
+            val outcome = try {
                 when {
                     quickMoodId != null ->
-                        MoodEngine.forMood(quickMoodId, context) ?: MoodEngine.analyze(mood.text, context)
-                    useModel -> moodAi.readMood(mood.text, context)
-                    else -> MoodEngine.analyze(mood.text, context)
+                        MoodAiOutcome(
+                            MoodEngine.forMood(quickMoodId, context) ?: MoodEngine.analyze(mood.text, context)
+                        )
+                    useModel -> moodAi.readMood(mood.text, context, target)
+                    else -> MoodAiOutcome(MoodEngine.analyze(mood.text, context))
                 }
             } catch (e: MoodAiException) {
                 notify("${e.message} Reading it on the device instead.")
-                MoodEngine.analyze(mood.text, context)
+                MoodAiOutcome(MoodEngine.analyze(mood.text, context))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                MoodEngine.analyze(mood.text, context)
+                MoodAiOutcome(MoodEngine.analyze(mood.text, context))
             }
+            val profile = outcome.profile
             val candidates = moodCandidates()
             val mix = MoodMixer.build(profile, candidates)
             val untagged = MoodMixer.untagged(candidates).size
+            // The songs the answer came with are looked up for real before anything is offered:
+            // a model's suggestion becomes a row only once a search or the listener's own library
+            // has confirmed it exists. With no model in the loop, the reading's own phrases are
+            // what the chosen provider is asked for.
+            val search = try {
+                when {
+                    outcome.picks.isNotEmpty() -> withContext(Dispatchers.IO) {
+                        moodPicks.fromPicks(outcome.picks, target, _state.value.pins, _state.value.playlists)
+                    }
+                    target != MoodSearchTarget.LIBRARY -> withContext(Dispatchers.IO) {
+                        moodPicks.fromTerms(profile.searchTerms, target)
+                    }
+                    else -> MoodPickSearch()
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                MoodPickSearch(error = e.message ?: "${target.short} could not be searched.")
+            }
             _state.update {
                 it.copy(
                     mood = it.mood.copy(
                         analyzing = false,
                         profile = profile,
                         mix = mix,
+                        found = search.hits,
+                        foundNote = foundNote(search, target, fromModel = outcome.picks.isNotEmpty()),
                         librarySize = candidates.size,
                         untaggedCount = untagged,
-                        error = if (mix.isEmpty()) {
+                        error = if (mix.isEmpty() && search.hits.isEmpty()) {
                             "Nothing in your library yet — add a song or a link, or search YouTube Music below."
                         } else null,
                         queueIndex = -1,
@@ -858,11 +937,20 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             // A request that came in by voice is answered out loud, in the same words the card
             // shows; the mix itself is on the Mood tab.
             if (announce) {
+                val found = search.hits.size
                 val said = buildString {
                     append("That reads as ${profile.label}.")
                     append(
-                        if (mix.isEmpty()) " Nothing in your library fits it yet."
-                        else " ${mix.size} song${if (mix.size == 1) "" else "s"} on the Mood tab."
+                        when {
+                            found > 0 && mix.isEmpty() ->
+                                " ${found} song${if (found == 1) "" else "s"} found " +
+                                    "${target.phrase} on the Mood tab."
+                            found > 0 ->
+                                " ${found} song${if (found == 1) "" else "s"} found " +
+                                    "${target.phrase}, and ${mix.size} in your library."
+                            mix.isEmpty() -> " Nothing in your library fits it yet."
+                            else -> " ${mix.size} song${if (mix.size == 1) "" else "s"} on the Mood tab."
+                        }
                     )
                 }
                 answer(said, emptyList(), _state.value.assistant.question)
@@ -1032,7 +1120,17 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                     aiKeySet = moodPrefs.keySet(provider),
                     aiKeySaved = moodPrefs.keySet(provider),
                     aiNote = null,
-                    ollamaModels = if (provider == MoodAiProvider.OLLAMA) it.mood.ollamaModels else emptyList()
+                    ollamaModels = if (provider == MoodAiProvider.OLLAMA) it.mood.ollamaModels else emptyList(),
+                    openAiModels = if (provider == MoodAiProvider.OPENAI_COMPATIBLE) {
+                        it.mood.openAiModels
+                    } else {
+                        emptyList()
+                    },
+                    openAiModelLabels = if (provider == MoodAiProvider.OPENAI_COMPATIBLE) {
+                        it.mood.openAiModelLabels
+                    } else {
+                        emptyMap()
+                    }
                 )
             )
         }
@@ -1044,6 +1142,10 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                     "Ollama selected. Only your mood description goes to that address."
                 provider == MoodAiProvider.OLLAMA ->
                     "Add your Ollama server's address below, or press Test to check it."
+                provider == MoodAiProvider.OPENAI_COMPATIBLE && moodAi.configured ->
+                    "That endpoint is ready. Only your mood description goes to the address you typed."
+                provider == MoodAiProvider.OPENAI_COMPATIBLE ->
+                    "Add the endpoint's address and the model name below, or press Test to check it."
                 moodPrefs.keySet(provider) -> "${provider.short} selected."
                 else -> "Paste an API key from ${provider.keyUrl} to use ${provider.short}."
             }
@@ -1074,30 +1176,196 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         _state.update { it.copy(mood = it.mood.copy(ollamaModel = moodPrefs.ollamaModel, aiNote = null)) }
     }
 
-    /** Asks the Ollama server which models it has, so the listener picks instead of guessing. */
+    /**
+     * Where the next reading looks for music. Changing it re-runs nothing on its own: the pills
+     * say what the next request will ask, and the sentence above them shows it word for word.
+     */
+    fun setMoodSearchTarget(target: MoodSearchTarget) = applyMoodSearchTarget(target, announce = true)
+
+    /** The same, for requests that already said where to look and need no announcement. */
+    private fun applyMoodSearchTarget(target: MoodSearchTarget, announce: Boolean) {
+        moodPrefs.searchTarget = target
+        _state.update {
+            it.copy(
+                mood = it.mood.copy(
+                    searchTarget = target,
+                    found = emptyList(),
+                    foundNote = null
+                )
+            )
+        }
+        if (!announce) return
+        notify(
+            when (target) {
+                MoodSearchTarget.LIBRARY ->
+                    "Readings will pick from your own pins and playlists."
+                MoodSearchTarget.YOUTUBE_MUSIC ->
+                    "Readings will name songs on YouTube Music; those rows open that app."
+                else -> "Readings will look ${target.phrase} and play what the search finds."
+            }
+        )
+    }
+
+    /** Plays one found song, with the rest of the findings queued behind it. */
+    fun playMoodFound(hit: AssistantHit) {
+        val playable = AssistantAnswer.playable(_state.value.mood.found)
+        val index = playable.indexOfFirst { it.itemId != null && it.itemId == hit.itemId }
+            .takeIf { it >= 0 } ?: playable.indexOfFirst { it.url == hit.url }
+        if (playable.isEmpty() || index < 0) {
+            hub.playEntry(hit.toQueueEntry())
+            return
+        }
+        hub.play(playable.map { it.toQueueEntry() }, index)
+    }
+
+    /** Queues everything the reading found, in the order it was listed. */
+    fun playAllMoodFound() {
+        val playable = AssistantAnswer.playable(_state.value.mood.found)
+        if (playable.isEmpty()) {
+            notify("Nothing in these findings plays on this phone — open one in its own app instead.")
+            return
+        }
+        hub.play(playable.map { it.toQueueEntry() }, 0)
+    }
+
+    /**
+     * Opens a found song where it lives, for the rows this app cannot start itself — a YouTube
+     * Music suggestion, or a catalogue hit whose full version belongs to that app.
+     */
+    fun openMoodFound(hit: AssistantHit) {
+        val url = hit.musicUrl ?: hit.url
+        if (url.isNullOrBlank() || !apps.openWeb(url)) {
+            notify("Nothing on this phone can open that link.")
+        }
+    }
+
+    /**
+     * The address of an OpenAI-compatible endpoint, accepted in whatever form it was pasted —
+     * a bare host, a whole `…/v1/chat/completions` from a README, or a LAN address with no scheme.
+     */
+    fun setMoodOpenAiUrl(url: String) {
+        moodPrefs.openAiUrl = url
+        val normalized = MoodAiUrls.normalizeOpenAi(url)
+        _state.update {
+            it.copy(
+                mood = it.mood.copy(
+                    openAiUrl = moodPrefs.openAiUrl,
+                    aiReady = moodAi.configured,
+                    aiNote = when {
+                        url.isBlank() -> null
+                        normalized == null ->
+                            "That does not look like an address. Try https://api.openai.com/v1"
+                        else -> "Using ${MoodAiUrls.display(normalized)}"
+                    }
+                )
+            )
+        }
+    }
+
+    fun setMoodOpenAiModel(name: String) {
+        moodPrefs.openAiModel = name
+        _state.update {
+            it.copy(
+                mood = it.mood.copy(
+                    openAiModel = moodPrefs.openAiModel,
+                    aiReady = moodAi.configured,
+                    aiNote = null
+                )
+            )
+        }
+    }
+
+    /**
+     * Fills in Arena's gateway. Arena publishes an OpenAI-compatible API, so it needs no provider
+     * of its own — only the address and the router alias its own portal documents. The key still
+     * has to come from the listener: it is created on Arena's Keys page and pasted into the field
+     * below, then **Find models** lists whatever that key is enabled for.
+     */
+    fun useMoodArenaPreset() {
+        moodPrefs.aiProvider = MoodAiProvider.OPENAI_COMPATIBLE
+        moodPrefs.openAiUrl = MoodAiUrls.ARENA_BASE_URL
+        moodPrefs.openAiModel = MoodAiUrls.ARENA_MODEL
+        _state.update {
+            it.copy(
+                mood = it.mood.copy(
+                    aiProvider = MoodAiProvider.OPENAI_COMPATIBLE,
+                    openAiUrl = moodPrefs.openAiUrl,
+                    openAiModel = moodPrefs.openAiModel,
+                    aiKeySet = moodPrefs.keySet(MoodAiProvider.OPENAI_COMPATIBLE),
+                    aiKeySaved = moodPrefs.keySet(MoodAiProvider.OPENAI_COMPATIBLE),
+                    ollamaModels = emptyList(),
+                    openAiModels = emptyList(),
+                    openAiModelLabels = emptyMap(),
+                    aiReady = moodAi.configured,
+                    aiNote = "Arena's gateway is filled in. Paste a key from the Keys page below, " +
+                        "then press Test."
+                )
+            )
+        }
+        notify("Arena (preview) filled in. Create a key on Arena's Keys page, paste it below, then press Test.")
+    }
+
+    /**
+     * Asks the selected endpoint which models it has, so the listener picks instead of guessing:
+     * the tags an Ollama server has pulled, or the ids an OpenAI-compatible endpoint lists. A
+     * server that publishes no list is told apart from one that cannot be reached, because the
+     * first case still works with a model name typed by hand.
+     */
     fun detectMoodModels() {
         val mood = _state.value.mood
         if (mood.aiBusy) return
-        if (MoodAiUrls.normalize(mood.ollamaUrl) == null) {
+        val openAi = mood.aiProvider == MoodAiProvider.OPENAI_COMPATIBLE
+        if (openAi) {
+            if (MoodAiUrls.normalizeOpenAi(mood.openAiUrl) == null) {
+                notify("Add the endpoint's address first, for example https://api.openai.com/v1.")
+                return
+            }
+        } else if (MoodAiUrls.normalize(mood.ollamaUrl) == null) {
             notify("Add your Ollama server's address first, for example http://192.168.0.20:11434.")
             return
         }
-        moodPrefs.aiProvider = MoodAiProvider.OLLAMA
+        if (!openAi) moodPrefs.aiProvider = MoodAiProvider.OLLAMA
         _state.update {
-            it.copy(mood = it.mood.copy(aiProvider = MoodAiProvider.OLLAMA, aiBusy = true, aiNote = null))
+            it.copy(
+                mood = it.mood.copy(
+                    aiProvider = moodPrefs.aiProvider,
+                    aiBusy = true,
+                    aiNote = null
+                )
+            )
         }
         viewModelScope.launch {
             runCatching { moodAi.listModels() }
-                .onSuccess { models ->
+                .onSuccess { listing ->
+                    val models = listing.models
+                    val before = _state.value.mood
+                    val adapted = modelAfterList(before, models)
+                    val swapped = openAi && adapted.isNotBlank() && adapted != before.openAiModel
+                    if (swapped) moodPrefs.openAiModel = adapted
                     _state.update {
                         it.copy(
                             mood = it.mood.copy(
                                 aiBusy = false,
-                                ollamaModels = models,
-                                aiNote = if (models.isEmpty()) {
-                                    "That server answered but has no models yet. Run: ollama pull ${it.mood.ollamaModel}"
-                                } else {
-                                    "${models.size} model${if (models.size == 1) "" else "s"} found — tap one to use it."
+                                ollamaModels = if (openAi) it.mood.ollamaModels else models,
+                                openAiModels = if (openAi) models else it.mood.openAiModels,
+                                openAiModelLabels = if (openAi) listing.labels else it.mood.openAiModelLabels,
+                                openAiModel = if (openAi) moodPrefs.openAiModel else it.mood.openAiModel,
+                                aiNote = when {
+                                    swapped && MoodAiUrls.isArenaRouter(adapted) ->
+                                        "Arena: \u201C${before.openAiModel}\u201D is not enabled for " +
+                                            "this key, so \u201C$adapted\u201D is selected — the same " +
+                                            "choice Arena's own setup script makes."
+                                    swapped ->
+                                        "Arena: this key has no router alias, so \u201C$adapted\u201D " +
+                                            "is selected from the models it is enabled for — the " +
+                                            "same choice Arena's own setup script makes."
+                                    models.isEmpty() && openAi ->
+                                        "That endpoint answered but lists no models. Type the name " +
+                                            "of the one you want — the app will still use it."
+                                    models.isEmpty() ->
+                                        "That server answered but has no models yet. Run: ollama pull ${it.mood.ollamaModel}"
+                                    else ->
+                                        "${models.size} model${if (models.size == 1) "" else "s"} found — tap one to use it."
                                 },
                                 aiReady = moodAi.configured
                             )
@@ -1106,9 +1374,56 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 }
                 .onFailure { error ->
                     _state.update { it.copy(mood = it.mood.copy(aiBusy = false, aiNote = error.message)) }
-                    notify(error.message ?: "That Ollama server could not be reached.")
+                    notify(
+                        error.message ?: if (openAi) {
+                            "That endpoint could not be reached."
+                        } else {
+                            "That Ollama server could not be reached."
+                        }
+                    )
                 }
         }
+    }
+
+    /**
+     * What to say about a search, in one line, without overstating what happened: how many of the
+     * named songs were found, what could not be matched, and — when nothing came back at all —
+     * whether that was the provider's complaint, a missing connection, or simply no match.
+     */
+    private fun foundNote(
+        search: MoodPickSearch,
+        target: MoodSearchTarget,
+        fromModel: Boolean
+    ): String? = when {
+        search.hits.isNotEmpty() && search.unmatched > 0 ->
+            "${search.hits.size} of the songs named were found ${target.phrase}; " +
+                "${search.unmatched} could not be matched to anything real and were left out."
+        search.hits.isNotEmpty() -> null
+        search.error != null -> search.error
+        search.unmatched > 0 -> "None of the songs named could be found ${target.phrase}."
+        target == MoodSearchTarget.LIBRARY && fromModel ->
+            "None of the songs named are in your library — the mix below is built from what is."
+        target == MoodSearchTarget.LIBRARY -> null
+        fromModel -> "Nothing that was named could be found ${target.phrase}."
+        else -> "Nothing came back from ${target.short} for that."
+    }
+
+    /**
+     * The model to keep once a list has arrived. A model already in the list is kept as it is, and
+     * Ollama's tags are left alone — they were typed or tapped deliberately. Arena is the one case
+     * that changes on its own: a key may have any of Arena's router aliases enabled, and Arena's
+     * own setup script picks whichever the key actually has, so the app picks the same one rather
+     * than leaving an alias that would fail the first real request.
+     */
+    private fun modelAfterList(mood: MoodUiState, models: List<String>): String {
+        if (models.isEmpty() || models.any { it == mood.openAiModel }) return mood.openAiModel
+        if (mood.aiProvider != MoodAiProvider.OPENAI_COMPATIBLE) return mood.openAiModel
+        if (!MoodAiUrls.isArena(MoodAiUrls.normalizeOpenAi(mood.openAiUrl))) return mood.openAiModel
+        // A name the listener typed themselves is theirs to keep; only the preset alias is Arena's
+        // to move, and it is moved only when the key turned out not to have it.
+        val presetAlias = MoodAiUrls.isArenaRouter(mood.openAiModel)
+        if (mood.openAiModel.isNotBlank() && !presetAlias) return mood.openAiModel
+        return MoodAiUrls.arenaModelFrom(models) ?: mood.openAiModel
     }
 
     /** Probes the selected provider and reports exactly what happened. */
@@ -1149,15 +1464,22 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                     aiKeySet = saved,
                     aiKeySaved = saved,
                     aiReady = moodAi.configured,
-                    aiNote = if (saved && provider == MoodAiProvider.OLLAMA) {
-                        "Token saved. It is sent only to that address, as a bearer token."
-                    } else null
+                    aiNote = when {
+                        !saved -> null
+                        provider == MoodAiProvider.OLLAMA ->
+                            "Token saved. It is sent only to that address, as a bearer token."
+                        provider == MoodAiProvider.OPENAI_COMPATIBLE ->
+                            "Key saved. It is sent only to that address, as a bearer token."
+                        else -> null
+                    }
                 )
             )
         }
         if (saved) {
             notify("Saved, encrypted with this device's key store.")
-            if (provider == MoodAiProvider.GEMINI) testMoodAi()
+            if (provider == MoodAiProvider.GEMINI || provider == MoodAiProvider.OPENAI_COMPATIBLE) {
+                testMoodAi()
+            }
         } else {
             notify("Key cleared. The on-device engine reads your mood.")
         }
@@ -1190,6 +1512,15 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         MoodAiProvider.OLLAMA ->
             "Add your Ollama server's address (for example http://192.168.0.20:11434). " +
                 "Reading on-device until then."
+        MoodAiProvider.OPENAI_COMPATIBLE -> when {
+            MoodAiUrls.normalizeOpenAi(moodPrefs.openAiUrl) == null ->
+                "Add the endpoint's address (for example https://api.openai.com/v1). Reading " +
+                    "on-device until then."
+            moodPrefs.openAiModel.isBlank() ->
+                "Name the model to ask for at that endpoint. Reading on-device until then."
+            else ->
+                "That endpoint is set up; test it from the Mood tab. Reading on-device until then."
+        }
         MoodAiProvider.GEMINI ->
             "Paste a Google AI Studio API key to use ${provider.short}. Reading on-device until then."
     }

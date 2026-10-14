@@ -61,6 +61,10 @@ import tech.egrie.soundtrail.mood.MoodProfile
 import tech.egrie.soundtrail.mood.MoodStore
 import tech.egrie.soundtrail.mood.TrackMoodTags
 import tech.egrie.soundtrail.playback.JellyfinPlayer
+import tech.egrie.soundtrail.playback.LibraryMedia
+import tech.egrie.soundtrail.playback.PlaybackHub
+import tech.egrie.soundtrail.playback.QueueEntry
+import tech.egrie.soundtrail.playback.toQueueEntry
 import tech.egrie.soundtrail.sync.CloudSyncException
 import tech.egrie.soundtrail.sync.CloudSyncService
 import tech.egrie.soundtrail.sync.YouTubeAudioStage
@@ -224,15 +228,22 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     // The optional AI reader, and the on-device engine that always backs it up.
     private val moodAi = MoodAiService(moodPrefs)
 
-    /** The mix currently playing through the shared player, and where it is. */
-    private var moodQueue: List<MoodMixTrack> = emptyList()
-    private var moodQueueIndex = -1
+    /**
+     * The app's one playback hub: the queue, the stream resolution, the media session and the
+     * player behind every surface this app has — its own bar, the notification, the lockscreen
+     * and Android Auto. Screens render [player] through it, so no two surfaces can ever show a
+     * different song.
+     */
+    private val hub = PlaybackHub.shared(application)
 
     /**
      * The app's one player, shared with [tech.egrie.soundtrail.playback.PlaybackService] so
      * the in-app bar and the playback notification always drive the same stream.
      */
-    val player = JellyfinPlayer.shared(application)
+    val player: JellyfinPlayer = hub.player
+
+    /** The media ids of the mix that is playing, so the Mood tab's rows light up as it goes. */
+    private var moodQueueKeys: List<String> = emptyList()
 
     private val _state = MutableStateFlow(
         AppState(
@@ -308,14 +319,32 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         viewModelScope.launch {
             LocationWatchService.status.collect { live -> _state.update { it.copy(watchStatus = live) } }
         }
-        // A mood mix plays on through the shared player: when a song ends, the next one starts.
+        // Playback lives in the hub, so the Mood tab follows the song that is playing rather
+        // than owning a queue of its own: the mix that plays in the car lights up here too.
         viewModelScope.launch {
             player.state.collect { current ->
-                if (current?.completed == true && moodQueue.isNotEmpty()) {
-                    playMixAt(moodQueueIndex + 1, announceEnd = true)
+                val playing = current?.playing == true
+                val index = current?.itemId?.let { itemId -> moodQueueKeys.indexOf(itemId) } ?: -1
+                val mood = _state.value.mood
+                if (mood.queuePlaying != playing || mood.queueIndex != index) {
+                    _state.update {
+                        it.copy(
+                            mood = it.mood.copy(
+                                queueIndex = index,
+                                queuePlaying = index >= 0 && playing
+                            )
+                        )
+                    }
+                }
+                // The mix played to its end: say so once, the way the app always has.
+                if (current?.completed == true && current.itemId == moodQueueKeys.lastOrNull()) {
+                    moodQueueKeys = emptyList()
+                    notify("That's the end of the mood mix.")
                 }
             }
         }
+        // Anything the hub could not play is something the listener should read.
+        viewModelScope.launch { hub.messages.collect { notify(it) } }
     }
 
     fun notify(message: String) { _messages.tryEmit(message) }
@@ -498,7 +527,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         // Clear locally first; the sign-out call is best-effort and cannot race a reconnect.
         val previous = jellyfin.disconnect()
         val server = _state.value.jellyfinServer
-        player.stop()
+        hub.stopPlayback()
         _state.update {
             it.copy(
                 jellyfinConnected = false,
@@ -514,170 +543,61 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     }
 
     /**
-     * Plays a pinned or playlist Jellyfin song in the app itself. The stored link is only an
-     * item reference, so the stream URL is resolved here from the current connection.
+     * Plays one song now: a Jellyfin item reached from somewhere other than a list, or a single
+     * track with no list around it. Everything else goes through the queue — see [playPin] and
+     * [playPlaylistItemUnified] — so next and previous know where to go.
      */
     fun playJellyfin(link: MusicLink, title: String, artist: String) {
-        val itemId = JellyfinRef.itemId(link.url)
-        if (itemId == null) {
-            notify("That Jellyfin song link is not usable.")
-            return
-        }
-        val playback = jellyfin.playback(itemId)
-        if (playback == null) {
-            notify("Connect your Jellyfin server on the Connect tab to stream this song.")
-            return
-        }
-        player.play(
-            title = title.ifBlank { "Jellyfin song" },
-            artist = artist,
-            itemId = itemId,
-            playback = playback
+        hub.playEntry(
+            QueueEntry(
+                mediaId = LibraryMedia.song(link.url),
+                title = title.ifBlank { "Jellyfin song" },
+                artist = artist,
+                provider = link.provider,
+                url = link.url
+            )
         )
     }
 
-    /** Unified in-app playback for any provider: local file, Jellyfin, Spotify preview, SoundCloud, YouTube. */
+    /**
+     * Plays a pinned song with the whole pins list queued around it, so the notification, the
+     * lockscreen and the car can step along the trail without going back to the map.
+     */
     fun playPin(pin: tech.egrie.soundtrail.data.MusicPin) {
-        val link = MusicLink(pin.provider, pin.url)
-        when (pin.provider) {
-            MusicProvider.JELLYFIN -> playJellyfin(link, pin.title, pin.artist)
-            else -> playLink(link, pin.title, pin.artist, pin.id)
-        }
+        val pins = _state.value.pins
+        hub.play(pins.map { it.toQueueEntry() }, pins.indexOfFirst { it.id == pin.id })
     }
 
+    /** Plays a playlist song in the context of its playlist, preferring an offline copy. */
     fun playPlaylistItemUnified(item: PlaylistItem) {
-        // Local offline copy always wins — plays directly in-app, no network.
-        item.localFile?.let { name ->
-            files.fileFor(name)?.let { file ->
-                player.playLocalFile(
-                    title = item.title,
-                    artist = item.artist,
-                    itemId = item.id,
-                    file = file,
-                    provider = item.provider ?: MusicProvider.YOUTUBE
-                )
-                return
-            }
-        }
-        val url = item.url
-        if (url != null) {
-            val link = MusicLinkParser.parse(url)
-            if (link != null) {
-                if (link.provider == MusicProvider.JELLYFIN) {
-                    playJellyfin(link, item.title, item.artist)
-                    return
-                }
-                playLink(link, item.title, item.artist, item.id)
-                return
-            }
-        }
-        // No link — try to find a local search fallback? For now, notify.
-        notify("This song has no playable link. Add a supported link or attach audio you own.")
-    }
-
-    // Keeps the last YouTube in-app playback temp file so we can clean it up on next play.
-    private var lastYouTubePlaybackFile: java.io.File? = null
-
-    private fun playLink(link: MusicLink, title: String, artist: String, itemId: String) {
-        viewModelScope.launch {
-            try {
-                when (link.provider) {
-                    MusicProvider.JELLYFIN -> {
-                        // Already handled above, but keep for safety
-                        playJellyfin(link, title, artist)
-                    }
-                    MusicProvider.SPOTIFY -> {
-                        player.setBuffering(title, artist, itemId, MusicProvider.SPOTIFY)
-                        val preview = spotify.resolvePlayableUrl(link)
-                        if (preview != null) {
-                            player.playRemoteUrl(title, artist, itemId, preview, MusicProvider.SPOTIFY)
-                        } else {
-                            player.stop()
-                            notify("No Spotify preview available for this track. Spotify full playback needs their app, but Soundtrail plays 30-second previews when Spotify provides them. Try searching again to get a preview.")
-                        }
-                    }
-                    MusicProvider.SOUNDCLOUD -> {
-                        player.setBuffering(title, artist, itemId, MusicProvider.SOUNDCLOUD)
-                        val stream = try {
-                            soundcloud.resolvePlayableUrl(link)
-                        } catch (_: Exception) { null }
-                        if (stream != null) {
-                            player.playRemoteUrl(title, artist, itemId, stream, MusicProvider.SOUNDCLOUD)
-                        } else {
-                            player.stop()
-                            notify("Couldn't get a SoundCloud stream for this track. It may be private or require re-connecting SoundCloud.")
-                        }
-                    }
-                    MusicProvider.YOUTUBE_MUSIC, MusicProvider.YOUTUBE -> {
-                        val videoId = MusicLinkParser.youtubeVideoId(link.url)
-                        if (videoId == null) {
-                            notify("That YouTube link is not a playable video.")
-                            return@launch
-                        }
-                        if (!cloudSync.connected) {
-                            notify("Connect your sync server to play YouTube audio in-app, or download it for offline playback first.")
-                            return@launch
-                        }
-                        player.setBuffering(title, artist, itemId, link.provider)
-                        // Clean up previous in-app YouTube playback temp file.
-                        lastYouTubePlaybackFile?.let { prev ->
-                            withContext(Dispatchers.IO) { files.discardDownloadTemp(prev) }
-                            lastYouTubePlaybackFile = null
-                        }
-                        // Download to a temp file that is NOT counted as offline storage (.part is excluded).
-                        val temp = withContext(Dispatchers.IO) { files.newDownloadTemp() }
-                        try {
-                            cloudSync.downloadYouTubeAudio(videoId, temp, userConfirmedRights = true) { _, _, _ -> }
-                            if (!temp.isFile || temp.length() == 0L) {
-                                notify("Couldn't prepare YouTube audio for playback.")
-                                withContext(Dispatchers.IO) { files.discardDownloadTemp(temp) }
-                                player.stop()
-                                return@launch
-                            }
-                            lastYouTubePlaybackFile = temp
-                            player.playLocalFile(title, artist, itemId, temp, link.provider)
-                        } catch (e: Exception) {
-                            withContext(Dispatchers.IO) { files.discardDownloadTemp(temp) }
-                            player.stop()
-                            notify(e.message ?: "YouTube in-app playback failed.")
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                notify(e.message ?: "Couldn't play this song in-app.")
-            }
-        }
-    }
-
-    /** Attempts to play a TrackResult directly (from search), using its playableUrl if present. */
-    fun playTrackResult(track: TrackResult) {
-        track.playableUrl?.let { url ->
-            player.playRemoteUrl(track.title, track.artist, track.url, url, track.provider)
+        val playlist = _state.value.playlists.firstOrNull { list -> list.items.any { it.id == item.id } }
+        if (playlist == null) {
+            hub.playEntry(item.toQueueEntry())
             return
         }
-        // No direct playable URL in result — resolve via provider APIs.
-        val link = MusicLinkParser.parse(track.url)
-        if (link != null) {
-            playLink(link, track.title, track.artist, track.url)
-        } else {
-            notify("No playable audio for this track.")
-        }
+        hub.playPlaylistItem(item, playlist.items, playlist.name)
     }
 
-    fun togglePlayback() = player.toggle()
-
-    fun stopPlayback() {
-        player.stop()
-        // Optionally keep the YouTube playback cache for quick replay; clean up only on next YouTube play
-        // or when explicitly cleared. We don't delete here to allow pause/resume to keep working.
+    /** Plays a search result; a preview URL the search already resolved is used as it stands. */
+    fun playTrackResult(track: TrackResult) {
+        hub.playEntry(
+            QueueEntry(
+                mediaId = LibraryMedia.song(track.url),
+                title = track.title,
+                artist = track.artist,
+                provider = track.provider,
+                url = track.url,
+                streamUrl = track.playableUrl
+            )
+        )
     }
 
-    fun clearYouTubePlaybackCache() {
-        lastYouTubePlaybackFile?.let { file ->
-            viewModelScope.launch(Dispatchers.IO) { files.discardDownloadTemp(file) }
-            lastYouTubePlaybackFile = null
-        }
-    }
+    fun togglePlayback() = hub.toggle()
+
+    /** Ends playback and clears the queue behind every surface: bar, notification and car. */
+    fun stopPlayback() = hub.stopPlayback()
+
+    fun clearYouTubePlaybackCache() = hub.clearYouTubeCache()
 
     // ----- Mood: how you feel in, music out -----
 
@@ -752,32 +672,24 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         }
     }
 
-    /** Plays the whole mix in order, reusing the same in-app player as everything else. */
+    /** Plays the whole mix in order, through the same queue as everything else. */
     fun playMoodMix() {
-        val mix = _state.value.mood.mix
-        if (mix.isEmpty()) {
+        if (_state.value.mood.mix.isEmpty()) {
             notify("Build a mood mix first.")
             return
         }
-        moodQueue = mix
-        playMixAt(0, announceEnd = true)
+        playMixFrom(0)
     }
 
     /** Jumps to one song in the mix; playback continues through the rest of it. */
     fun playMoodTrack(track: MoodMixTrack) {
-        if (moodQueue.isEmpty()) moodQueue = _state.value.mood.mix
-        val index = moodQueue.indexOfFirst { it.key == track.key }.takeIf { it >= 0 }
-            ?: run {
-                moodQueue = _state.value.mood.mix
-                moodQueue.indexOfFirst { it.key == track.key }
-            }
-        playMixAt(if (index >= 0) index else 0, announceEnd = true)
+        val index = _state.value.mood.mix.indexOfFirst { it.key == track.key }.takeIf { it >= 0 } ?: 0
+        playMixFrom(index)
     }
 
     fun stopMoodMix() {
-        moodQueue = emptyList()
-        moodQueueIndex = -1
-        player.stop()
+        moodQueueKeys = emptyList()
+        hub.stopPlayback()
         _state.update { it.copy(mood = it.mood.copy(queueIndex = -1, queuePlaying = false)) }
     }
 
@@ -1134,31 +1046,14 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     }
 
     /**
-     * Plays the mix from [index] onwards, skipping songs that have no playable link, and stops
-     * when the mix runs out. Every entry goes through the same player as a tap on a pin would.
+     * Hands the mix to the hub as a queue, starting at [index]. The hub skips anything that
+     * cannot play here and moves to the next song when one ends, so a mix keeps going in the
+     * car exactly as it does on the phone.
      */
-    private fun playMixAt(index: Int, announceEnd: Boolean) {
-        var cursor = index
-        while (cursor in moodQueue.indices) {
-            val track = moodQueue[cursor]
-            val link = track.url?.let(MusicLinkParser::parse)
-            if (link != null) {
-                moodQueueIndex = cursor
-                _state.update { it.copy(mood = it.mood.copy(queueIndex = cursor, queuePlaying = true)) }
-                if (link.provider == MusicProvider.JELLYFIN) {
-                    playJellyfin(link, track.title, track.artist)
-                } else {
-                    playLink(link, track.title, track.artist, track.key)
-                }
-                return
-            }
-            cursor += 1
-        }
-        val wasPlaying = moodQueue.isNotEmpty()
-        moodQueue = emptyList()
-        moodQueueIndex = -1
-        _state.update { it.copy(mood = it.mood.copy(queueIndex = -1, queuePlaying = false)) }
-        if (wasPlaying && announceEnd) notify("That's the end of the mood mix.")
+    private fun playMixFrom(index: Int) {
+        val entries = _state.value.mood.mix.map { it.toQueueEntry() }
+        moodQueueKeys = entries.map { it.mediaId }
+        hub.play(entries, index)
     }
 
     /** A link to the item in Jellyfin's own web client, for sharing with people on that server. */
@@ -2101,6 +1996,8 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     }
 
     private fun refreshOfflineAudioState() {
+        // A car that is open on a list should see the change without being reopened.
+        hub.notifyLibraryChanged()
         val currentPlaylists = playlists.all()
         val storedFiles = files.listStoredAudio()
         _state.update {
@@ -2116,6 +2013,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         // Cloud sync is opt-in. Before sign-in (or while signed out), keep no duplicate journal;
         // the first sync seeds local data and later syncs diff against the last applied snapshot.
         if (!cloudSync.connected) return
+        hub.notifyLibraryChanged()
         runCatching { cloudSync.observeLocalChanges() }
         _state.update { it.copy(syncPendingChanges = cloudSync.pendingChangeCount()) }
     }

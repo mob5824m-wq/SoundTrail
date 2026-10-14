@@ -11,13 +11,12 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.media.AudioManager
-import android.media.MediaMetadata
-import android.media.session.MediaSession
-import android.media.session.PlaybackState
 import android.os.IBinder
-import android.graphics.drawable.Icon
+import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.IconCompat
+import androidx.media.app.NotificationCompat as MediaNotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -27,39 +26,49 @@ import tech.egrie.soundtrail.MainActivity
 import tech.egrie.soundtrail.R
 
 /**
- * Keeps Jellyfin streaming alive outside Soundtrail's own screens: a `mediaPlayback`
- * foreground service carrying a MediaStyle notification and the platform's [MediaSession],
- * so lockscreen controls, Bluetooth/headset buttons, and the notification's play/pause
- * and stop all reach the very same [JellyfinPlayer] instance the in-app bar drives —
- * there is exactly one player and one source of truth for its state.
+ * Keeps playback alive outside Soundtrail's own screens: a `mediaPlayback` foreground service
+ * carrying a MediaStyle notification.
  *
- * The deprecated-but-supported `android.media.MediaSession` is used on purpose instead of
- * pulling in a media library: Soundtrail plays one resolved item at a time (no queue, no
- * browse tree), so all that is needed is transport controls and a session token for the
- * notification. The service only mirrors the player's [JellyfinPlayer.state] flow; it
- * never fabricates playback and stops itself the moment the state clears.
+ * Everything it shows and everything it does comes from [PlaybackHub], which owns the app's
+ * single player and the platform's single media session. That is what makes the notification
+ * shade, the lockscreen, headset buttons, the app's own bar and Android Auto all act on one
+ * stream: the service only mirrors what is playing, and forwards its own buttons back.
  */
 class PlaybackService : Service() {
     companion object {
         const val ACTION_TOGGLE = "tech.egrie.soundtrail.playback.TOGGLE"
+        const val ACTION_NEXT = "tech.egrie.soundtrail.playback.NEXT"
+        const val ACTION_PREVIOUS = "tech.egrie.soundtrail.playback.PREVIOUS"
         const val ACTION_STOP = "tech.egrie.soundtrail.playback.STOP"
         private const val CHANNEL_ID = "soundtrail_playback"
         private const val PLAYBACK_NOTIFICATION_ID = 42
 
-        /** Set synchronously on start/stop so rapid stop-then-play cannot race the service lifecycle. */
+        /** Set synchronously on start/stop so rapid stop-then-play cannot race the lifecycle. */
         @Volatile
         private var running = false
 
-        /** Brings the service up if it is not already running. Called when a stream begins or resumes. */
+        /**
+         * Brings the service up if it is not already running. Called when a stream begins or
+         * resumes — including from a car, where the app's own activity has never been opened.
+         *
+         * Android 12+ restricts starting a foreground service from the background. Playback
+         * itself does not depend on this service, so a refusal is not fatal: the plain start
+         * is tried (the service still posts its notification once the system lets it) and
+         * playback continues through the app's player and its media session either way.
+         */
         fun ensureStarted(context: Context) {
             if (running) return
             running = true
-            context.startForegroundService(Intent(context, PlaybackService::class.java))
+            val intent = Intent(context, PlaybackService::class.java)
+            try {
+                ContextCompat.startForegroundService(context, intent)
+            } catch (_: IllegalStateException) {
+                runCatching { context.startService(intent) }.onFailure { running = false }
+            }
         }
     }
 
-    private lateinit var player: JellyfinPlayer
-    private var session: MediaSession? = null
+    private lateinit var hub: PlaybackHub
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var collecting = false
 
@@ -69,37 +78,18 @@ class PlaybackService : Service() {
     private val noisyReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             // Headphones unplugged: pause rather than blast audio from the speaker.
-            if (player.state.value?.playing == true) player.toggle()
+            if (hub.player.state.value?.playing == true) hub.pause()
         }
     }
 
     override fun onCreate() {
         super.onCreate()
         running = true
-        player = JellyfinPlayer.shared(this)
+        hub = PlaybackHub.shared(this)
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "Music playback", NotificationManager.IMPORTANCE_LOW)
                 .apply { description = "In-app music playback" }
         )
-        session = MediaSession(this, "Soundtrail playback").apply {
-            setFlags(
-                MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS
-            )
-            setCallback(object : MediaSession.Callback() {
-                override fun onPlay() {
-                    if (player.state.value?.playing != true) player.toggle()
-                }
-
-                override fun onPause() {
-                    if (player.state.value?.playing == true) player.toggle()
-                }
-
-                override fun onStop() {
-                    player.stop()
-                }
-            })
-            isActive = true
-        }
         runCatching {
             ContextCompat.registerReceiver(
                 this, noisyReceiver,
@@ -113,16 +103,18 @@ class PlaybackService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // The foreground notification must appear before anything else can stop us.
-        startInForeground(player.state.value)
+        startInForeground(hub.player.state.value)
         when (intent?.action) {
-            ACTION_TOGGLE -> player.toggle()
-            ACTION_STOP -> player.stop()
+            ACTION_TOGGLE -> hub.toggle()
+            ACTION_NEXT -> hub.skipToNext()
+            ACTION_PREVIOUS -> hub.skipToPrevious()
+            ACTION_STOP -> hub.stopPlayback()
             else -> Unit
         }
         if (!collecting) {
             collecting = true
             scope.launch {
-                player.state.collect { state ->
+                hub.player.state.collect { state ->
                     if (state == null) stopEverything()
                     else publish(state)
                 }
@@ -134,69 +126,40 @@ class PlaybackService : Service() {
     override fun onDestroy() {
         running = false
         scope.cancel()
-        session?.isActive = false
-        session?.release()
-        session = null
         runCatching { unregisterReceiver(noisyReceiver) }
         super.onDestroy()
     }
 
     private fun startInForeground(state: NowPlaying?) {
-        ServiceCompat.startForeground(
-            this, PLAYBACK_NOTIFICATION_ID, buildNotification(state),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-        )
+        // A refused foreground start (see ensureStarted) must not take the service down: the
+        // notification is a convenience, playback and the media session are not.
+        runCatching {
+            ServiceCompat.startForeground(
+                this, PLAYBACK_NOTIFICATION_ID, buildNotification(state),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            )
+        }
     }
 
-    /** Pushes the player's own state to the session and the notification. */
+    /** Mirrors the player's own state onto the notification. */
     private fun publish(state: NowPlaying) {
-        val current = session ?: return
-        current.setMetadata(
-            MediaMetadata.Builder()
-                .putString(MediaMetadata.METADATA_KEY_TITLE, state.title)
-                .putString(MediaMetadata.METADATA_KEY_ARTIST, state.artist)
-                .putLong(MediaMetadata.METADATA_KEY_DURATION, state.durationMs.coerceAtLeast(0L))
-                .build()
-        )
-        val status = when {
-            state.error != null -> PlaybackState.STATE_ERROR
-            state.playing -> PlaybackState.STATE_PLAYING
-            state.buffering -> PlaybackState.STATE_BUFFERING
-            else -> PlaybackState.STATE_PAUSED
-        }
-        current.setPlaybackState(
-            PlaybackState.Builder()
-                .setActions(
-                    PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or
-                        PlaybackState.ACTION_PLAY_PAUSE or PlaybackState.ACTION_STOP
-                )
-                .setState(status, state.positionMs.coerceAtLeast(0L), if (state.playing) 1f else 0f)
-                .build()
-        )
         val signature = listOf(
-            state.playing, state.buffering, state.error, state.title, state.artist
+            state.playing, state.buffering, state.error, state.title, state.artist,
+            hub.canSkipNext(), hub.canSkipPrevious()
         ).joinToString("|")
-        if (signature != notifiedSignature) {
-            notifiedSignature = signature
-            runCatching {
-                getSystemService(NotificationManager::class.java)
-                    .notify(PLAYBACK_NOTIFICATION_ID, buildNotification(state))
-            }
+        if (signature == notifiedSignature) return
+        notifiedSignature = signature
+        runCatching {
+            getSystemService(NotificationManager::class.java)
+                .notify(PLAYBACK_NOTIFICATION_ID, buildNotification(state))
         }
     }
 
     private fun buildNotification(state: NowPlaying?): Notification {
         val playing = state?.playing == true
         val buffering = state?.buffering == true
-        val subtitle = when (state?.provider) {
-            tech.egrie.soundtrail.integrations.MusicProvider.SPOTIFY -> "Spotify preview"
-            tech.egrie.soundtrail.integrations.MusicProvider.SOUNDCLOUD -> "SoundCloud"
-            tech.egrie.soundtrail.integrations.MusicProvider.YOUTUBE_MUSIC -> "YouTube Music"
-            tech.egrie.soundtrail.integrations.MusicProvider.YOUTUBE -> "YouTube"
-            tech.egrie.soundtrail.integrations.MusicProvider.JELLYFIN -> "Jellyfin"
-            null -> "Soundtrail"
-        }
-        val builder = Notification.Builder(this, CHANNEL_ID)
+        val source = state?.provider.sourceLabel()
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_soundtrail_notification)
             .setContentTitle(state?.title ?: "Soundtrail")
             .setContentText(
@@ -204,39 +167,46 @@ class PlaybackService : Service() {
                     state == null -> "Nothing is playing"
                     state.error != null -> state.error
                     buffering -> "Buffering…"
-                    playing -> state.artist.ifBlank { subtitle }
+                    playing -> state.artist.ifBlank { source.orEmpty() }
                     else -> "Paused" + state.artist.takeIf(String::isNotBlank)?.let { " · $it" }.orEmpty()
                 }
             )
+            .setSubText(state?.let { source })
             .setContentIntent(openAppIntent())
-            .setCategory(Notification.CATEGORY_TRANSPORT)
-            .setVisibility(Notification.VISIBILITY_PUBLIC)
+            .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setOnlyAlertOnce(true)
+            .setShowWhen(false)
             // Only a live stream pins itself; paused or finished rows can be swiped away.
             .setOngoing(playing || buffering)
+
+        val compact = mutableListOf<Int>()
         if (state != null) {
-            val toggleLabel = if (playing) "Pause" else "Play"
-            val toggleIcon = if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
-            builder.addAction(
-                Notification.Action.Builder(
-                    Icon.createWithResource(this, toggleIcon), toggleLabel,
-                    serviceIntent(ACTION_TOGGLE, 10)
+            val actions = mutableListOf<NotificationCompat.Action>()
+            fun add(icon: Int, label: String, action: String, requestCode: Int, inCompact: Boolean) {
+                actions += NotificationCompat.Action.Builder(
+                    IconCompat.createWithResource(this, icon), label,
+                    serviceIntent(action, requestCode)
                 ).build()
-            )
-            builder.addAction(
-                Notification.Action.Builder(
-                    Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel), "Stop",
-                    serviceIntent(ACTION_STOP, 11)
-                ).build()
-            )
-            session?.let { current ->
-                builder.setStyle(
-                    Notification.MediaStyle()
-                        .setMediaSession(current.sessionToken)
-                        .setShowActionsInCompactView(0, 1)
-                )
+                if (inCompact) compact += actions.lastIndex
             }
+            if (hub.canSkipPrevious()) {
+                add(R.drawable.ic_media_previous, "Previous", ACTION_PREVIOUS, 12, true)
+            }
+            add(
+                if (playing) R.drawable.ic_media_pause else R.drawable.ic_media_play,
+                if (playing) "Pause" else "Play",
+                ACTION_TOGGLE, 10, true
+            )
+            if (hub.canSkipNext()) {
+                add(R.drawable.ic_media_next, "Next", ACTION_NEXT, 13, true)
+            }
+            add(R.drawable.ic_media_stop, "Stop", ACTION_STOP, 11, false)
+            actions.forEach { builder.addAction(it) }
         }
+        val style = MediaNotificationCompat.MediaStyle().setMediaSession(hub.session.token)
+        if (compact.isNotEmpty()) style.setShowActionsInCompactView(*compact.toIntArray())
+        builder.setStyle(style)
         return builder.build()
     }
 

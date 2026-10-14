@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  What Android Auto is allowed to ask Soundtrail for. "media" is what makes the app appear in
+  the car's media launcher: the car then browses and controls the phone's own library through
+  SoundtrailAutoService, which serves only pins, playlists and their songs — never the
+  provider logins, the server address, or an audio file.
+
+  This file is referenced by the com.google.android.gms.car.application meta-data in the
+  manifest; removing either one takes Soundtrail out of Android Auto.
+-->
+<automotiveApp>
+    <uses name="media" />
+</automotiveApp>

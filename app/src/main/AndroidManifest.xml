@@ -34,6 +34,10 @@
         android:roundIcon="@mipmap/ic_soundtrail"
         android:label="@string/app_name"
         android:theme="@style/Theme.Soundtrail">
+        <!-- What Android Auto may ask this app for; see res/xml/automotive_app_desc.xml. -->
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -90,6 +94,19 @@
             android:name=".playback.PlaybackService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+
+        <!--
+          What Android Auto browses and drives. The car runs in another app, so this one has to
+          be exported; it serves only the library the user saved on this phone, and onGetRoot
+          refuses callers that are not the car host or the system's own media UI.
+        -->
+        <service
+            android:name=".auto.SoundtrailAutoService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.media.browse.MediaBrowserService" />
+            </intent-filter>
+        </service>
 
         <!-- Shares the user's imported audio files read-only with their chosen player. -->
         <provider

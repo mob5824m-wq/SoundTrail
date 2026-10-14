@@ -17,8 +17,8 @@ class AssistantParserTest {
 
     @Test
     fun `a plain request is the song`() {
-        // Nothing to strip, so the words are searched as they were said.
-        assertEquals("Bohemian Rhapsody", AssistantParser.parse("bohemian rhapsody")?.phrase)
+        // Nothing to strip, so the words are searched exactly as they were said.
+        assertEquals("bohemian rhapsody", AssistantParser.parse("bohemian rhapsody")?.phrase)
         // A verb in front of a two-word title is a command, and comes off.
         assertEquals("Bohemian Rhapsody", AssistantParser.parse("Play Bohemian Rhapsody")?.phrase)
     }

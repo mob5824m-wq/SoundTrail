@@ -110,7 +110,9 @@ internal object AssistantParser {
         }
 
         val asked = stripLeadIns(body)
-        if (asked.isEmpty()) return null
+        // Nothing but a command was said: "play", "please play", "hey soundtrail". There is no
+        // request in it, and searching for the command word would answer with nonsense.
+        if (asked.isEmpty() || leadIns.any { it.trim().equals(asked, ignoreCase = true) }) return null
 
         if (looksLikeAFeeling(said) && provider == null) {
             // The whole sentence goes to the mood engine: it reads "i feel" better than a

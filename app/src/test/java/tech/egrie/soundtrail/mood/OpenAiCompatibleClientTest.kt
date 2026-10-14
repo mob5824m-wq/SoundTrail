@@ -60,6 +60,71 @@ class OpenAiCompatibleClientTest {
         assertNull(MoodAiUrls.normalizeOpenAi("https://api.openai.com/v1/../admin"))
     }
 
+    @Test fun `Arena's portal catalog is read the way its own setup script reads it`() {
+        // The portal hands its setup script {"gatewayUrl": …, "data": [ … ]}, the same "data"
+        // array an OpenAI-compatible /models answers with — so one parser reads both.
+        val catalog = JSONObject().apply {
+            put("gatewayUrl", "https://api.preview.arena.ai")
+            put(
+                "data",
+                JSONArray()
+                    .put(
+                        JSONObject().apply {
+                            put("id", "coding-router-preview")
+                            put("arena_type", "direct")
+                            put("name", "(Arena) Coding Router")
+                        }
+                    )
+                    .put(
+                        JSONObject().apply {
+                            put("id", "claude-max-v0")
+                            put("arena_type", "direct")
+                            put("name", "Claude Max")
+                        }
+                    )
+            )
+        }
+        assertEquals(
+            listOf("coding-router-preview", "claude-max-v0"),
+            MoodAiParser.parseOpenAiModels(catalog.toString())
+        )
+    }
+
+    @Test fun `rows that are not callable models are skipped, as Arena's script skips them`() {
+        val catalog = JSONObject().apply {
+            put(
+                "data",
+                JSONArray()
+                    // A routing row: the router chooses, so there is nothing to call directly.
+                    .put(JSONObject().put("id", "routing-row").put("arena_type", "routing"))
+                    // Arena's own entry, which its script also refuses to offer.
+                    .put(JSONObject().put("id", "exo").put("arena_type", "direct"))
+                    .put(JSONObject().put("id", "claude-coding-router-preview").put("arena_type", "direct"))
+            )
+        }
+        assertEquals(
+            listOf("claude-coding-router-preview"),
+            MoodAiParser.parseOpenAiModels(catalog.toString())
+        )
+        // An ordinary endpoint's list is untouched: no arena_type, no Arena rules.
+        val plain = "{\"data\":[{\"id\":\"exo\"},{\"id\":\"gpt-4o-mini\"}]}"
+        assertEquals(listOf("exo", "gpt-4o-mini"), MoodAiParser.parseOpenAiModels(plain))
+    }
+
+    @Test fun `the router alias follows the key, the way Arena's script follows it`() {
+        // Preferred first, whichever of the four the key actually has.
+        assertEquals(
+            "coding-router-preview",
+            MoodAiUrls.arenaRouterFrom(listOf("claude-max-v0", "coding-router-preview", "gpt-4o"))
+        )
+        assertEquals("claude-max-v0", MoodAiUrls.arenaRouterFrom(listOf("claude-max-v0", "gpt-4o")))
+        assertEquals("claude-coding-router-preview", MoodAiUrls.arenaRouterFrom(listOf("claude-coding-router-preview")))
+        assertEquals("max-v0", MoodAiUrls.arenaRouterFrom(listOf("max-v0")))
+        // No router alias at all leaves the choice to the listener.
+        assertNull(MoodAiUrls.arenaRouterFrom(listOf("gpt-4o", "some-model")))
+        assertNull(MoodAiUrls.arenaRouterFrom(emptyList()))
+    }
+
     @Test fun `Arena's gateway is an endpoint like any other, so its preset has to normalise cleanly`() {
         val base = MoodAiUrls.normalizeOpenAi(MoodAiUrls.ARENA_BASE_URL)!!
         assertEquals("https://api.preview.arena.ai/v1", base)

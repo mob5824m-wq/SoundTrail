@@ -599,8 +599,14 @@ internal object MoodAiParser {
 
     /**
      * The model ids an OpenAI-compatible server reports from `/models`. Both spellings are
-     * understood: `{"data":[{"id":…}]}` (OpenAI, and almost everything that copies it) and the
-     * bare `{"models":[{"name":…}]}` some self-hosted servers use.
+     * understood: `{"data":[{"id":…}]}` (OpenAI, and almost everything that copies it — including
+     * the model list Arena's portal hands its own setup script) and the bare
+     * `{"models":[{"name":…}]}` some self-hosted servers use.
+     *
+     * Arena's rows carry one field the others do not, and it matters: `arena_type` marks entries
+     * that are not a model you can call — a row of type `routing` (the router picks for you), and
+     * Arena's own `exo` entry. Its setup script skips both, so this picker does too; a tap on
+     * either would send a request nothing answers.
      */
     fun parseOpenAiModels(body: String): List<String> {
         val root = runCatching { JSONObject(body) }.getOrNull() ?: return emptyList()
@@ -609,6 +615,8 @@ internal object MoodAiParser {
         for (index in 0 until array.length()) {
             val item = array.optJSONObject(index) ?: continue
             val id = item.optString("id").ifBlank { item.optString("name") }.trim()
+            val arenaType = item.optString("arena_type").trim()
+            if (arenaType == "routing" || (arenaType.isNotBlank() && id == "exo")) continue
             if (id.isNotBlank() && names.none { it == id }) names += id
         }
         return names.take(200)

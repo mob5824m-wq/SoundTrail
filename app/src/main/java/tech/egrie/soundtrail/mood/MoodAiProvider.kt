@@ -201,6 +201,23 @@ internal object MoodAiUrls {
     const val ARENA_MODEL = "coding-router-preview"
     const val ARENA_KEYS_URL = "https://portal.api.preview.arena.ai/dashboard/keys"
 
+    /**
+     * Every alias Arena's own setup script accepts for its coding router, in the order it
+     * prefers them. A key may have any one of these enabled rather than the first — the script
+     * looks for `coding-router-preview` and falls back to whichever else is present — so the app
+     * reads a model list the same way instead of leaving an alias that would fail the call.
+     */
+    val ARENA_ROUTER_MODELS = listOf(
+        "coding-router-preview",
+        "claude-coding-router-preview",
+        "claude-max-v0",
+        "max-v0"
+    )
+
+    /** The router alias to use from an Arena model list: the preferred one, else the first present. */
+    fun arenaRouterFrom(models: List<String>): String? =
+        ARENA_ROUTER_MODELS.firstOrNull { alias -> models.any { it == alias } }
+
     /** True when an address is Arena's gateway, so the app can offer its keys page. */
     fun isArena(base: String?): Boolean =
         base != null && hostOf(base) == "api.preview.arena.ai"

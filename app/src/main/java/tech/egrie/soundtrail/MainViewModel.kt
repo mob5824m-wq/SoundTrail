@@ -1191,13 +1191,22 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         viewModelScope.launch {
             runCatching { moodAi.listModels() }
                 .onSuccess { models ->
+                    val before = _state.value.mood
+                    val adapted = modelAfterList(before, models)
+                    val swapped = openAi && adapted.isNotBlank() && adapted != before.openAiModel
+                    if (swapped) moodPrefs.openAiModel = adapted
                     _state.update {
                         it.copy(
                             mood = it.mood.copy(
                                 aiBusy = false,
                                 ollamaModels = if (openAi) it.mood.ollamaModels else models,
                                 openAiModels = if (openAi) models else it.mood.openAiModels,
+                                openAiModel = if (openAi) moodPrefs.openAiModel else it.mood.openAiModel,
                                 aiNote = when {
+                                    swapped ->
+                                        "Arena: \u201C${before.openAiModel}\u201D is not enabled for " +
+                                            "this key, so \u201C$adapted\u201D is selected — the same " +
+                                            "choice Arena's own setup script makes."
                                     models.isEmpty() && openAi ->
                                         "That endpoint answered but lists no models. Type the name " +
                                             "of the one you want — the app will still use it."
@@ -1222,6 +1231,24 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                     )
                 }
         }
+    }
+
+    /**
+     * The model to keep once a list has arrived. A model already in the list is kept as it is, and
+     * Ollama's tags are left alone — they were typed or tapped deliberately. Arena is the one case
+     * that changes on its own: a key may have any of Arena's router aliases enabled, and Arena's
+     * own setup script picks whichever the key actually has, so the app picks the same one rather
+     * than leaving an alias that would fail the first real request.
+     */
+    private fun modelAfterList(mood: MoodUiState, models: List<String>): String {
+        if (models.isEmpty() || models.any { it == mood.openAiModel }) return mood.openAiModel
+        if (mood.aiProvider != MoodAiProvider.OPENAI_COMPATIBLE) return mood.openAiModel
+        if (!MoodAiUrls.isArena(MoodAiUrls.normalizeOpenAi(mood.openAiUrl))) return mood.openAiModel
+        // A name the listener typed themselves is theirs to keep; only the preset alias is Arena's
+        // to move, and it is moved only when the key turned out not to have it.
+        val presetAlias = MoodAiUrls.ARENA_ROUTER_MODELS.any { it == mood.openAiModel }
+        if (mood.openAiModel.isNotBlank() && !presetAlias) return mood.openAiModel
+        return MoodAiUrls.arenaRouterFrom(models) ?: mood.openAiModel
     }
 
     /** Probes the selected provider and reports exactly what happened. */

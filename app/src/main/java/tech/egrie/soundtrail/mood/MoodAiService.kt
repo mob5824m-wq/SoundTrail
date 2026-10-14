@@ -442,8 +442,9 @@ internal object MoodAiParser {
     fun describeNetworkFailure(address: String, error: Exception): String {
         val reason = error.message?.take(80)?.takeIf { it.isNotBlank() } ?: "no response"
         val hint = if (MoodAiUrls.isLoopback(address)) {
-            "On a phone, ${MoodAiUrls.hostOf(address)} means this device — use the computer's " +
-                "address on your network instead, and start Ollama with OLLAMA_HOST=0.0.0.0:11434."
+            "${MoodAiUrls.hostOf(address)} is this phone itself. Either Ollama runs here (then " +
+                "check it is actually up, and listening on 0.0.0.0:11434 rather than 127.0.0.1), " +
+                "or you meant a computer on your network — use that machine's address."
         } else {
             "Check that Ollama is running there with OLLAMA_HOST=0.0.0.0:11434 and that this " +
                 "device is on the same network."

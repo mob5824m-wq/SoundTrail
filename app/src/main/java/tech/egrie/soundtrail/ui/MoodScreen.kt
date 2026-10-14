@@ -78,6 +78,8 @@ internal data class MoodActions(
     /** The address of an OpenAI-compatible endpoint, and the model to ask for there. */
     val onSetOpenAiUrl: (String) -> Unit,
     val onSetOpenAiModel: (String) -> Unit,
+    /** Fills in Arena's gateway (address and router alias) so only the key is left to paste. */
+    val onUseArena: () -> Unit,
     val onDetectModels: () -> Unit,
     val onTestAi: () -> Unit,
     val onSaveAiKey: (String) -> Unit,
@@ -394,6 +396,24 @@ private fun MoodReadingCard(mood: MoodUiState, actions: MoodActions, onNotice: (
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
                 )
                 Spacer(Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = actions.onUseArena) {
+                        Text("Use Arena (preview)", color = Palette.lilac)
+                    }
+                    if (MoodAiUrls.isArena(MoodAiUrls.normalizeOpenAi(mood.openAiUrl))) {
+                        TextButton(
+                            onClick = {
+                                onNotice(
+                                    "Create a key at ${MoodAiUrls.ARENA_KEYS_URL} \u2014 copy it " +
+                                        "while the dialog is open; it is not shown again."
+                                )
+                            }
+                        ) {
+                            Text("Where do I get a key?  \u2197", color = Palette.lilac)
+                        }
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
                 TextButton(onClick = { showKeyField = !showKeyField }) {
                     Text(
                         if (showKeyField) "Hide API key" else "Add the API key (only if it asks for one)",
@@ -406,11 +426,12 @@ private fun MoodReadingCard(mood: MoodUiState, actions: MoodActions, onNotice: (
                 Spacer(Modifier.height(6.dp))
                 Text(
                     "Anything that speaks OpenAI's chat-completions API works here: OpenAI, " +
-                        "OpenRouter, a model running on your own machine, or a bridge in front of " +
-                        "a service that has no API of its own. Paste the address however you found " +
-                        "it \u2014 a whole \u2026/v1/chat/completions endpoint is trimmed for you, " +
-                        "and a bare host gets /v1. A server that wants no key is fine: leave the " +
-                        "key empty and none is sent.",
+                        "OpenRouter, Arena (tap Use Arena to fill it in), a model running on your " +
+                        "own machine, or a bridge in front of a service that has no API of its " +
+                        "own. Paste the address however you found it \u2014 a whole " +
+                        "\u2026/v1/chat/completions endpoint is trimmed for you, and a bare host " +
+                        "gets /v1. A server that wants no key is fine: leave the key empty and " +
+                        "none is sent.",
                     color = Palette.muted, style = MaterialTheme.typography.labelMedium
                 )
             }

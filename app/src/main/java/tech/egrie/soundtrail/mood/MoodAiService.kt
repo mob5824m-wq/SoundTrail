@@ -263,9 +263,14 @@ internal class MoodAiService(private val store: MoodStore) {
         val detail = MoodAiParser.openAiError(body)
         val shown = MoodAiUrls.display(base)
         val message = when {
-            code == 401 || code == 403 ->
-                "The endpoint at $shown rejected the API key. Check the key, and that the address " +
-                    "is the API root — for OpenAI that is https://api.openai.com/v1."
+            // The endpoint's own sentence is kept when it has one: an Arena gateway answering
+            // "missing or invalid bearer token" says more than "rejected the key" ever could.
+            code == 401 || code == 403 -> {
+                val advice =
+                    "The endpoint at $shown rejected the API key. Check the key, and that the " +
+                        "address is the API root — for OpenAI that is https://api.openai.com/v1."
+                detail?.let { "$advice The endpoint said: $it" } ?: advice
+            }
             code == 404 && detail != null -> detail
             code == 404 ->
                 "$shown answered, but nothing is at ${MoodAiUrls.display(MoodAiUrls.openAiChatUrl(base))}. " +

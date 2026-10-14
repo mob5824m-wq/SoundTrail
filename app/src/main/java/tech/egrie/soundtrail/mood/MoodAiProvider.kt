@@ -187,6 +187,24 @@ internal object MoodAiUrls {
     /** The model list of a normalised OpenAI-compatible base, where the server has one. */
     fun openAiModelsUrl(base: String): String = "$base/models"
 
+    /**
+     * Arena's gateway, which speaks this same API — so Arena is one of the endpoints this provider
+     * covers rather than a provider of its own.
+     *
+     * These three values come from Arena's own portal (`portal.api.preview.arena.ai`: its OpenCode
+     * page gives `…/v1` as the base URL, its Claude Code page gives `coding-router-preview` as the
+     * router alias, and both point at the Keys page). The gateway is labelled **preview**, so if
+     * Arena moves it — a GA host, a new alias — these are the only lines that need to change.
+     * Everything else is typed by the listener.
+     */
+    const val ARENA_BASE_URL = "https://api.preview.arena.ai/v1"
+    const val ARENA_MODEL = "coding-router-preview"
+    const val ARENA_KEYS_URL = "https://portal.api.preview.arena.ai/dashboard/keys"
+
+    /** True when an address is Arena's gateway, so the app can offer its keys page. */
+    fun isArena(base: String?): Boolean =
+        base != null && hostOf(base) == "api.preview.arena.ai"
+
     /** True when a host with no scheme is plainly a machine on the listener's own network. */
     private fun looksLocal(input: String): Boolean {
         val typed = input.substringAfter("://").substringBefore('/')

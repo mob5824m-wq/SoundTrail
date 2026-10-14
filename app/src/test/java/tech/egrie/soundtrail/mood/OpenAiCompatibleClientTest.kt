@@ -60,6 +60,19 @@ class OpenAiCompatibleClientTest {
         assertNull(MoodAiUrls.normalizeOpenAi("https://api.openai.com/v1/../admin"))
     }
 
+    @Test fun `Arena's gateway is an endpoint like any other, so its preset has to normalise cleanly`() {
+        val base = MoodAiUrls.normalizeOpenAi(MoodAiUrls.ARENA_BASE_URL)!!
+        assertEquals("https://api.preview.arena.ai/v1", base)
+        assertEquals("https://api.preview.arena.ai/v1/chat/completions", MoodAiUrls.openAiChatUrl(base))
+        assertEquals("https://api.preview.arena.ai/v1/models", MoodAiUrls.openAiModelsUrl(base))
+        assertTrue(MoodAiUrls.isArena(base))
+        // The alias Arena's portal documents survives the model-name sanitiser untouched.
+        assertEquals("coding-router-preview", MoodStore.sanitizeOpenAiModel(MoodAiUrls.ARENA_MODEL))
+        // And another endpoint's address is not mistaken for Arena's.
+        assertTrue(!MoodAiUrls.isArena(MoodAiUrls.normalizeOpenAi("api.openai.com")))
+        assertTrue(!MoodAiUrls.isArena(null))
+    }
+
     @Test fun `the two routes this provider uses are built from the base`() {
         val base = MoodAiUrls.normalizeOpenAi("192.168.0.20:8000")!!
         assertEquals("http://192.168.0.20:8000/v1/chat/completions", MoodAiUrls.openAiChatUrl(base))

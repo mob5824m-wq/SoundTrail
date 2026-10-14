@@ -272,6 +272,7 @@ class MainActivity : ComponentActivity() {
                         onSetOllamaModel = model::setMoodOllamaModel,
                         onSetOpenAiUrl = model::setMoodOpenAiUrl,
                         onSetOpenAiModel = model::setMoodOpenAiModel,
+                        onUseArena = model::useMoodArenaPreset,
                         onDetectModels = model::detectMoodModels,
                         onTestAi = model::testMoodAi,
                         onSaveAiKey = model::saveMoodAiKey,

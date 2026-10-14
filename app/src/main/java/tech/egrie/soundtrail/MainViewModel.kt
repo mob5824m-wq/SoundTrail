@@ -1131,6 +1131,35 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     }
 
     /**
+     * Fills in Arena's gateway. Arena publishes an OpenAI-compatible API, so it needs no provider
+     * of its own — only the address and the router alias its own portal documents. The key still
+     * has to come from the listener: it is created on Arena's Keys page and pasted into the field
+     * below, then **Find models** lists whatever that key is enabled for.
+     */
+    fun useMoodArenaPreset() {
+        moodPrefs.aiProvider = MoodAiProvider.OPENAI_COMPATIBLE
+        moodPrefs.openAiUrl = MoodAiUrls.ARENA_BASE_URL
+        moodPrefs.openAiModel = MoodAiUrls.ARENA_MODEL
+        _state.update {
+            it.copy(
+                mood = it.mood.copy(
+                    aiProvider = MoodAiProvider.OPENAI_COMPATIBLE,
+                    openAiUrl = moodPrefs.openAiUrl,
+                    openAiModel = moodPrefs.openAiModel,
+                    aiKeySet = moodPrefs.keySet(MoodAiProvider.OPENAI_COMPATIBLE),
+                    aiKeySaved = moodPrefs.keySet(MoodAiProvider.OPENAI_COMPATIBLE),
+                    ollamaModels = emptyList(),
+                    openAiModels = emptyList(),
+                    aiReady = moodAi.configured,
+                    aiNote = "Arena's gateway is filled in. Paste a key from the Keys page below, " +
+                        "then press Test."
+                )
+            )
+        }
+        notify("Arena (preview) filled in. Create a key on Arena's Keys page, paste it below, then press Test.")
+    }
+
+    /**
      * Asks the selected endpoint which models it has, so the listener picks instead of guessing:
      * the tags an Ollama server has pulled, or the ids an OpenAI-compatible endpoint lists. A
      * server that publishes no list is told apart from one that cannot be reached, because the

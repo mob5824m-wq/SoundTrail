@@ -51,7 +51,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import tech.egrie.soundtrail.AppState
 import tech.egrie.soundtrail.MoodUiState
-import tech.egrie.soundtrail.mood.MoodAiService
+import tech.egrie.soundtrail.mood.MoodAiProvider
 import tech.egrie.soundtrail.mood.MoodEngine
 import tech.egrie.soundtrail.mood.MoodMixTrack
 import tech.egrie.soundtrail.mood.MoodProfile
@@ -70,7 +70,13 @@ internal data class MoodActions(
     val onImproveTags: () -> Unit,
     val onSetTagLookup: (Boolean) -> Unit,
     val onSetAiEnabled: (Boolean) -> Unit,
+    /** Switch between the on-device engine, Ollama, and a hosted model. */
+    val onSetAiProvider: (MoodAiProvider) -> Unit,
     val onSetAiModel: (String) -> Unit,
+    val onSetOllamaUrl: (String) -> Unit,
+    val onSetOllamaModel: (String) -> Unit,
+    val onDetectModels: () -> Unit,
+    val onTestAi: () -> Unit,
     val onSaveAiKey: (String) -> Unit,
     val onClearAiKey: () -> Unit,
     val onOpenInYouTubeMusic: () -> Unit
@@ -79,9 +85,6 @@ internal data class MoodActions(
 @Composable
 internal fun MoodScreen(state: AppState, actions: MoodActions, onNotice: (String) -> Unit) {
     val mood = state.mood
-    var aiKeyDraft by rememberSaveable { mutableStateOf("") }
-    var showAiSetup by rememberSaveable { mutableStateOf(false) }
-    val provider = MoodAiService.Provider.GEMINI
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)
@@ -191,98 +194,242 @@ internal fun MoodScreen(state: AppState, actions: MoodActions, onNotice: (String
         }
         Spacer(Modifier.height(10.dp))
 
-        SurfaceCard(Modifier.fillMaxWidth()) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(43.dp).background(Palette.primary.copy(alpha = .14f), CircleShape),
-                    contentAlignment = Alignment.Center) {
-                    Icon(Icons.Rounded.Favorite, null, tint = Palette.primary)
-                }
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("Mood reading", style = MaterialTheme.typography.titleLarge)
-                    Text(
-                        if (mood.aiEnabled && mood.aiKeySet) "AI model · ${mood.aiModel}"
-                        else "On-device · works offline, nothing sent",
-                        color = Palette.secondary, style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-                Switch(
-                    checked = mood.aiEnabled,
-                    onCheckedChange = { enabled ->
-                        actions.onSetAiEnabled(enabled)
-                        if (enabled && !mood.aiKeySet) showAiSetup = true
-                    }
-                )
+        MoodReadingCard(mood, actions, onNotice)
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+/**
+ * Where mood readings come from, and the setup each choice needs.
+ *
+ * The on-device engine is first and needs nothing, Ollama keeps the model on hardware the
+ * listener controls, and the hosted key is last. The card says plainly what leaves the device for
+ * whichever is selected, because that is the whole reason to have a choice.
+ */
+@Composable
+private fun MoodReadingCard(mood: MoodUiState, actions: MoodActions, onNotice: (String) -> Unit) {
+    var keyDraft by rememberSaveable(mood.aiProvider) { mutableStateOf("") }
+    var showKeyField by rememberSaveable(mood.aiProvider) { mutableStateOf(false) }
+    val provider = mood.aiProvider
+
+    SurfaceCard(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(43.dp).background(Palette.primary.copy(alpha = .14f), CircleShape),
+                contentAlignment = Alignment.Center) {
+                Icon(Icons.Rounded.Favorite, null, tint = Palette.primary)
             }
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "The on-device engine reads your words on the phone — no key, no network. Switching " +
-                    "the AI model on sends only your mood description (plus the energy hint, the hour, " +
-                    "and whether you are moving) to ${provider.label}; your songs, playlists, pins, and " +
-                    "places never leave the device. Any failure falls back to the on-device reading.",
-                color = Palette.secondary, style = MaterialTheme.typography.bodyMedium
-            )
-            TextButton(onClick = { showAiSetup = !showAiSetup }) {
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Mood reading", style = MaterialTheme.typography.titleLarge)
                 Text(
-                    if (showAiSetup) "Hide AI model setup" else "Set up the AI model (bring your own key)",
-                    color = Palette.lilac
+                    when {
+                        !mood.aiEnabled -> "On-device \u00b7 works offline, nothing sent"
+                        provider == MoodAiProvider.ON_DEVICE -> "On-device \u00b7 nothing sent"
+                        provider == MoodAiProvider.OLLAMA -> "Ollama \u00b7 ${mood.ollamaModel}"
+                        else -> "Gemini \u00b7 ${mood.aiModel}"
+                    },
+                    color = Palette.secondary, style = MaterialTheme.typography.bodyMedium
                 )
             }
-            if (showAiSetup || (mood.aiEnabled && !mood.aiKeySet)) {
-                Text(provider.keyHint, style = MaterialTheme.typography.labelMedium, color = Palette.secondary)
+            Switch(
+                checked = mood.aiEnabled,
+                onCheckedChange = { enabled ->
+                    actions.onSetAiEnabled(enabled)
+                    if (enabled && provider != MoodAiProvider.ON_DEVICE && !mood.aiReady) {
+                        showKeyField = provider == MoodAiProvider.GEMINI
+                    }
+                }
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        Text("Run the reading", style = MaterialTheme.typography.labelMedium, color = Palette.muted)
+        Spacer(Modifier.height(6.dp))
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            MoodAiProvider.values().forEach { option ->
+                MoodPill(
+                    text = option.short,
+                    selected = provider == option,
+                    onClick = { actions.onSetAiProvider(option) }
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(provider.blurb, color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
+
+        when (provider) {
+            MoodAiProvider.ON_DEVICE -> {
                 Spacer(Modifier.height(6.dp))
+                Text(
+                    "A small, explainable model reads phrases, negation, emoji, the time of day, " +
+                        "and \u2014 only while the automation watch is on \u2014 whether you are walking, " +
+                        "running, or driving. No key, no account, no network.",
+                    color = Palette.muted, style = MaterialTheme.typography.labelMedium
+                )
+            }
+
+            MoodAiProvider.OLLAMA -> {
+                Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
-                    value = aiKeyDraft,
-                    onValueChange = { aiKeyDraft = it.trim().take(200) },
+                    value = mood.ollamaUrl,
+                    onValueChange = actions.onSetOllamaUrl,
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    label = { Text("${provider.label} API key") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
+                    label = { Text("Ollama address") },
+                    placeholder = { Text("http://192.168.0.20:11434") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
                 )
                 Spacer(Modifier.height(8.dp))
-                if (mood.aiKeySet) {
-                    Text(
-                        "A key is saved on this device, encrypted with Android Keystore. It is never " +
-                            "synced, never backed up, and never included in exports.",
-                        color = Palette.primary, style = MaterialTheme.typography.labelMedium
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    PrimaryButton(
+                        if (mood.aiBusy) "Checking\u2026" else "Find models",
+                        actions.onDetectModels,
+                        Modifier.weight(1f),
+                        enabled = !mood.aiBusy && mood.ollamaUrl.isNotBlank()
                     )
-                    Spacer(Modifier.height(6.dp))
+                    Spacer(Modifier.width(8.dp))
+                    TextButton(onClick = actions.onTestAi, enabled = !mood.aiBusy) {
+                        Text("Test", color = Palette.lilac)
+                    }
                 }
-                PrimaryButton(
-                    if (mood.aiKeySet) "Replace key" else "Save key",
-                    { actions.onSaveAiKey(aiKeyDraft); aiKeyDraft = "" },
-                    Modifier.fillMaxWidth(),
-                    enabled = aiKeyDraft.isNotBlank()
-                )
-                if (mood.aiKeySet) {
-                    Spacer(Modifier.height(4.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Rounded.Check, null, tint = Palette.primary, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Key saved", color = Palette.primary, style = MaterialTheme.typography.labelMedium)
-                        Spacer(Modifier.weight(1f))
-                        TextButton(onClick = actions.onClearAiKey) {
-                            Text("Remove key", color = Palette.coral)
+                if (mood.ollamaModels.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        mood.ollamaModels.forEach { name ->
+                            MoodPill(
+                                text = name,
+                                selected = mood.ollamaModel == name,
+                                onClick = { actions.onSetOllamaModel(name) }
+                            )
                         }
                     }
                 }
-                Spacer(Modifier.height(6.dp))
+                Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
-                    value = mood.aiModel,
-                    onValueChange = actions.onSetAiModel,
+                    value = mood.ollamaModel,
+                    onValueChange = actions.onSetOllamaModel,
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    label = { Text("Model name") },
+                    label = { Text("Model") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
                 )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Ollama has to be reachable from this device: start it with " +
+                        "OLLAMA_HOST=0.0.0.0:11434, and on a phone use the computer's address on " +
+                        "your network \u2014 \u201Clocalhost\u201D here means this device. Local models " +
+                        "can take up to a minute; the app waits three.",
+                    color = Palette.muted, style = MaterialTheme.typography.labelMedium
+                )
                 Spacer(Modifier.height(4.dp))
-                TextButton(onClick = { onNotice("Open ${provider.keyUrl} to create or manage a key.") }) {
-                    Text("Where do I get a key?  \u2197", color = Palette.lilac)
+                TextButton(onClick = { showKeyField = !showKeyField }) {
+                    Text(
+                        if (showKeyField) "Hide token" else "Add a token (only if your server asks)",
+                        color = Palette.lilac
+                    )
+                }
+                if (showKeyField) {
+                    KeyField("Ollama token", keyDraft, { keyDraft = it }, mood, provider, actions)
+                }
+            }
+
+            MoodAiProvider.GEMINI -> {
+                Spacer(Modifier.height(12.dp))
+                TextButton(onClick = { showKeyField = !showKeyField }) {
+                    Text(
+                        if (showKeyField) "Hide API key" else "Set up the API key (bring your own)",
+                        color = Palette.lilac
+                    )
+                }
+                if (showKeyField || (mood.aiEnabled && !mood.aiReady)) {
+                    KeyField("Google AI Studio API key", keyDraft, { keyDraft = it }, mood, provider, actions)
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedTextField(
+                        value = mood.aiModel,
+                        onValueChange = actions.onSetAiModel,
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Model name") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
+                    )
+                    TextButton(onClick = { onNotice("Open ${provider.keyUrl} to create or manage a key.") }) {
+                        Text("Where do I get a key?  \u2197", color = Palette.lilac)
+                    }
                 }
             }
         }
-        Spacer(Modifier.height(24.dp))
+
+        if (provider != MoodAiProvider.ON_DEVICE) {
+            Spacer(Modifier.height(8.dp))
+            mood.aiNote?.let { note ->
+                Text(note, color = Palette.secondary, style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.height(6.dp))
+            }
+            Text(
+                "Only your mood description, the energy hint, the hour, and whether you are moving " +
+                    "are sent. Your songs, playlists, pins, and places never leave the device, and any " +
+                    "failure falls back to the on-device reading.",
+                color = Palette.muted, style = MaterialTheme.typography.labelMedium
+            )
+        }
+    }
+}
+
+/** The credential field, shared by the providers that take one. */
+@Composable
+private fun KeyField(
+    label: String,
+    draft: String,
+    onDraftChange: (String) -> Unit,
+    mood: MoodUiState,
+    provider: MoodAiProvider,
+    actions: MoodActions
+) {
+    Spacer(Modifier.height(6.dp))
+    provider.keyHint.takeIf { it.isNotBlank() }?.let { hint ->
+        Text(hint, style = MaterialTheme.typography.labelMedium, color = Palette.secondary)
+        Spacer(Modifier.height(6.dp))
+    }
+    OutlinedTextField(
+        value = draft,
+        onValueChange = { onDraftChange(it.trim().take(200)) },
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        label = { Text(label) },
+        visualTransformation = PasswordVisualTransformation(),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
+    )
+    Spacer(Modifier.height(8.dp))
+    if (mood.aiKeySet) {
+        Text(
+            "Saved on this device, encrypted with Android Keystore. It is never synced, never " +
+                "backed up, and never included in exports.",
+            color = Palette.primary, style = MaterialTheme.typography.labelMedium
+        )
+        Spacer(Modifier.height(6.dp))
+    }
+    PrimaryButton(
+        if (mood.aiKeySet) "Replace" else "Save",
+        { actions.onSaveAiKey(draft); onDraftChange("") },
+        Modifier.fillMaxWidth(),
+        enabled = draft.isNotBlank()
+    )
+    if (mood.aiKeySet) {
+        Spacer(Modifier.height(4.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.Check, null, tint = Palette.primary, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("Saved", color = Palette.primary, style = MaterialTheme.typography.labelMedium)
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = actions.onClearAiKey) {
+                Text("Remove", color = Palette.coral)
+            }
+        }
     }
 }
 

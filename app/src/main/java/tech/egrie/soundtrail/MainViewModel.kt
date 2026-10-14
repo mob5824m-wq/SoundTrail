@@ -47,8 +47,11 @@ import tech.egrie.soundtrail.integrations.YouTubeImportedPlaylist
 import tech.egrie.soundtrail.integrations.YouTubeReconnectRequiredException
 import tech.egrie.soundtrail.integrations.YouTubeSearch
 import tech.egrie.soundtrail.location.DeviceLocation
+import tech.egrie.soundtrail.mood.DEFAULT_OLLAMA_MODEL
 import tech.egrie.soundtrail.mood.MoodAiException
+import tech.egrie.soundtrail.mood.MoodAiProvider
 import tech.egrie.soundtrail.mood.MoodAiService
+import tech.egrie.soundtrail.mood.MoodAiUrls
 import tech.egrie.soundtrail.mood.MoodCandidate
 import tech.egrie.soundtrail.mood.MoodContext
 import tech.egrie.soundtrail.mood.MoodEngine
@@ -151,7 +154,19 @@ internal data class MoodUiState(
     val queueIndex: Int = -1,
     val queuePlaying: Boolean = false,
     val aiEnabled: Boolean = false,
+    /** Where a reading comes from when [aiEnabled]: on-device, Ollama, or a hosted model. */
+    val aiProvider: MoodAiProvider = MoodAiProvider.ON_DEVICE,
     val aiModel: String = MoodStore.DEFAULT_AI_MODEL,
+    val ollamaUrl: String = "",
+    val ollamaModel: String = DEFAULT_OLLAMA_MODEL,
+    /** Models the listener's Ollama server reported on the last check. */
+    val ollamaModels: List<String> = emptyList(),
+    /** True while a connection test or a model check is running. */
+    val aiBusy: Boolean = false,
+    /** A sentence from the last test, shown under the provider picker. */
+    val aiNote: String? = null,
+    /** True when the selected provider has everything it needs right now. */
+    val aiReady: Boolean = false,
     val aiKeySet: Boolean = false,
     val aiKeySaved: Boolean = false,
     val enrichEnabled: Boolean = false,
@@ -252,8 +267,12 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 text = moodPrefs.lastText,
                 energyHint = moodPrefs.lastEnergyHint,
                 aiEnabled = moodPrefs.aiEnabled,
+                aiProvider = moodPrefs.aiProvider,
                 aiModel = moodPrefs.aiModel,
-                aiKeySet = moodPrefs.aiKeySet,
+                ollamaUrl = moodPrefs.ollamaUrl,
+                ollamaModel = moodPrefs.ollamaModel,
+                aiKeySet = moodPrefs.keySet(moodPrefs.aiProvider),
+                aiReady = moodAi.configured,
                 enrichEnabled = moodPrefs.tagLookupEnabled
             ),
             youtubeAuth = youtubeData.authHealth()
@@ -678,22 +697,26 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     /**
      * Reads the mood and builds a mix from the listener's own library.
      *
-     * When the optional AI model is switched on and has a key, it reads the description; every
-     * failure (no network, quota, a refusal, unreadable output) falls back to the on-device
-     * engine with a short explanation, so the feature never depends on the model being up.
-     * A quick-pick mood skips reading altogether.
+     * When a model is switched on — Ollama on the listener's own hardware, or a hosted model with
+     * their key — it reads the description; every failure (no network, quota, a refusal,
+     * unreadable output) falls back to the on-device engine with a short explanation, so the
+     * feature never depends on a model being reachable. A quick-pick mood skips reading entirely.
      */
     fun analyzeMood(quickMoodId: String? = null) {
         val mood = _state.value.mood
         if (mood.analyzing) return
         val context = moodContext()
+        val useModel = mood.aiEnabled && mood.aiProvider != MoodAiProvider.ON_DEVICE && mood.aiReady
+        if (mood.aiEnabled && !mood.aiReady && mood.aiProvider != MoodAiProvider.ON_DEVICE) {
+            notify(missingProviderSetting(mood.aiProvider))
+        }
         _state.update { it.copy(mood = it.mood.copy(analyzing = true, error = null, savedPlaylistName = null)) }
         viewModelScope.launch {
             val profile = try {
                 when {
                     quickMoodId != null ->
                         MoodEngine.forMood(quickMoodId, context) ?: MoodEngine.analyze(mood.text, context)
-                    mood.aiEnabled && mood.aiKeySet -> moodAi.readMood(mood.text, context)
+                    useModel -> moodAi.readMood(mood.text, context)
                     else -> MoodEngine.analyze(mood.text, context)
                 }
             } catch (e: MoodAiException) {
@@ -869,26 +892,159 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
 
     fun setMoodAiEnabled(enabled: Boolean) {
         moodPrefs.aiEnabled = enabled
-        _state.update { it.copy(mood = it.mood.copy(aiEnabled = enabled)) }
+        val mood = _state.value.mood
+        _state.update { it.copy(mood = it.mood.copy(aiEnabled = enabled, aiNote = null)) }
         notify(
-            if (enabled && !moodPrefs.aiKeySet) "Add an API key below, or the on-device engine will read your mood."
-            else if (enabled) "AI mood reading on. Only your mood description leaves the device."
-            else "AI mood reading off. The on-device engine still works offline."
+            when {
+                !enabled -> "Model reading off. The on-device engine still reads your mood offline."
+                mood.aiProvider == MoodAiProvider.ON_DEVICE ->
+                    "Already on the on-device engine — nothing leaves the device."
+                mood.aiReady -> "${mood.aiProvider.short} reading on. Only your mood description leaves the device."
+                else -> missingProviderSetting(mood.aiProvider)
+            }
         )
     }
 
-    fun saveMoodAiKey(key: String) {
-        moodPrefs.saveAiKey(key)
-        moodPrefs.aiModel = _state.value.mood.aiModel
-        val saved = moodPrefs.aiKeySet
-        _state.update { it.copy(mood = it.mood.copy(aiKeySet = saved, aiKeySaved = saved)) }
-        if (saved) {
-            notify("API key saved, encrypted with this device's key store. Test it with a mood reading.")
-            viewModelScope.launch {
-                runCatching { moodAi.testKey() }
-                    .onSuccess { notify(it) }
-                    .onFailure { notify(it.message ?: "The AI model could not be reached with that key.") }
+    /**
+     * Switches where readings come from. The on-device engine is the default and the fallback, so
+     * this is a preference, never a requirement.
+     */
+    fun setMoodAiProvider(provider: MoodAiProvider) {
+        moodPrefs.aiProvider = provider
+        _state.update {
+            it.copy(
+                mood = it.mood.copy(
+                    aiProvider = provider,
+                    aiReady = moodAi.configured,
+                    aiKeySet = moodPrefs.keySet(provider),
+                    aiKeySaved = moodPrefs.keySet(provider),
+                    aiNote = null,
+                    ollamaModels = if (provider == MoodAiProvider.OLLAMA) it.mood.ollamaModels else emptyList()
+                )
+            )
+        }
+        notify(
+            when {
+                provider == MoodAiProvider.ON_DEVICE ->
+                    "Reading moods on this device: no network, no key, nothing sent."
+                provider == MoodAiProvider.OLLAMA && moodAi.configured ->
+                    "Ollama selected. Only your mood description goes to that address."
+                provider == MoodAiProvider.OLLAMA ->
+                    "Add your Ollama server's address below, or press Test to check it."
+                moodPrefs.keySet(provider) -> "${provider.short} selected."
+                else -> "Paste an API key from ${provider.keyUrl} to use ${provider.short}."
             }
+        )
+    }
+
+    /** The address of the listener's Ollama server, accepted in whatever form they pasted it. */
+    fun setMoodOllamaUrl(url: String) {
+        moodPrefs.ollamaUrl = url
+        val normalized = MoodAiUrls.normalize(url)
+        _state.update {
+            it.copy(
+                mood = it.mood.copy(
+                    ollamaUrl = moodPrefs.ollamaUrl,
+                    aiReady = moodAi.configured,
+                    aiNote = when {
+                        url.isBlank() -> null
+                        normalized == null -> "That does not look like an address. Try http://192.168.0.20:11434"
+                        else -> "Using ${MoodAiUrls.display(normalized)}"
+                    }
+                )
+            )
+        }
+    }
+
+    fun setMoodOllamaModel(name: String) {
+        moodPrefs.ollamaModel = name
+        _state.update { it.copy(mood = it.mood.copy(ollamaModel = moodPrefs.ollamaModel, aiNote = null)) }
+    }
+
+    /** Asks the Ollama server which models it has, so the listener picks instead of guessing. */
+    fun detectMoodModels() {
+        val mood = _state.value.mood
+        if (mood.aiBusy) return
+        if (MoodAiUrls.normalize(mood.ollamaUrl) == null) {
+            notify("Add your Ollama server's address first, for example http://192.168.0.20:11434.")
+            return
+        }
+        moodPrefs.aiProvider = MoodAiProvider.OLLAMA
+        _state.update {
+            it.copy(mood = it.mood.copy(aiProvider = MoodAiProvider.OLLAMA, aiBusy = true, aiNote = null))
+        }
+        viewModelScope.launch {
+            runCatching { moodAi.listModels() }
+                .onSuccess { models ->
+                    _state.update {
+                        it.copy(
+                            mood = it.mood.copy(
+                                aiBusy = false,
+                                ollamaModels = models,
+                                aiNote = if (models.isEmpty()) {
+                                    "That server answered but has no models yet. Run: ollama pull ${it.mood.ollamaModel}"
+                                } else {
+                                    "${models.size} model${if (models.size == 1) "" else "s"} found — tap one to use it."
+                                },
+                                aiReady = moodAi.configured
+                            )
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _state.update { it.copy(mood = it.mood.copy(aiBusy = false, aiNote = error.message)) }
+                    notify(error.message ?: "That Ollama server could not be reached.")
+                }
+        }
+    }
+
+    /** Probes the selected provider and reports exactly what happened. */
+    fun testMoodAi() {
+        val mood = _state.value.mood
+        if (mood.aiBusy) return
+        if (!moodAi.configured) {
+            notify(missingProviderSetting(mood.aiProvider))
+            return
+        }
+        _state.update { it.copy(mood = it.mood.copy(aiBusy = true, aiNote = null)) }
+        viewModelScope.launch {
+            runCatching { moodAi.testConnection() }
+                .onSuccess { note ->
+                    _state.update { it.copy(mood = it.mood.copy(aiBusy = false, aiNote = note)) }
+                    notify(note)
+                }
+                .onFailure { error ->
+                    val message = error.message ?: "That model could not be reached."
+                    _state.update { it.copy(mood = it.mood.copy(aiBusy = false, aiNote = message)) }
+                    notify(message)
+                }
+        }
+    }
+
+    /** Saves the credential for whichever provider is selected (Ollama's is optional). */
+    fun saveMoodAiKey(key: String) {
+        val provider = _state.value.mood.aiProvider
+        if (provider == MoodAiProvider.ON_DEVICE) {
+            notify("The on-device engine needs no key.")
+            return
+        }
+        moodPrefs.saveKey(provider, key)
+        val saved = moodPrefs.keySet(provider)
+        _state.update {
+            it.copy(
+                mood = it.mood.copy(
+                    aiKeySet = saved,
+                    aiKeySaved = saved,
+                    aiReady = moodAi.configured,
+                    aiNote = if (saved && provider == MoodAiProvider.OLLAMA) {
+                        "Token saved. It is sent only to that address, as a bearer token."
+                    } else null
+                )
+            )
+        }
+        if (saved) {
+            notify("Saved, encrypted with this device's key store.")
+            if (provider == MoodAiProvider.GEMINI) testMoodAi()
         } else {
             notify("Key cleared. The on-device engine reads your mood.")
         }
@@ -900,9 +1056,29 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     }
 
     fun clearMoodAiKey() {
-        moodPrefs.clearAiKey()
-        _state.update { it.copy(mood = it.mood.copy(aiKeySet = false, aiKeySaved = false)) }
-        notify("API key removed from this device.")
+        val provider = _state.value.mood.aiProvider
+        moodPrefs.clearKey(provider)
+        _state.update {
+            it.copy(
+                mood = it.mood.copy(
+                    aiKeySet = false,
+                    aiKeySaved = false,
+                    aiReady = moodAi.configured,
+                    aiNote = null
+                )
+            )
+        }
+        notify("Key removed from this device.")
+    }
+
+    /** What to tell someone who switched a model on before finishing its setup. */
+    private fun missingProviderSetting(provider: MoodAiProvider): String = when (provider) {
+        MoodAiProvider.ON_DEVICE -> "The on-device engine needs nothing."
+        MoodAiProvider.OLLAMA ->
+            "Add your Ollama server's address (for example http://192.168.0.20:11434). " +
+                "Reading on-device until then."
+        MoodAiProvider.GEMINI ->
+            "Paste a Google AI Studio API key to use ${provider.short}. Reading on-device until then."
     }
 
     /** Hands the current mood's search phrases to YouTube Music; never needs a Google sign-in. */

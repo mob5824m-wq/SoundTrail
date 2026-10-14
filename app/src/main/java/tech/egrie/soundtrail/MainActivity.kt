@@ -209,7 +209,12 @@ class MainActivity : ComponentActivity() {
                         onImproveTags = { model.improveMoodMix() },
                         onSetTagLookup = model::setMoodTagLookup,
                         onSetAiEnabled = model::setMoodAiEnabled,
+                        onSetAiProvider = model::setMoodAiProvider,
                         onSetAiModel = model::setMoodAiModel,
+                        onSetOllamaUrl = model::setMoodOllamaUrl,
+                        onSetOllamaModel = model::setMoodOllamaModel,
+                        onDetectModels = model::detectMoodModels,
+                        onTestAi = model::testMoodAi,
                         onSaveAiKey = model::saveMoodAiKey,
                         onClearAiKey = model::clearMoodAiKey,
                         onOpenInYouTubeMusic = {

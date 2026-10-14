@@ -7,9 +7,9 @@ import tech.egrie.soundtrail.integrations.SecretStore
 
 /**
  * Local storage for the mood layer: the listener's settings, the last thing they typed, and a
- * bounded cache of learned track tags. The optional AI model's API key is the only secret here
- * and it is kept in [SecretStore], which is Android-Keystore encrypted; nothing else in this
- * file is sensitive and none of it is synced or backed up.
+ * bounded cache of learned track tags. Any model credential is kept in [SecretStore], which is
+ * Android-Keystore encrypted; nothing else in this file is sensitive and none of it is synced or
+ * backed up.
  */
 internal class MoodStore(context: Context) {
     private val prefs = context.getSharedPreferences("soundtrail_mood", Context.MODE_PRIVATE)
@@ -19,10 +19,29 @@ internal class MoodStore(context: Context) {
         get() = prefs.getBoolean("ai_enabled", false)
         set(value) = prefs.edit().putBoolean("ai_enabled", value).apply()
 
-    /** The model name used for the optional AI reading; the default suits the free tier. */
+    /**
+     * Where readings come from. Defaults to the on-device engine, so an install that has never
+     * touched this setting sends nothing anywhere.
+     */
+    var aiProvider: MoodAiProvider
+        get() = MoodAiProvider.from(prefs.getString("ai_provider", null))
+        set(value) = prefs.edit().putString("ai_provider", value.id).apply()
+
+    /** The Gemini model name used for the optional hosted reading; the default suits the free tier. */
     var aiModel: String
         get() = prefs.getString("ai_model", DEFAULT_AI_MODEL).orEmpty().ifBlank { DEFAULT_AI_MODEL }
         set(value) = prefs.edit().putString("ai_model", sanitizeModel(value)).apply()
+
+    /** The listener's Ollama server, as typed; normalised by [MoodAiUrls] before use. */
+    var ollamaUrl: String
+        get() = prefs.getString("ollama_url", "").orEmpty()
+        set(value) = prefs.edit().putString("ollama_url", value.trim().take(200)).apply()
+
+    /** The Ollama model to ask for. Ollama tags may carry `:`, `/`, and `.`. */
+    var ollamaModel: String
+        get() = prefs.getString("ollama_model", DEFAULT_OLLAMA_MODEL).orEmpty()
+            .ifBlank { DEFAULT_OLLAMA_MODEL }
+        set(value) = prefs.edit().putString("ollama_model", sanitizeOllamaModel(value)).apply()
 
     /** Whether the listener agreed to tag lookups against TheAudioDB's free metadata API. */
     var tagLookupEnabled: Boolean
@@ -38,16 +57,33 @@ internal class MoodStore(context: Context) {
         get() = prefs.getInt("last_energy", -1).takeIf { it in 0..100 }
         set(value) = prefs.edit().putInt("last_energy", value ?: -1).apply()
 
-    val aiKeySet: Boolean get() = !aiKey().isNullOrBlank()
-
-    fun aiKey(): String? = secrets.get(AI_KEY)?.takeIf(String::isNotBlank)
-
-    fun saveAiKey(key: String) {
-        val trimmed = key.trim()
-        if (trimmed.isBlank()) clearAiKey() else secrets.put(AI_KEY, trimmed)
+    /**
+     * The credential for a provider, if any. Ollama's is optional — only a proxy would need it.
+     * The Gemini key also checks the older single-key name, so an install that saved a key
+     * before providers existed keeps working.
+     */
+    fun key(provider: MoodAiProvider): String? = when (provider) {
+        MoodAiProvider.ON_DEVICE -> null
+        MoodAiProvider.OLLAMA -> secrets.get(OLLAMA_KEY)?.takeIf(String::isNotBlank)
+        MoodAiProvider.GEMINI ->
+            (secrets.get(GEMINI_KEY) ?: secrets.get(LEGACY_AI_KEY))?.takeIf(String::isNotBlank)
     }
 
-    fun clearAiKey() = secrets.remove(AI_KEY)
+    fun keySet(provider: MoodAiProvider): Boolean = key(provider) != null
+
+    fun saveKey(provider: MoodAiProvider, value: String) {
+        if (provider == MoodAiProvider.ON_DEVICE) return
+        val trimmed = value.trim()
+        val name = if (provider == MoodAiProvider.OLLAMA) OLLAMA_KEY else GEMINI_KEY
+        if (trimmed.isBlank()) secrets.remove(name) else secrets.put(name, trimmed)
+    }
+
+    fun clearKey(provider: MoodAiProvider) {
+        if (provider == MoodAiProvider.ON_DEVICE) return
+        val name = if (provider == MoodAiProvider.OLLAMA) OLLAMA_KEY else GEMINI_KEY
+        secrets.remove(name)
+        if (provider == MoodAiProvider.GEMINI) secrets.remove(LEGACY_AI_KEY)
+    }
 
     // ----- Learned track tags -----
 
@@ -96,7 +132,11 @@ internal class MoodStore(context: Context) {
 
     companion object {
         const val DEFAULT_AI_MODEL = "gemini-2.0-flash"
-        private const val AI_KEY = "mood_ai_key"
+        private const val GEMINI_KEY = "mood_gemini_key"
+        private const val OLLAMA_KEY = "mood_ollama_key"
+
+        /** The single-key name used before providers existed; still read, never written. */
+        private const val LEGACY_AI_KEY = "mood_ai_key"
         private const val MAX_CACHED_TAGS = 1500
 
         /** A stable cache key for a library entry: its link, or its text when it has none. */
@@ -107,5 +147,17 @@ internal class MoodStore(context: Context) {
             .take(60)
             .filter { it.isLetterOrDigit() || it == '-' || it == '_' || it == '.' }
             .ifBlank { DEFAULT_AI_MODEL }
+
+        /**
+         * Ollama model tags are wider than a hosted model name: `llama3.2:3b-instruct-q4_K_M`,
+         * `qwen2.5:7b`, `hf.co/user/repo:Q4_K_M`, even a digest. Keep what a tag may contain and
+         * drop everything else, so a pasted command line cannot smuggle in junk.
+         */
+        fun sanitizeOllamaModel(value: String): String = value.trim()
+            .substringAfterLast(" ")              // "ollama run llama3.2" pasted whole
+            .take(80)
+            .filter { it.isLetterOrDigit() || it == ':' || it == '/' || it == '.' || it == '-' || it == '_' }
+            .trim('.', ':', '/')
+            .ifBlank { DEFAULT_OLLAMA_MODEL }
     }
 }

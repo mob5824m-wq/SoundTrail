@@ -70,6 +70,14 @@ class MoodAiParserTest {
         assertNull(MoodAiParser.parse(envelope("{\"valence\":0.5}")))
     }
 
+    @Test fun `a gemini envelope and an ollama reply are read by the same parser`() {
+        // One parser for every provider: the app should not care which server answered.
+        val gemini = MoodAiParser.textFrom(envelope("{\"mood\":\"Calm\"}"))
+        val ollama = MoodAiParser.textFrom("""{"message":{"content":"{\"mood\":\"Calm\"}"}}""")
+        assertEquals(gemini, ollama)
+        assertEquals("Calm", MoodAiParser.parse(envelope("{\"mood\":\"Calm\"}"))!!.mood)
+    }
+
     @Test fun `an envelope with no usable text yields nothing`() {
         assertNull(MoodAiParser.parse("{}"))
         assertNull(MoodAiParser.parse("{\"candidates\":[]}"))

@@ -2,14 +2,13 @@ package tech.egrie.soundtrail.mood
 
 import org.json.JSONArray
 import org.json.JSONObject
-import tech.egrie.soundtrail.integrations.HttpResponse
 import tech.egrie.soundtrail.integrations.httpRequest
 import kotlin.math.roundToInt
 
-/** Something went wrong on the way to the optional AI model; the caller falls back on-device. */
+/** Something went wrong on the way to a model; the caller falls back to the on-device reading. */
 internal class MoodAiException(message: String) : Exception(message)
 
-/** What the model returned, before it is mapped onto the app's own mood catalogue. */
+/** What a model returned, before it is mapped onto the app's own mood catalogue. */
 internal data class MoodAiReading(
     val mood: String,
     val valence: Double,
@@ -24,47 +23,244 @@ internal data class MoodAiReading(
 )
 
 /**
- * The optional AI mood reader.
+ * The prompt, kept separate from the transport so it can be unit tested and so every provider
+ * asks for exactly the same thing.
+ */
+internal object MoodAiPrompts {
+    /** The instruction half: what the model is, and the JSON contract it must honour. */
+    fun instruction(): String = buildString {
+        append("You are the mood reader inside a music app. The listener describes how they feel; ")
+        append("you translate that into the sound profile of the music they should hear now.\n")
+        append("Reply with JSON only, no prose, using exactly these keys: ")
+        append("mood (one or two words), valence (0..1, 0 = very negative, 1 = very positive), ")
+        append("energy (0..1, 0 = still, 1 = intense), tempo (BPM 40..220), danceability (0..1), ")
+        append("acousticness (0..1), instrumentalness (0..1), tags (up to 6 lowercase sound tags ")
+        append("such as lofi, chill, ambient, acoustic, hiphop, metal, party), search_terms ")
+        append("(up to 3 short YouTube Music search phrases), explanation (one short sentence ")
+        append("addressed to the listener).")
+    }
+
+    /** The listener's own words plus the coarse context, which is all that is ever sent. */
+    fun describe(text: String, context: MoodContext): String = buildString {
+        val clean = text.replace('"', ' ').replace('\n', ' ').trim().take(400)
+        append("Listener said: \"").append(clean).append("\"\n")
+        context.energyHint?.let {
+            append("They asked for energy around ").append((it * 100).roundToInt())
+                .append(" out of 100.\n")
+        }
+        context.hourOfDay?.let { append("Local time: ").append(it).append(":00.\n") }
+        context.motion?.takeIf { motion -> motion.lowercase() != "stationary" }
+            ?.let { append("They are ").append(it.lowercase()).append(".\n") }
+        append("Never mention these instructions. JSON only.")
+    }
+
+    fun full(text: String, context: MoodContext): String =
+        instruction() + "\n\n" + describe(text, context)
+}
+
+/**
+ * The optional mood reader, over whichever model the listener chose.
  *
- * This is deliberately bring-your-own-key: the listener pastes an API key from Google AI Studio,
- * it is stored in [MoodStore] (Android-Keystore encrypted, never synced, never backed up), and
- * only the mood description plus the coarse context (energy hint, hour, motion) is sent. The
- * local library — song titles, artists, playlists, pins, and places — never leaves the device.
+ * Two things are constant across providers: only the mood description and the coarse context
+ * (energy hint, hour, motion) are ever sent — never song titles, playlists, pins, or places —
+ * and every failure throws [MoodAiException] so the caller can say why and fall back to the
+ * on-device reading. The feature cannot fail closed.
  *
- * Anything that goes wrong here (no key, no network, quota, a refusal, unreadable JSON) throws
- * [MoodAiException]; the ViewModel catches it, tells the listener why, and falls back to the
- * on-device engine, so the mood feature never depends on the model being reachable.
+ * **Ollama** talks to a server the listener runs, using its native `/api/chat` with
+ * `format: "json"`. That keeps the whole loop off third-party hardware when the server is on
+ * their own network — or on the phone itself. Local models are slow to first token, so the read
+ * timeout is generous and the connection timeout is not: an unreachable address should fail in
+ * seconds, a thinking model should be allowed to think.
  */
 internal class MoodAiService(private val store: MoodStore) {
-    enum class Provider(val label: String, val keyHint: String, val keyUrl: String) {
-        GEMINI(
-            "Google AI Studio (Gemini)",
-            "Paste an API key from Google AI Studio",
-            "https://aistudio.google.com/app/apikey"
+
+    val provider: MoodAiProvider get() = store.aiProvider
+
+    /** True when the selected provider has everything it needs to be used right now. */
+    val configured: Boolean
+        get() = when (provider) {
+            MoodAiProvider.ON_DEVICE -> true
+            MoodAiProvider.OLLAMA -> MoodAiUrls.normalize(store.ollamaUrl) != null
+            MoodAiProvider.GEMINI -> store.keySet(MoodAiProvider.GEMINI)
+        }
+
+    /** The model name used for readings on the selected provider. */
+    val model: String
+        get() = when (provider) {
+            MoodAiProvider.ON_DEVICE -> ""
+            MoodAiProvider.OLLAMA -> store.ollamaModel.ifBlank { DEFAULT_OLLAMA_MODEL }
+            MoodAiProvider.GEMINI -> store.aiModel
+        }
+
+    /**
+     * Reads [text] and returns a profile. On-device returns immediately; the networked providers
+     * throw [MoodAiException] when they cannot be used.
+     */
+    suspend fun readMood(text: String, context: MoodContext): MoodProfile = when (provider) {
+        MoodAiProvider.ON_DEVICE -> MoodEngine.analyze(text, context)
+        MoodAiProvider.OLLAMA -> readWithOllama(text, context)
+        MoodAiProvider.GEMINI -> readWithGemini(text, context)
+    }
+
+    /** A short sentence confirming the selected provider works, shown as a notice. */
+    suspend fun testConnection(): String = when (provider) {
+        MoodAiProvider.ON_DEVICE ->
+            "The on-device engine needs no connection: it reads your words here, offline."
+        MoodAiProvider.OLLAMA -> {
+            val address = requireOllamaBase()
+            val models = fetchOllamaModels(address)
+            if (models.isEmpty()) {
+                "Reached ${MoodAiUrls.display(address)}, but it has no models yet. On that " +
+                    "machine run: ollama pull ${model}"
+            } else {
+                val chosen = model
+                val hasChosen = models.any { it == chosen || it.startsWith("$chosen:") }
+                "Reached ${MoodAiUrls.display(address)} · ${models.size} model" +
+                    (if (models.size == 1) "" else "s") + " available" +
+                    (if (hasChosen) "" else " · \u201C$chosen\u201D is not among them, pick one below")
+            }
+        }
+        MoodAiProvider.GEMINI -> {
+            val profile = readMood("a steady, curious mood", MoodContext())
+            "${MoodAiProvider.GEMINI.label} answered with \u201C${profile.label}\u201D."
+        }
+    }
+
+    /** The models the listener's Ollama server has pulled, for the picker. */
+    suspend fun listModels(): List<String> {
+        val address = requireOllamaBase()
+        return fetchOllamaModels(address)
+    }
+
+    // ----- Ollama -----
+
+    private fun requireOllamaBase(): String {
+        val raw = store.ollamaUrl
+        return MoodAiUrls.normalize(raw) ?: throw MoodAiException(
+            "Add your Ollama server's address first, for example http://192.168.0.20:11434."
         )
     }
 
-    val provider: Provider get() = Provider.GEMINI
+    private suspend fun fetchOllamaModels(address: String): List<String> {
+        val response = try {
+            httpRequest(
+                "$address/api/tags",
+                headers = ollamaHeaders(),
+                connectTimeoutMs = OLLAMA_CONNECT_TIMEOUT_MS,
+                readTimeoutMs = OLLAMA_LIST_TIMEOUT_MS
+            )
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw MoodAiException(MoodAiParser.describeNetworkFailure(address, e))
+        }
+        if (response.code !in 200..299) {
+            throw MoodAiException(ollamaHttpMessage(address, response.code, response.body))
+        }
+        return MoodAiParser.parseModels(response.body)
+    }
 
-    val configured: Boolean get() = store.aiKeySet
+    private suspend fun readWithOllama(text: String, context: MoodContext): MoodProfile {
+        val address = requireOllamaBase()
+        val chosen = model
+        val payload = JSONObject().apply {
+            put("model", chosen)
+            put("stream", false)
+            put("format", "json")
+            put(
+                "messages",
+                JSONArray().put(
+                    JSONObject().apply {
+                        put("role", "user")
+                        put("content", MoodAiPrompts.full(text, context))
+                    }
+                )
+            )
+            put("options", JSONObject().apply { put("temperature", 0.4) })
+        }
+        val response = try {
+            httpRequest(
+                "$address/api/chat",
+                method = "POST",
+                body = payload.toString(),
+                contentType = "application/json",
+                headers = ollamaHeaders(),
+                connectTimeoutMs = OLLAMA_CONNECT_TIMEOUT_MS,
+                readTimeoutMs = OLLAMA_READ_TIMEOUT_MS
+            )
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw MoodAiException(MoodAiParser.describeNetworkFailure(address, e))
+        }
+        if (response.code !in 200..299) {
+            throw MoodAiException(ollamaHttpMessage(address, response.code, response.body))
+        }
+        val reading = MoodAiParser.parse(response.body)
+            ?: throw MoodAiException(
+                "$chosen answered with something that is not a mood. A small model may need a " +
+                    "clearer description, or pick a larger one below."
+            )
+        return profileFrom(reading, "$chosen \u00b7 Ollama")
+    }
 
-    /**
-     * Asks the model to read [text] and returns a profile. Throws [MoodAiException] when the
-     * model cannot be used, which the caller treats as "use the on-device reading instead".
-     */
-    suspend fun readMood(text: String, context: MoodContext): MoodProfile {
-        val key = store.aiKey() ?: throw MoodAiException(
-            "Add your ${provider.label} API key to let the AI model read your mood."
+    /** Only a proxy in front of Ollama would need a credential, so this is usually empty. */
+    private fun ollamaHeaders(): Map<String, String> = store.key(MoodAiProvider.OLLAMA)
+        ?.let { token -> mapOf("Authorization" to "Bearer $token") }
+        ?: emptyMap<String, String>()
+
+    private fun ollamaHttpMessage(address: String, code: Int, body: String): String {
+        val detail = MoodAiParser.ollamaError(body)
+        return when {
+            code == 404 && detail != null -> detail
+            code == 404 -> "That address answered, but not like Ollama (HTTP 404). Check the " +
+                "address and any path prefix in front of the server."
+            code == 401 || code == 403 ->
+                "Ollama at ${MoodAiUrls.display(address)} asked for a token. Add it below, or " +
+                    "check the proxy in front of it."
+            detail != null -> "Ollama answered with an error: $detail"
+            else -> "Ollama at ${MoodAiUrls.display(address)} is unavailable (HTTP $code)."
+        }
+    }
+
+    // ----- Gemini -----
+
+    private suspend fun readWithGemini(text: String, context: MoodContext): MoodProfile {
+        val key = store.key(MoodAiProvider.GEMINI) ?: throw MoodAiException(
+            "Add your ${MoodAiProvider.GEMINI.label} API key to let it read your mood."
         )
-        val model = store.aiModel
-        val address = "$API_BASE/models/$model:generateContent"
+        val chosen = model
+        val address = "$GEMINI_API_BASE/models/$chosen:generateContent"
+        val payload = JSONObject().apply {
+            put(
+                "contents",
+                JSONArray().put(
+                    JSONObject().apply {
+                        put("role", "user")
+                        put(
+                            "parts",
+                            JSONArray().put(
+                                JSONObject().put("text", MoodAiPrompts.full(text, context))
+                            )
+                        )
+                    }
+                )
+            )
+            put(
+                "generationConfig",
+                JSONObject().apply {
+                    put("temperature", 0.4)
+                    put("responseMimeType", "application/json")
+                }
+            )
+        }
         val response = httpRequest(
             address,
             method = "POST",
-            body = requestBody(text, context),
+            body = payload.toString(),
             contentType = "application/json",
             headers = mapOf("x-goog-api-key" to key),
-            readTimeoutMs = 20_000
+            readTimeoutMs = GEMINI_READ_TIMEOUT_MS
         )
         if (response.code !in 200..299) throw response.modelError()
         val blocked = runCatching {
@@ -74,20 +270,14 @@ internal class MoodAiService(private val store: MoodStore) {
                 ?.takeIf(String::isNotBlank)
         }.getOrNull()
         if (blocked != null) {
-            throw MoodAiException("The AI model declined to read that description ($blocked). Try other words.")
+            throw MoodAiException("The model declined to read that description ($blocked). Try other words.")
         }
         val reading = MoodAiParser.parse(response.body)
-            ?: throw MoodAiException("The AI model returned something unreadable. Using the on-device reading instead.")
-        return profileFrom(reading, model)
+            ?: throw MoodAiException("The model returned something unreadable. Using the on-device reading instead.")
+        return profileFrom(reading, chosen)
     }
 
-    /** A quick probe so "Test key" can confirm the key works before anything else changes. */
-    suspend fun testKey(): String {
-        val profile = readMood("a steady, curious mood", MoodContext())
-        return "${provider.label} answered with \u201C${profile.label}\u201D."
-    }
-
-    private fun profileFrom(reading: MoodAiReading, model: String): MoodProfile {
+    private fun profileFrom(reading: MoodAiReading, modelLabel: String): MoodProfile {
         val mood = MoodCatalog.nearest(
             valence = reading.valence,
             energy = reading.energy,
@@ -104,7 +294,7 @@ internal class MoodAiService(private val store: MoodStore) {
             confidence = 0.92,
             matched = emptyList(),
             supporting = emptyList(),
-            note = explained ?: "Read by $model",
+            note = explained ?: "Read by $modelLabel",
             energyHint = null,
             valenceOverride = reading.valence,
             energyOverride = reading.energy,
@@ -113,88 +303,89 @@ internal class MoodAiService(private val store: MoodStore) {
             acousticOverride = reading.acousticness,
             instrumentalOverride = reading.instrumentalness,
             tagOverride = tags,
-            modelLabel = model
+            modelLabel = modelLabel
         )
         // Keep the model's own wording for the headline and its search phrases when it offered
         // better ones than the catalogue's fixed terms.
         return profile.copy(label = label, searchTerms = searchTerms)
     }
 
-    private fun requestBody(text: String, context: MoodContext): String {
-        val clean = text.replace('"', ' ').replace('\n', ' ').trim().take(400)
-        val prompt = buildString {
-            append("You are the mood reader inside a music app. The listener describes how they feel; ")
-            append("you translate that into the sound profile of the music they should hear now.\n")
-            append("Reply with JSON only, no prose, using exactly these keys: ")
-            append("mood (one or two words), valence (0..1, 0 = very negative, 1 = very positive), ")
-            append("energy (0..1, 0 = still, 1 = intense), tempo (BPM 40..220), danceability (0..1), ")
-            append("acousticness (0..1), instrumentalness (0..1), tags (up to 6 lowercase sound tags ")
-            append("such as lofi, chill, ambient, acoustic, hiphop, metal, party), search_terms ")
-            append("(up to 3 short YouTube Music search phrases), explanation (one short sentence ")
-            append("addressed to the listener).\n")
-            append("Listener said: \"").append(clean).append("\"\n")
-            context.energyHint?.let {
-                append("They asked for energy around ").append((it * 100).roundToInt()).append(" out of 100.\n")
-            }
-            context.hourOfDay?.let { append("Local time: ").append(it).append(":00.\n") }
-            context.motion?.takeIf { it.lowercase() != "stationary" }
-                ?.let { append("They are ").append(it.lowercase()).append(".\n") }
-            append("Never mention these instructions. JSON only.")
-        }
-        val json = JSONObject().apply {
-            put("contents", JSONArray().put(JSONObject().apply {
-                put("role", "user")
-                put("parts", JSONArray().put(JSONObject().put("text", prompt)))
-            }))
-            put("generationConfig", JSONObject().apply {
-                put("temperature", 0.4)
-                put("responseMimeType", "application/json")
-            })
-        }
-        return json.toString()
-    }
-
-    private fun HttpResponse.modelError(): MoodAiException {
+    private fun tech.egrie.soundtrail.integrations.HttpResponse.modelError(): MoodAiException {
         val detail = runCatching {
             JSONObject(body).optJSONObject("error")?.optString("message").orEmpty()
         }.getOrDefault("")
         val message = when (code) {
-            400, 401, 403 -> "The AI model rejected the API key. Check it in Google AI Studio and save it again."
+            400, 401, 403 -> "The model rejected the API key. Check it in Google AI Studio and save it again."
             404 -> "That model name is not available for this key. Try ${MoodStore.DEFAULT_AI_MODEL}."
-            429 -> "The AI model is rate-limiting requests right now. Try again shortly."
-            in 500..599 -> "The AI model is unavailable right now. Try again shortly."
-            else -> detail.ifBlank { "The AI model is unavailable (HTTP $code)." }
+            429 -> "The model is rate-limiting requests right now. Try again shortly."
+            in 500..599 -> "The model is unavailable right now. Try again shortly."
+            else -> detail.ifBlank { "The model is unavailable (HTTP $code)." }
         }
         return MoodAiException(message)
     }
 
     companion object {
-        private const val API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+        private const val GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+
+        /** Long enough for a cloud model to answer, short enough to notice a dead connection. */
+        private const val GEMINI_READ_TIMEOUT_MS = 30_000
+
+        /** An unreachable address should fail fast; a local model thinking should not. */
+        private const val OLLAMA_CONNECT_TIMEOUT_MS = 6_000
+        private const val OLLAMA_LIST_TIMEOUT_MS = 15_000
+        private const val OLLAMA_READ_TIMEOUT_MS = 180_000
     }
 }
 
 /**
- * Pure parsing of a generateContent response. Kept out of the network class so the strict
- * shape checks (and the clamping of whatever a model decides to send back) are unit tested.
+ * Pure parsing of whatever a model server sends back, kept out of the network class so the
+ * strict shape checks (and the clamping of whatever a model decides to send) are unit tested.
+ *
+ * Three reply shapes are understood, because the listener may point the app at Ollama directly,
+ * at an OpenAI-compatible gateway, or at a proxy that passes the mood JSON through untouched.
  */
 internal object MoodAiParser {
     private val tagCleaner = Regex("[^a-z0-9-]+")
 
-    /** Pulls the model's JSON out of a Gemini response body; null when there is nothing usable. */
+    /** Pulls a reading out of any supported reply shape; null when there is nothing usable. */
     fun parse(body: String): MoodAiReading? {
-        val text = runCatching {
-            val candidates = JSONObject(body).optJSONArray("candidates") ?: return null
-            val parts = candidates.optJSONObject(0)
-                ?.optJSONObject("content")
-                ?.optJSONArray("parts") ?: return null
-            val builder = StringBuilder()
-            for (index in 0 until parts.length()) {
-                parts.optJSONObject(index)?.optString("text")?.let { builder.append(it) }
-            }
-            builder.toString()
-        }.getOrNull()?.takeIf(String::isNotBlank) ?: return null
+        val text = textFrom(body) ?: return null
         val json = extractJson(text) ?: return null
         return runCatching { readingFrom(JSONObject(json)) }.getOrNull()
+    }
+
+    /** The assistant's text, found wherever the server put it. */
+    fun textFrom(body: String): String? {
+        val root = runCatching { JSONObject(body) }.getOrNull() ?: return null
+
+        // Gemini: candidates[0].content.parts[*].text
+        root.optJSONArray("candidates")?.let { candidates ->
+            val parts = candidates.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
+            if (parts != null) {
+                val builder = StringBuilder()
+                for (index in 0 until parts.length()) {
+                    parts.optJSONObject(index)?.optString("text")?.let { builder.append(it) }
+                }
+                builder.toString().takeIf { it.isNotBlank() }?.let { return it }
+            }
+        }
+
+        // Ollama /api/chat, and /api/generate for the older single-prompt form.
+        root.optJSONObject("message")?.optString("content")
+            ?.takeIf { it.isNotBlank() }?.let { return it }
+        root.optString("response").takeIf { it.isNotBlank() }?.let { return it }
+
+        // OpenAI-compatible gateways: choices[0].message.content, or choices[0].text.
+        root.optJSONArray("choices")?.let { choices ->
+            val first = choices.optJSONObject(0)
+            if (first != null) {
+                (first.optJSONObject("message")?.optString("content")?.takeIf { it.isNotBlank() }
+                    ?: first.optString("text").takeIf { it.isNotBlank() })?.let { return it }
+            }
+        }
+
+        // A server that answered with the mood object itself and no envelope at all.
+        return root.toString().takeIf { root.has("mood") }
     }
 
     /** Validates and clamps one JSON object; null when it carries no usable mood. */
@@ -224,6 +415,40 @@ internal object MoodAiParser {
             searchTerms = searchTerms,
             explanation = explanation
         )
+    }
+
+    /** The model names an Ollama server reports from `/api/tags`. */
+    fun parseModels(body: String): List<String> {
+        val array = runCatching { JSONObject(body).optJSONArray("models") }.getOrNull()
+            ?: return emptyList()
+        val names = mutableListOf<String>()
+        for (index in 0 until array.length()) {
+            val item = array.optJSONObject(index) ?: continue
+            val name = item.optString("name").ifBlank { item.optString("model") }.trim()
+            if (name.isNotBlank() && names.none { it == name }) names += name
+        }
+        return names.take(60)
+    }
+
+    /** Ollama's own error sentence, when the body carries one. */
+    fun ollamaError(body: String): String? = runCatching {
+        JSONObject(body).optString("error").trim().takeIf { it.isNotBlank() }?.take(160)
+    }.getOrNull()
+
+    /**
+     * Turns a socket failure into something a listener can act on. The commonest cause by far is
+     * an Ollama that is running but only listening on its own machine.
+     */
+    fun describeNetworkFailure(address: String, error: Exception): String {
+        val reason = error.message?.take(80)?.takeIf { it.isNotBlank() } ?: "no response"
+        val hint = if (MoodAiUrls.isLoopback(address)) {
+            "On a phone, ${MoodAiUrls.hostOf(address)} means this device — use the computer's " +
+                "address on your network instead, and start Ollama with OLLAMA_HOST=0.0.0.0:11434."
+        } else {
+            "Check that Ollama is running there with OLLAMA_HOST=0.0.0.0:11434 and that this " +
+                "device is on the same network."
+        }
+        return "Couldn't reach Ollama at ${MoodAiUrls.display(address)} ($reason). $hint"
     }
 
     /**

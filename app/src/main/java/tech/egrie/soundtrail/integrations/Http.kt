@@ -26,6 +26,8 @@ internal suspend fun httpRequest(
     body: String? = null,
     authorization: String? = null,
     contentType: String? = null,
+    /** Extra request headers, for APIs that take their credential in a header of their own. */
+    headers: Map<String, String> = emptyMap(),
     connectTimeoutMs: Int = 10_000,
     readTimeoutMs: Int = 10_000
 ): HttpResponse = withContext(Dispatchers.IO) {
@@ -37,6 +39,7 @@ internal suspend fun httpRequest(
         setRequestProperty("Accept", "application/json")
         setRequestProperty("Cache-Control", "no-store")
         authorization?.let { setRequestProperty("Authorization", it) }
+        headers.forEach { (name, value) -> setRequestProperty(name, value) }
         if (body != null) {
             doOutput = true
             setRequestProperty(

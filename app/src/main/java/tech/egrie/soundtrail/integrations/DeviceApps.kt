@@ -64,7 +64,19 @@ class DeviceApps(private val context: Context) {
         return view(verified.url)
     }
 
+    /**
+     * Opens the YouTube Music app (including Morphe/ReVanced patched installs), or the website
+     * when no music app is installed.
+     *
+     * This never involves Google sign-in: handing a link to an app the listener is already
+     * signed in to is not an API call of Soundtrail's. Only the optional playlist import/search
+     * below needs the read-only connection, so opening the music app keeps working across app
+     * updates, reinstalls, and revoked grants.
+     */
     fun openYouTubeMusic(): Boolean = launch(youtubeMusicPackage) || view("https://music.youtube.com/")
+
+    /** True when a YouTube Music app is installed (any of the known package names). */
+    val youtubeMusicInstalled: Boolean get() = youtubeMusicPackage != null
 
     /** Opens the signed-in user's library inside YouTube Music or a Morphe-compatible install. */
     fun openYouTubeMusicLibrary(): Boolean =
@@ -79,6 +91,16 @@ class DeviceApps(private val context: Context) {
 
     fun searchYouTubeMusic(title: String, artist: String): Boolean =
         openYouTubeMusicSearch(YouTubeSearch.searchUrl(title, artist))
+
+    /**
+     * Hands a mood's search phrases to YouTube Music — the escape hatch when the local library
+     * has nothing that fits. No sign-in, no API: it is the same link a browser would open.
+     */
+    fun searchYouTubeMusicForMood(query: String): Boolean {
+        val cleaned = query.replace(Regex("\\s+"), " ").trim().take(120)
+        if (cleaned.isBlank()) return openYouTubeMusic()
+        return openYouTubeMusicSearch(YouTubeSearch.searchUrl(cleaned, ""))
+    }
 
     /** Only accept search links built for the YouTube Music host before handing them off. */
     fun openYouTubeMusicSearch(url: String): Boolean {

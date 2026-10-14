@@ -29,6 +29,17 @@ jobs:
           fi
           echo "Android SDK: $ANDROID_HOME"
           ls "$ANDROID_HOME/platforms"
+      # A malformed vector path is not cosmetic: Android reads path data in whole command
+      # groups, so data it cannot parse leaves the launcher icon wrong or undrawable. This
+      # regenerates the icon from tools/build_icon.py and fails if the committed drawables or
+      # mipmap PNGs have drifted from that geometry.
+      - name: Verify the app icon resources
+        shell: bash
+        run: |
+          set -eu
+          python3 -m pip install --quiet --disable-pip-version-check pillow \
+            || echo "Pillow unavailable; the check will cover the XML drawables only"
+          python3 tools/build_icon.py --check
       - uses: gradle/actions/setup-gradle@v6
       - name: Test and build
         shell: bash

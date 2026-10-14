@@ -27,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Bookmark
+import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.MyLocation
@@ -86,7 +87,7 @@ internal data class PinDraft(
 }
 
 private enum class Tab(val label: String) {
-    HOME("Explore"), SEARCH("Search"), PINS("Pins"), LISTS("Lists"), CONNECT("Connect")
+    HOME("Explore"), SEARCH("Search"), MOOD("Mood"), PINS("Pins"), LISTS("Lists"), CONNECT("Connect")
 }
 
 private data class PinWithDistance(val pin: MusicPin, val distanceMeters: Double?)
@@ -110,6 +111,7 @@ internal fun SoundtrailApp(
     openListsSignal: Int,
     nowPlaying: StateFlow<NowPlaying?>,
     lists: ListsActions,
+    mood: MoodActions,
     onLocate: () -> Unit,
     onSearch: (String) -> Unit,
     onSelectSearchProvider: (SearchProvider) -> Unit,
@@ -222,7 +224,9 @@ internal fun SoundtrailApp(
                 Tab.HOME -> HomeScreen(
                     state, onNewPin = { draft = PinDraft() }, onLocate = onLocate,
                     onSeePins = { tab = Tab.PINS },
-                    onPlay = onPlay, onMap = onMap, onDelete = { pendingDelete = it }
+                    onPlay = onPlay, onMap = onMap, onDelete = { pendingDelete = it },
+                    onOpenMood = { tab = Tab.MOOD },
+                    onOpenYoutube = onOpenYoutube
                 )
                 Tab.SEARCH -> MusicSearchScreen(
                     state, onSearch, onSelectProvider = onSelectSearchProvider,
@@ -244,6 +248,7 @@ internal fun SoundtrailApp(
                         draft = PinDraft(lat = point.latitude, lon = point.longitude)
                     }
                 )
+                Tab.MOOD -> MoodScreen(state, mood, onNotice)
                 Tab.LISTS -> ListsScreen(state, lists, onNotice)
                 Tab.CONNECT -> ConnectionsScreen(
                     state, onConnect, onDisconnect, onConnectSoundcloud, onDisconnectSoundcloud,
@@ -286,6 +291,7 @@ private fun BottomTabs(selected: Tab, onSelect: (Tab) -> Unit) {
             val icon = when (tab) {
                 Tab.HOME -> Icons.Rounded.Home
                 Tab.SEARCH -> Icons.Rounded.Search
+                Tab.MOOD -> Icons.Rounded.Favorite
                 Tab.PINS -> Icons.Rounded.Bookmark
                 Tab.LISTS -> Icons.Rounded.QueueMusic
                 Tab.CONNECT -> Icons.Rounded.Settings
@@ -315,7 +321,9 @@ private fun HomeScreen(
     onSeePins: () -> Unit,
     onPlay: (MusicPin) -> Unit,
     onMap: (GeoPoint) -> Unit,
-    onDelete: (MusicPin) -> Unit
+    onDelete: (MusicPin) -> Unit,
+    onOpenMood: () -> Unit,
+    onOpenYoutube: () -> Unit
 ) {
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState())
@@ -325,6 +333,8 @@ private fun HomeScreen(
         BrandHeader()
         Spacer(Modifier.height(20.dp))
         HomeHero(onNewPin)
+        Spacer(Modifier.height(14.dp))
+        MoodBanner(state, onOpenMood, onOpenYoutube)
         Spacer(Modifier.height(14.dp))
         LocationBanner(state.location, state.locating, onLocate)
         Spacer(Modifier.height(20.dp))
@@ -392,6 +402,56 @@ private fun HomeHero(onNewPin: () -> Unit) {
             }
             PrimaryButton("Add a soundspot  ↗", onNewPin)
         }
+    }
+}
+
+/**
+ * The two things a listener asks for most often, one tap from the home screen: "match my mood",
+ * and "open YouTube Music".
+ *
+ * The YouTube Music button is deliberately independent of the optional Google connection. Playing
+ * music in the app you are already signed in to, or letting a browser open music.youtube.com, is
+ * not an API call — so it keeps working across app updates, reinstalls, and revoked grants, with
+ * no sign-in prompt ever.
+ */
+@Composable
+private fun MoodBanner(state: AppState, onOpenMood: () -> Unit, onOpenYoutube: () -> Unit) {
+    SurfaceCard(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(42.dp).background(Palette.primary.copy(alpha = .15f), CircleShape),
+                contentAlignment = Alignment.Center) {
+                Icon(Icons.Rounded.Favorite, null, tint = Palette.primary, modifier = Modifier.size(20.dp))
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("What's your mood?", style = MaterialTheme.typography.titleMedium)
+                val mood = state.mood
+                Text(
+                    when {
+                        mood.analyzing -> "Reading it…"
+                        mood.profile != null && mood.mix.isNotEmpty() ->
+                            "${mood.profile.label} \u00b7 ${mood.mix.size} songs matched"
+                        mood.profile != null -> "${mood.profile.label} \u00b7 add songs to fill the mix"
+                        else -> "Say how you feel; get a mix from your own library."
+                    },
+                    color = Palette.secondary, style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            TextButton(onClick = onOpenMood) {
+                Text(if (state.mood.profile == null) "Open" else "See mix", color = Palette.primary)
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        PrimaryButton("Open YouTube Music  \u2197", onOpenYoutube, Modifier.fillMaxWidth())
+        Text(
+            if (state.youtubeAppInstalled) {
+                "Opens the app on this device. No Google sign-in is involved — the read-only " +
+                    "connection on the Connect tab is only for playlist import and search."
+            } else {
+                "Opens music.youtube.com in a browser. No Google sign-in is involved."
+            },
+            color = Palette.muted, style = MaterialTheme.typography.labelMedium
+        )
     }
 }
 

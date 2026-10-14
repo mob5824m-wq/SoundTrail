@@ -113,7 +113,7 @@ class LocationWatchService : Service() {
 
     private fun startInForeground() {
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_soundtrail)
+            .setSmallIcon(R.drawable.ic_soundtrail_notification)
             .setContentTitle("Soundtrail is watching")
             .setContentText("Playlist triggers for places, motion, and time are active.")
             .setOngoing(true)
@@ -181,7 +181,7 @@ class LocationWatchService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_soundtrail)
+            .setSmallIcon(R.drawable.ic_soundtrail_notification)
             .setContentTitle(rule.name)
             .setContentText("▶ $playlistName — ${describe(rule)}")
             .setContentIntent(playIntent)

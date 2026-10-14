@@ -197,7 +197,7 @@ class PlaybackService : Service() {
             null -> "Soundtrail"
         }
         val builder = Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_soundtrail)
+            .setSmallIcon(R.drawable.ic_soundtrail_notification)
             .setContentTitle(state?.title ?: "Soundtrail")
             .setContentText(
                 when {

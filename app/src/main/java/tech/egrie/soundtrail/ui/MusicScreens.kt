@@ -67,6 +67,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import tech.egrie.soundtrail.AppState
 import tech.egrie.soundtrail.SearchProvider
 import tech.egrie.soundtrail.sync.CloudSyncService
+import tech.egrie.soundtrail.integrations.GoogleAuthState
 import tech.egrie.soundtrail.integrations.MusicLinkParser
 import tech.egrie.soundtrail.integrations.MusicProvider
 import tech.egrie.soundtrail.integrations.SongInfo
@@ -416,6 +417,67 @@ private fun LookupRow(song: SongInfo, onPin: () -> Unit) {
     }
 }
 
+/**
+ * The saved Google connection's health, with a one-tap reconnect.
+ *
+ * Nothing here can sign the listener out. Tokens are written durably to Android-Keystore
+ * encrypted storage that app updates do not touch, they are never deleted because of a failed
+ * refresh or a network outage, and the Desktop Client ID (and, on a Play-services/microG device,
+ * the account itself) stays put — so even the one case Google genuinely invalidates — a revoke,
+ * a password change, or its own 7-day Testing-mode expiry — costs one tap, not a re-setup.
+ */
+@Composable
+private fun GoogleConnectionStatus(state: AppState, onConnectYouTubeOAuth: (String) -> Unit) {
+    val health = state.youtubeAuth
+    val accent = when (health.state) {
+        GoogleAuthState.CONNECTED -> Palette.primary
+        GoogleAuthState.OFFLINE -> Palette.lilac
+        GoogleAuthState.NEEDS_RECONNECT, GoogleAuthState.UNREADABLE -> Palette.coral
+        GoogleAuthState.NOT_CONNECTED -> Palette.muted
+    }
+    SurfaceCard(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(38.dp).background(accent.copy(alpha = .16f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Rounded.Cloud, null, tint = accent, modifier = Modifier.size(19.dp))
+            }
+            Spacer(Modifier.width(11.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Google connection", style = MaterialTheme.typography.titleMedium)
+                Text(health.state.label, color = accent, style = MaterialTheme.typography.bodyMedium)
+            }
+            health.method?.let { method ->
+                Text(method, color = Palette.muted, style = MaterialTheme.typography.labelMedium)
+            }
+        }
+        health.detail?.let { detail ->
+            Spacer(Modifier.height(8.dp))
+            Text(detail, color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
+        }
+        health.hint?.let { hint ->
+            Spacer(Modifier.height(6.dp))
+            Text(hint, color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
+        }
+        if (health.needsAttention) {
+            Spacer(Modifier.height(10.dp))
+            PrimaryButton(
+                if (state.connectingYouTubeOAuth) "Waiting for Google…" else "Reconnect Google (one tap)",
+                { onConnectYouTubeOAuth("") },
+                Modifier.fillMaxWidth(),
+                enabled = !state.connectingYouTubeOAuth
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "App updates never clear this connection: the saved tokens live in this device's " +
+                "encrypted storage, are renewed by themselves, and are re-checked when the app starts.",
+            color = Palette.muted, style = MaterialTheme.typography.labelMedium
+        )
+    }
+}
+
 @Composable
 internal fun ConnectionsScreen(
     state: AppState,
@@ -745,6 +807,8 @@ internal fun ConnectionsScreen(
             }
             if (expandedService == "youtube") {
                 Spacer(Modifier.height(13.dp))
+                GoogleConnectionStatus(state, onConnectYouTubeOAuth)
+                Spacer(Modifier.height(13.dp))
                 Text("YouTube playlist import & search", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(6.dp))
                 if (state.youtubeDataConnected) {
@@ -844,6 +908,12 @@ internal fun ConnectionsScreen(
                     color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(15.dp))
                 PrimaryButton("Open YouTube Music", onOpenYoutube, Modifier.fillMaxWidth())
+                Text(
+                    "Opening YouTube Music never needs this connection, or any Google sign-in: it " +
+                        "hands the app a link, exactly as a browser would. The read-only connection " +
+                        "above is only for importing and searching your own playlists.",
+                    color = Palette.muted, style = MaterialTheme.typography.labelMedium
+                )
                 TextButton(onClick = onOpenMicroG) { Text("Learn about microG  ↗", color = Palette.lilac) }
                 if (state.microGReInstalled || !state.gmsSignInAvailable) {
                     TextButton(onClick = onOpenMicroGRe) { Text("MicroG RE (Morphe/ReVanced)  ↗", color = Palette.lilac) }

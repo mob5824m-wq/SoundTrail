@@ -5,6 +5,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.MyLocation
 import androidx.compose.material.icons.rounded.QueueMusic
@@ -38,6 +40,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
@@ -60,6 +63,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
@@ -87,7 +91,8 @@ internal data class PinDraft(
 }
 
 private enum class Tab(val label: String) {
-    HOME("Explore"), SEARCH("Search"), MOOD("Mood"), PINS("Pins"), LISTS("Lists"), CONNECT("Connect")
+    HOME("Explore"), SEARCH("Search"), ASK("Ask"), MOOD("Mood"), PINS("Pins"), LISTS("Lists"),
+    CONNECT("Connect")
 }
 
 private data class PinWithDistance(val pin: MusicPin, val distanceMeters: Double?)
@@ -112,6 +117,7 @@ internal fun SoundtrailApp(
     nowPlaying: StateFlow<NowPlaying?>,
     lists: ListsActions,
     mood: MoodActions,
+    assistant: AssistantActions,
     onLocate: () -> Unit,
     onSearch: (String) -> Unit,
     onSelectSearchProvider: (SearchProvider) -> Unit,
@@ -150,6 +156,8 @@ internal fun SoundtrailApp(
     onOpenSpotify: () -> Unit,
     onOpenYoutube: () -> Unit,
     onSearchYoutubeMusic: (String) -> Unit,
+    /** Hands a search result to the app that owns it — Spotify, for a full track instead of a preview. */
+    onPlayTrack: (TrackResult) -> Unit,
     onOpenYoutubeLibrary: () -> Unit,
     onOpenSoundcloud: () -> Unit,
     onOpenDashboard: () -> Unit,
@@ -232,6 +240,7 @@ internal fun SoundtrailApp(
                     state, onSearch, onSelectProvider = onSelectSearchProvider,
                     onConnect = { tab = Tab.CONNECT },
                     onSelectTrack = { draft = PinDraft(title = it.title, artist = it.artist, url = it.url) },
+                    onPlayTrack = onPlayTrack,
                     onAddLink = { draft = PinDraft(url = it) },
                     onLookup = onLookup,
                     onSelectLookup = {
@@ -247,6 +256,13 @@ internal fun SoundtrailApp(
                     onDropPin = { point ->
                         draft = PinDraft(lat = point.latitude, lon = point.longitude)
                     }
+                )
+                // The shell knows which tab is showing, so it is the one that can open the Mood
+                // tab from inside an answer.
+                Tab.ASK -> AssistantScreen(
+                    state,
+                    assistant.copy(onOpenMood = { tab = Tab.MOOD }),
+                    onNotice
                 )
                 Tab.MOOD -> MoodScreen(state, mood, onNotice)
                 Tab.LISTS -> ListsScreen(state, lists, onNotice)
@@ -291,6 +307,7 @@ private fun BottomTabs(selected: Tab, onSelect: (Tab) -> Unit) {
             val icon = when (tab) {
                 Tab.HOME -> Icons.Rounded.Home
                 Tab.SEARCH -> Icons.Rounded.Search
+                Tab.ASK -> Icons.Rounded.Mic
                 Tab.MOOD -> Icons.Rounded.Favorite
                 Tab.PINS -> Icons.Rounded.Bookmark
                 Tab.LISTS -> Icons.Rounded.QueueMusic
@@ -486,7 +503,10 @@ private fun PinsScreen(
     onDropPin: (GeoPoint) -> Unit
 ) {
     var showingMap by rememberSaveable { mutableStateOf(false) }
+    var findQuery by rememberSaveable { mutableStateOf("") }
+    var focusedPin by rememberSaveable { mutableStateOf<String?>(null) }
     val ordered = remember(state.pins, state.location) { orderPins(state.pins, state.location) }
+    val found = remember(state.pins, findQuery) { PinSearch.matches(state.pins, findQuery) }
     Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
         Spacer(Modifier.height(18.dp))
         BrandHeader()
@@ -511,9 +531,50 @@ private fun PinsScreen(
         }
         Spacer(Modifier.height(12.dp))
         if (showingMap) {
+            // Finding a soundspot works the same either way round: type a name and the map
+            // itself goes to it, so the list and the map are two views of one collection.
+            OutlinedTextField(
+                value = findQuery,
+                onValueChange = { text ->
+                    findQuery = text.take(60)
+                    focusedPin = PinSearch.matches(state.pins, text).firstOrNull()?.id
+                },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("Find a soundspot") },
+                placeholder = { Text("Title, artist, or place") },
+                leadingIcon = { Icon(Icons.Rounded.Search, null) }
+            )
+            if (findQuery.isNotBlank()) {
+                Spacer(Modifier.height(8.dp))
+                if (found.isEmpty()) {
+                    Text("Nothing saved matches that.",
+                        color = Palette.muted, style = MaterialTheme.typography.labelMedium)
+                } else {
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        found.forEach { pin ->
+                            val chosen = pin.id == focusedPin
+                            Text(
+                                pin.title.ifBlank { "Untitled" },
+                                color = if (chosen) Palette.background else Palette.text,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.clip(RoundedCornerShape(10.dp))
+                                    .background(if (chosen) Palette.primary else Palette.surface)
+                                    .clickable { focusedPin = pin.id }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
             PinMapView(
                 pins = state.pins,
                 userLocation = state.location,
+                focusPin = state.pins.firstOrNull { it.id == focusedPin },
                 onPlay = onPlay,
                 onMap = onMap,
                 onDelete = onDelete,

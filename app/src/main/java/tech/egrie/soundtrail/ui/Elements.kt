@@ -1,8 +1,8 @@
 package tech.egrie.soundtrail.ui
 
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -37,15 +37,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import tech.egrie.soundtrail.R
 import tech.egrie.soundtrail.data.MusicPin
 import tech.egrie.soundtrail.integrations.MusicProvider
 import tech.egrie.soundtrail.integrations.TrackResult
@@ -54,22 +53,25 @@ import java.util.Locale
 
 internal val cardShape = RoundedCornerShape(18.dp)
 
+/**
+ * The app's mark and its name, at the top of every tab.
+ *
+ * The mark is the launcher icon's own drawable rather than a second, hand-drawn copy of it:
+ * `tools/build_icon.py` generates that file — the pin with the note knocked out of it and two
+ * ripples — and CI fails if it ever drifts from the generator, so the logo in the app and the
+ * icon on the home screen are the same artwork by construction. The icon carries the adaptive
+ * icon's safe-zone padding and its tile is the colour of the app's own background, so what shows
+ * here is the pin itself, sitting where the old hand-made circle used to.
+ */
 @Composable
 internal fun BrandHeader() {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Canvas(Modifier.size(28.dp)) {
-            val center = Offset(size.width / 2, size.height / 2)
-            drawCircle(Palette.primary, radius = size.width * .47f, center = center)
-            drawCircle(Palette.background, radius = size.width * .29f, center = center)
-            drawLine(
-                Palette.primary, Offset(center.x + size.width * .1f, center.y - size.height * .16f),
-                Offset(center.x + size.width * .1f, center.y + size.height * .11f),
-                strokeWidth = size.width * .07f, cap = StrokeCap.Round
-            )
-            drawCircle(Palette.primary, radius = size.width * .065f,
-                center = Offset(center.x + size.width * .04f, center.y + size.height * .13f))
-        }
-        Spacer(Modifier.width(9.dp))
+        Image(
+            painter = painterResource(R.drawable.ic_soundtrail),
+            contentDescription = null,
+            modifier = Modifier.size(34.dp)
+        )
+        Spacer(Modifier.width(8.dp))
         Text("soundtrail", style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.Bold, letterSpacing = (-0.7f).sp)
     }
@@ -196,8 +198,16 @@ internal fun PinCard(
     }
 }
 
+/**
+ * One search result.
+ *
+ * Tapping the row pins the song — that is what the app is for. When the provider can play the
+ * whole track in its own app ([onPlay]), the row also carries a play button: Spotify is the case
+ * this exists for, where opening the song in Spotify plays it in full rather than as Soundtrail's
+ * 30-second preview.
+ */
 @Composable
-internal fun TrackRow(track: TrackResult, onPin: () -> Unit) {
+internal fun TrackRow(track: TrackResult, onPin: () -> Unit, onPlay: (() -> Unit)? = null) {
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Palette.surface)
             .clickable(onClick = onPin).padding(12.dp),
@@ -210,6 +220,19 @@ internal fun TrackRow(track: TrackResult, onPin: () -> Unit) {
                 style = MaterialTheme.typography.titleMedium)
             Text(track.artist, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodyMedium, color = Palette.secondary)
+        }
+        if (onPlay != null) {
+            Box(
+                Modifier.size(34.dp).clip(CircleShape).background(Palette.elevated)
+                    .clickable(onClick = onPlay),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Rounded.PlayArrow, contentDescription = "Play ${track.title} in ${track.provider.label}",
+                    tint = Palette.primary, modifier = Modifier.size(20.dp)
+                )
+            }
+            Spacer(Modifier.width(8.dp))
         }
         Icon(Icons.Rounded.Add, contentDescription = "Pin ${track.title}", tint = Palette.primary)
         Spacer(Modifier.width(5.dp))

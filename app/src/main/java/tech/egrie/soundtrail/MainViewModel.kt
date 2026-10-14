@@ -26,6 +26,8 @@ import tech.egrie.soundtrail.data.MusicPin
 import tech.egrie.soundtrail.data.PinStore
 import tech.egrie.soundtrail.data.Playlist
 import tech.egrie.soundtrail.data.PlaylistItem
+import tech.egrie.soundtrail.data.LikedSongs
+import tech.egrie.soundtrail.data.consolidateLikes
 import tech.egrie.soundtrail.data.PlaylistStore
 import tech.egrie.soundtrail.data.StoredAudioFile
 import tech.egrie.soundtrail.integrations.AudioDbService
@@ -38,6 +40,11 @@ import tech.egrie.soundtrail.integrations.MusicProvider
 import tech.egrie.soundtrail.integrations.SongInfo
 import tech.egrie.soundtrail.integrations.SoundCloudService
 import tech.egrie.soundtrail.integrations.SpotifyService
+import tech.egrie.soundtrail.assistant.AssistantAnswer
+import tech.egrie.soundtrail.assistant.AssistantHit
+import tech.egrie.soundtrail.assistant.AssistantLibrary
+import tech.egrie.soundtrail.assistant.AssistantParser
+import tech.egrie.soundtrail.assistant.toQueueEntry
 import tech.egrie.soundtrail.integrations.TrackResult
 import tech.egrie.soundtrail.integrations.GoogleAuthHealth
 import tech.egrie.soundtrail.integrations.GoogleAuthState
@@ -61,6 +68,10 @@ import tech.egrie.soundtrail.mood.MoodProfile
 import tech.egrie.soundtrail.mood.MoodStore
 import tech.egrie.soundtrail.mood.TrackMoodTags
 import tech.egrie.soundtrail.playback.JellyfinPlayer
+import tech.egrie.soundtrail.playback.LibraryMedia
+import tech.egrie.soundtrail.playback.PlaybackHub
+import tech.egrie.soundtrail.playback.QueueEntry
+import tech.egrie.soundtrail.playback.toQueueEntry
 import tech.egrie.soundtrail.sync.CloudSyncException
 import tech.egrie.soundtrail.sync.CloudSyncService
 import tech.egrie.soundtrail.sync.YouTubeAudioStage
@@ -134,8 +145,34 @@ internal data class AppState(
     val microGReInstalled: Boolean = false,
     /** The mood reader: what the listener typed, what it meant, and the mix it produced. */
     val mood: MoodUiState = MoodUiState(),
+    /** The Ask tab: what was said or typed, and the answer to it. */
+    val assistant: AssistantUiState = AssistantUiState(),
     /** Health of the saved Google connection; never contains a token value. */
     val youtubeAuth: GoogleAuthHealth = GoogleAuthHealth(GoogleAuthState.NOT_CONNECTED)
+)
+
+/**
+ * Everything the Ask tab renders: the request in progress and the answer to the last one.
+ *
+ * The microphone itself is not here — it belongs to the activity, which owns the recognizer's
+ * lifetime and the permission. What this holds is the words, and what the app found for them.
+ */
+internal data class AssistantUiState(
+    val input: String = "",
+    /** True while the microphone is open; the activity reports it back as it changes. */
+    val listening: Boolean = false,
+    /** The words heard so far, shown while they are still being said. */
+    val partial: String = "",
+    /** True while the library and the catalogue are being searched. */
+    val thinking: Boolean = false,
+    /** The sentence the answer says, shown and — when [speakReplies] is on — spoken. */
+    val reply: String? = null,
+    /** What the answer found, best first. Empty while a request is still being understood. */
+    val hits: List<AssistantHit> = emptyList(),
+    /** What was asked, so an answer can explain itself. */
+    val question: String = "",
+    /** True when the reply should be read out loud. */
+    val speakReplies: Boolean = true
 )
 
 /**
@@ -224,15 +261,22 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     // The optional AI reader, and the on-device engine that always backs it up.
     private val moodAi = MoodAiService(moodPrefs)
 
-    /** The mix currently playing through the shared player, and where it is. */
-    private var moodQueue: List<MoodMixTrack> = emptyList()
-    private var moodQueueIndex = -1
+    /**
+     * The app's one playback hub: the queue, the stream resolution, the media session and the
+     * player behind every surface this app has — its own bar, the notification, the lockscreen
+     * and Android Auto. Screens render [player] through it, so no two surfaces can ever show a
+     * different song.
+     */
+    private val hub = PlaybackHub.shared(application)
 
     /**
      * The app's one player, shared with [tech.egrie.soundtrail.playback.PlaybackService] so
      * the in-app bar and the playback notification always drive the same stream.
      */
-    val player = JellyfinPlayer.shared(application)
+    val player: JellyfinPlayer = hub.player
+
+    /** The media ids of the mix that is playing, so the Mood tab's rows light up as it goes. */
+    private var moodQueueKeys: List<String> = emptyList()
 
     private val _state = MutableStateFlow(
         AppState(
@@ -283,6 +327,14 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val messages = _messages.asSharedFlow()
 
+    /**
+     * Sentences for the phone to say out loud. The speaking engine belongs to the activity (it
+     * owns an Android service and its lifetime), so the words are handed over rather than spoken
+     * here; when the listener has speech replies switched off, nothing is emitted at all.
+     */
+    private val _speech = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val speech = _speech.asSharedFlow()
+
     init {
         refreshDeviceStatus()
         if (spotify.connected) loadProfile()
@@ -308,14 +360,37 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         viewModelScope.launch {
             LocationWatchService.status.collect { live -> _state.update { it.copy(watchStatus = live) } }
         }
-        // A mood mix plays on through the shared player: when a song ends, the next one starts.
+        // Playback lives in the hub, so the Mood tab follows the song that is playing rather
+        // than owning a queue of its own: the mix that plays in the car lights up here too.
         viewModelScope.launch {
             player.state.collect { current ->
-                if (current?.completed == true && moodQueue.isNotEmpty()) {
-                    playMixAt(moodQueueIndex + 1, announceEnd = true)
+                val playing = current?.playing == true
+                val index = current?.itemId?.let { itemId -> moodQueueKeys.indexOf(itemId) } ?: -1
+                val mood = _state.value.mood
+                if (mood.queuePlaying != playing || mood.queueIndex != index) {
+                    _state.update {
+                        it.copy(
+                            mood = it.mood.copy(
+                                queueIndex = index,
+                                queuePlaying = index >= 0 && playing
+                            )
+                        )
+                    }
+                }
+                // The mix played to its end: say so once, the way the app always has. The
+                // queue still has to be that very mix — the car, or another tap in the app,
+                // may have replaced it with a list of its own.
+                if (current?.completed == true && moodQueueKeys.isNotEmpty() &&
+                    current.itemId == moodQueueKeys.last() &&
+                    hub.queueState.value.entries.map { it.mediaId } == moodQueueKeys
+                ) {
+                    moodQueueKeys = emptyList()
+                    notify("That's the end of the mood mix.")
                 }
             }
         }
+        // Anything the hub could not play is something the listener should read.
+        viewModelScope.launch { hub.messages.collect { notify(it) } }
     }
 
     fun notify(message: String) { _messages.tryEmit(message) }
@@ -498,7 +573,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         // Clear locally first; the sign-out call is best-effort and cannot race a reconnect.
         val previous = jellyfin.disconnect()
         val server = _state.value.jellyfinServer
-        player.stop()
+        hub.stopPlayback()
         _state.update {
             it.copy(
                 jellyfinConnected = false,
@@ -514,169 +589,203 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     }
 
     /**
-     * Plays a pinned or playlist Jellyfin song in the app itself. The stored link is only an
-     * item reference, so the stream URL is resolved here from the current connection.
+     * Plays one song now: a Jellyfin item reached from somewhere other than a list, or a single
+     * track with no list around it. Everything else goes through the queue — see [playPin] and
+     * [playPlaylistItemUnified] — so next and previous know where to go.
      */
     fun playJellyfin(link: MusicLink, title: String, artist: String) {
-        val itemId = JellyfinRef.itemId(link.url)
-        if (itemId == null) {
-            notify("That Jellyfin song link is not usable.")
-            return
-        }
-        val playback = jellyfin.playback(itemId)
-        if (playback == null) {
-            notify("Connect your Jellyfin server on the Connect tab to stream this song.")
-            return
-        }
-        player.play(
-            title = title.ifBlank { "Jellyfin song" },
-            artist = artist,
-            itemId = itemId,
-            playback = playback
+        hub.playEntry(
+            QueueEntry(
+                mediaId = LibraryMedia.song(link.url),
+                title = title.ifBlank { "Jellyfin song" },
+                artist = artist,
+                provider = link.provider,
+                url = link.url
+            )
         )
     }
 
-    /** Unified in-app playback for any provider: local file, Jellyfin, Spotify preview, SoundCloud, YouTube. */
+    /**
+     * Plays a pinned song with the whole pins list queued around it, so the notification, the
+     * lockscreen and the car can step along the trail without going back to the map.
+     */
     fun playPin(pin: tech.egrie.soundtrail.data.MusicPin) {
-        val link = MusicLink(pin.provider, pin.url)
-        when (pin.provider) {
-            MusicProvider.JELLYFIN -> playJellyfin(link, pin.title, pin.artist)
-            else -> playLink(link, pin.title, pin.artist, pin.id)
-        }
+        val pins = _state.value.pins
+        hub.play(pins.map { it.toQueueEntry() }, pins.indexOfFirst { it.id == pin.id })
     }
 
+    /** Plays a playlist song in the context of its playlist, preferring an offline copy. */
     fun playPlaylistItemUnified(item: PlaylistItem) {
-        // Local offline copy always wins — plays directly in-app, no network.
-        item.localFile?.let { name ->
-            files.fileFor(name)?.let { file ->
-                player.playLocalFile(
-                    title = item.title,
-                    artist = item.artist,
-                    itemId = item.id,
-                    file = file,
-                    provider = item.provider ?: MusicProvider.YOUTUBE
-                )
-                return
-            }
-        }
-        val url = item.url
-        if (url != null) {
-            val link = MusicLinkParser.parse(url)
-            if (link != null) {
-                if (link.provider == MusicProvider.JELLYFIN) {
-                    playJellyfin(link, item.title, item.artist)
-                    return
-                }
-                playLink(link, item.title, item.artist, item.id)
-                return
-            }
-        }
-        // No link — try to find a local search fallback? For now, notify.
-        notify("This song has no playable link. Add a supported link or attach audio you own.")
-    }
-
-    // Keeps the last YouTube in-app playback temp file so we can clean it up on next play.
-    private var lastYouTubePlaybackFile: java.io.File? = null
-
-    private fun playLink(link: MusicLink, title: String, artist: String, itemId: String) {
-        viewModelScope.launch {
-            try {
-                when (link.provider) {
-                    MusicProvider.JELLYFIN -> {
-                        // Already handled above, but keep for safety
-                        playJellyfin(link, title, artist)
-                    }
-                    MusicProvider.SPOTIFY -> {
-                        player.setBuffering(title, artist, itemId, MusicProvider.SPOTIFY)
-                        val preview = spotify.resolvePlayableUrl(link)
-                        if (preview != null) {
-                            player.playRemoteUrl(title, artist, itemId, preview, MusicProvider.SPOTIFY)
-                        } else {
-                            player.stop()
-                            notify("No Spotify preview available for this track. Spotify full playback needs their app, but Soundtrail plays 30-second previews when Spotify provides them. Try searching again to get a preview.")
-                        }
-                    }
-                    MusicProvider.SOUNDCLOUD -> {
-                        player.setBuffering(title, artist, itemId, MusicProvider.SOUNDCLOUD)
-                        val stream = try {
-                            soundcloud.resolvePlayableUrl(link)
-                        } catch (_: Exception) { null }
-                        if (stream != null) {
-                            player.playRemoteUrl(title, artist, itemId, stream, MusicProvider.SOUNDCLOUD)
-                        } else {
-                            player.stop()
-                            notify("Couldn't get a SoundCloud stream for this track. It may be private or require re-connecting SoundCloud.")
-                        }
-                    }
-                    MusicProvider.YOUTUBE_MUSIC, MusicProvider.YOUTUBE -> {
-                        val videoId = MusicLinkParser.youtubeVideoId(link.url)
-                        if (videoId == null) {
-                            notify("That YouTube link is not a playable video.")
-                            return@launch
-                        }
-                        if (!cloudSync.connected) {
-                            notify("Connect your sync server to play YouTube audio in-app, or download it for offline playback first.")
-                            return@launch
-                        }
-                        player.setBuffering(title, artist, itemId, link.provider)
-                        // Clean up previous in-app YouTube playback temp file.
-                        lastYouTubePlaybackFile?.let { prev ->
-                            withContext(Dispatchers.IO) { files.discardDownloadTemp(prev) }
-                            lastYouTubePlaybackFile = null
-                        }
-                        // Download to a temp file that is NOT counted as offline storage (.part is excluded).
-                        val temp = withContext(Dispatchers.IO) { files.newDownloadTemp() }
-                        try {
-                            cloudSync.downloadYouTubeAudio(videoId, temp, userConfirmedRights = true) { _, _, _ -> }
-                            if (!temp.isFile || temp.length() == 0L) {
-                                notify("Couldn't prepare YouTube audio for playback.")
-                                withContext(Dispatchers.IO) { files.discardDownloadTemp(temp) }
-                                player.stop()
-                                return@launch
-                            }
-                            lastYouTubePlaybackFile = temp
-                            player.playLocalFile(title, artist, itemId, temp, link.provider)
-                        } catch (e: Exception) {
-                            withContext(Dispatchers.IO) { files.discardDownloadTemp(temp) }
-                            player.stop()
-                            notify(e.message ?: "YouTube in-app playback failed.")
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                notify(e.message ?: "Couldn't play this song in-app.")
-            }
-        }
-    }
-
-    /** Attempts to play a TrackResult directly (from search), using its playableUrl if present. */
-    fun playTrackResult(track: TrackResult) {
-        track.playableUrl?.let { url ->
-            player.playRemoteUrl(track.title, track.artist, track.url, url, track.provider)
+        val playlist = _state.value.playlists.firstOrNull { list -> list.items.any { it.id == item.id } }
+        if (playlist == null) {
+            hub.playEntry(item.toQueueEntry())
             return
         }
-        // No direct playable URL in result — resolve via provider APIs.
-        val link = MusicLinkParser.parse(track.url)
-        if (link != null) {
-            playLink(link, track.title, track.artist, track.url)
-        } else {
-            notify("No playable audio for this track.")
+        hub.playPlaylistItem(item, playlist.items, playlist.name)
+    }
+
+    /** Plays a search result; a preview URL the search already resolved is used as it stands. */
+    fun playTrackResult(track: TrackResult) {
+        hub.playEntry(
+            QueueEntry(
+                mediaId = LibraryMedia.song(track.url),
+                title = track.title,
+                artist = track.artist,
+                provider = track.provider,
+                url = track.url,
+                streamUrl = track.playableUrl
+            )
+        )
+    }
+
+    fun togglePlayback() = hub.toggle()
+
+    /** Ends playback and clears the queue behind every surface: bar, notification and car. */
+    fun stopPlayback() = hub.stopPlayback()
+
+    fun clearYouTubePlaybackCache() = hub.clearYouTubeCache()
+
+    // ----- Ask: talking to the app, and the answer coming back -----
+
+    /** What was typed or spoken, as it is typed or heard. */
+    fun setAssistantInput(text: String) {
+        _state.update { it.copy(assistant = it.assistant.copy(input = text.take(400))) }
+    }
+
+    /**
+     * The activity's report of the microphone: whether it is open, and the words so far. The
+     * words are shown while they are still being said, so a misheard request can be seen and
+     * stopped rather than discovered after the fact.
+     */
+    fun setAssistantListening(listening: Boolean, partial: String = "") {
+        _state.update {
+            it.copy(assistant = it.assistant.copy(listening = listening, partial = partial))
         }
     }
 
-    fun togglePlayback() = player.toggle()
-
-    fun stopPlayback() {
-        player.stop()
-        // Optionally keep the YouTube playback cache for quick replay; clean up only on next YouTube play
-        // or when explicitly cleared. We don't delete here to allow pause/resume to keep working.
+    /** Whether answers are read out loud. Off means the reply is only on screen. */
+    fun setAssistantSpeakReplies(enabled: Boolean) {
+        _state.update { it.copy(assistant = it.assistant.copy(speakReplies = enabled)) }
     }
 
-    fun clearYouTubePlaybackCache() {
-        lastYouTubePlaybackFile?.let { file ->
-            viewModelScope.launch(Dispatchers.IO) { files.discardDownloadTemp(file) }
-            lastYouTubePlaybackFile = null
+    /**
+     * Takes a request — typed, or what the microphone heard — and answers it.
+     *
+     * A description of a feeling goes to the mood reader, which is what that engine is for. A
+     * song goes to the listener's own library first, and then — when a Google account is
+     * connected — to YouTube's music catalogue, so the request works even for songs that were
+     * never saved here. Whatever is found is played through the same single player as everything
+     * else, queued in the order it is listed.
+     */
+    fun ask(text: String = _state.value.assistant.input) {
+        if (_state.value.assistant.thinking) return
+        val said = text.trim().take(400)
+        if (said.isBlank()) {
+            answer("Say or type what you would like to hear.", emptyList(), said)
+            return
         }
+        val request = AssistantParser.parse(said)
+        if (request == null) {
+            answer("Say or type the song you would like to hear.", emptyList(), said)
+            return
+        }
+        if (request.mood) {
+            // The mood engine reads "i feel like something calm" better than a search would, and
+            // the mix it builds plays exactly as a mix always has.
+            setMoodText(request.query)
+            _state.update {
+                it.copy(assistant = it.assistant.copy(input = "", question = said, hits = emptyList(), reply = null))
+            }
+            analyzeMood(announce = true)
+            return
+        }
+        _state.update {
+            it.copy(
+                assistant = it.assistant.copy(
+                    thinking = true, input = "", question = said, reply = null, hits = emptyList()
+                )
+            )
+        }
+        viewModelScope.launch {
+            val snapshot = _state.value
+            val mine = AssistantLibrary.search(request, snapshot.pins, snapshot.playlists)
+            // A request that named somewhere else — "the xx on Spotify" — is about that service,
+            // not YouTube, so the catalogue is left alone and the library answers on its own.
+            val wantsYouTube = request.provider == null ||
+                request.provider == MusicProvider.YOUTUBE ||
+                request.provider == MusicProvider.YOUTUBE_MUSIC
+            val searched = youtubeData.connected && wantsYouTube
+            var failure: String? = null
+            val found = if (searched) {
+                try {
+                    // One look at the request as it was understood; a title that a command word
+                    // was hiding ("Play That Funky Music") gets a second look as it was said,
+                    // but only when the first found nothing at all.
+                    var hits = withContext(Dispatchers.IO) { youtubeData.searchCatalogue(request.phrase) }
+                    if (hits.isEmpty() && request.spoken.isNotBlank() &&
+                        !request.spoken.equals(request.phrase, ignoreCase = true)
+                    ) {
+                        hits = withContext(Dispatchers.IO) { youtubeData.searchCatalogue(request.spoken) }
+                    }
+                    hits.map { track ->
+                        AssistantHit(
+                            title = track.title,
+                            artist = track.artist,
+                            provider = track.provider,
+                            detail = track.provider.label,
+                            url = track.url,
+                            musicUrl = track.url
+                        )
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    failure = e.message ?: "YouTube search is unavailable."
+                    emptyList()
+                }
+            } else emptyList()
+
+            val hits = AssistantAnswer.merge(mine, found)
+            val playing = AssistantAnswer.playable(hits)
+            if (playing.isNotEmpty()) {
+                hub.play(playing.map { it.toQueueEntry() }, 0)
+            }
+            // A search that failed after the library already answered is not worth interrupting
+            // for; the songs are the answer.
+            val spokenError = failure.takeIf { hits.isEmpty() }
+            val sentence = AssistantAnswer.sentence(hits, searched = searched, error = spokenError)
+            answer(sentence, hits, said)
+        }
+    }
+
+    /** Plays one row of an answer, with the rest of the answer queued behind it. */
+    fun playAssistantHit(hit: AssistantHit) {
+        val hits = _state.value.assistant.hits
+        val playable = AssistantAnswer.playable(hits)
+        val index = playable.indexOfFirst { it.itemId != null && it.itemId == hit.itemId }
+            .takeIf { it >= 0 } ?: playable.indexOfFirst { it.url == hit.url }
+        if (playable.isEmpty() || index < 0) {
+            hub.playEntry(hit.toQueueEntry())
+            return
+        }
+        hub.play(playable.map { it.toQueueEntry() }, index)
+    }
+
+    /** Shows (and, when speech replies are on, says) one answer. */
+    private fun answer(sentence: String, hits: List<AssistantHit>, question: String) {
+        _state.update {
+            it.copy(
+                assistant = it.assistant.copy(
+                    thinking = false,
+                    listening = false,
+                    partial = "",
+                    reply = sentence,
+                    hits = hits,
+                    question = question
+                )
+            )
+        }
+        if (_state.value.assistant.speakReplies) _speech.tryEmit(AssistantAnswer.spoken(sentence))
     }
 
     // ----- Mood: how you feel in, music out -----
@@ -702,7 +811,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
      * unreadable output) falls back to the on-device engine with a short explanation, so the
      * feature never depends on a model being reachable. A quick-pick mood skips reading entirely.
      */
-    fun analyzeMood(quickMoodId: String? = null) {
+    fun analyzeMood(quickMoodId: String? = null, announce: Boolean = false) {
         val mood = _state.value.mood
         if (mood.analyzing) return
         val context = moodContext()
@@ -746,38 +855,42 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                     )
                 )
             }
+            // A request that came in by voice is answered out loud, in the same words the card
+            // shows; the mix itself is on the Mood tab.
+            if (announce) {
+                val said = buildString {
+                    append("That reads as ${profile.label}.")
+                    append(
+                        if (mix.isEmpty()) " Nothing in your library fits it yet."
+                        else " ${mix.size} song${if (mix.size == 1) "" else "s"} on the Mood tab."
+                    )
+                }
+                answer(said, emptyList(), _state.value.assistant.question)
+            }
             // With tag lookups switched on, improve the mix in the background rather than
             // pretending the first pass knows more than it does.
             if (moodPrefs.tagLookupEnabled && untagged > 0) improveMoodMix(quiet = true)
         }
     }
 
-    /** Plays the whole mix in order, reusing the same in-app player as everything else. */
+    /** Plays the whole mix in order, through the same queue as everything else. */
     fun playMoodMix() {
-        val mix = _state.value.mood.mix
-        if (mix.isEmpty()) {
+        if (_state.value.mood.mix.isEmpty()) {
             notify("Build a mood mix first.")
             return
         }
-        moodQueue = mix
-        playMixAt(0, announceEnd = true)
+        playMixFrom(0)
     }
 
     /** Jumps to one song in the mix; playback continues through the rest of it. */
     fun playMoodTrack(track: MoodMixTrack) {
-        if (moodQueue.isEmpty()) moodQueue = _state.value.mood.mix
-        val index = moodQueue.indexOfFirst { it.key == track.key }.takeIf { it >= 0 }
-            ?: run {
-                moodQueue = _state.value.mood.mix
-                moodQueue.indexOfFirst { it.key == track.key }
-            }
-        playMixAt(if (index >= 0) index else 0, announceEnd = true)
+        val index = _state.value.mood.mix.indexOfFirst { it.key == track.key }.takeIf { it >= 0 } ?: 0
+        playMixFrom(index)
     }
 
     fun stopMoodMix() {
-        moodQueue = emptyList()
-        moodQueueIndex = -1
-        player.stop()
+        moodQueueKeys = emptyList()
+        hub.stopPlayback()
         _state.update { it.copy(mood = it.mood.copy(queueIndex = -1, queuePlaying = false)) }
     }
 
@@ -1134,31 +1247,14 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     }
 
     /**
-     * Plays the mix from [index] onwards, skipping songs that have no playable link, and stops
-     * when the mix runs out. Every entry goes through the same player as a tap on a pin would.
+     * Hands the mix to the hub as a queue, starting at [index]. The hub skips anything that
+     * cannot play here and moves to the next song when one ends, so a mix keeps going in the
+     * car exactly as it does on the phone.
      */
-    private fun playMixAt(index: Int, announceEnd: Boolean) {
-        var cursor = index
-        while (cursor in moodQueue.indices) {
-            val track = moodQueue[cursor]
-            val link = track.url?.let(MusicLinkParser::parse)
-            if (link != null) {
-                moodQueueIndex = cursor
-                _state.update { it.copy(mood = it.mood.copy(queueIndex = cursor, queuePlaying = true)) }
-                if (link.provider == MusicProvider.JELLYFIN) {
-                    playJellyfin(link, track.title, track.artist)
-                } else {
-                    playLink(link, track.title, track.artist, track.key)
-                }
-                return
-            }
-            cursor += 1
-        }
-        val wasPlaying = moodQueue.isNotEmpty()
-        moodQueue = emptyList()
-        moodQueueIndex = -1
-        _state.update { it.copy(mood = it.mood.copy(queueIndex = -1, queuePlaying = false)) }
-        if (wasPlaying && announceEnd) notify("That's the end of the mood mix.")
+    private fun playMixFrom(index: Int) {
+        val entries = _state.value.mood.mix.map { it.toQueueEntry() }
+        moodQueueKeys = entries.map { it.mediaId }
+        hub.play(entries, index)
     }
 
     /** A link to the item in Jellyfin's own web client, for sharing with people on that server. */
@@ -1346,17 +1442,22 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             try {
                 val imported: List<YouTubeImportedPlaylist> = withContext(Dispatchers.IO) { youtubeData.importPlaylists() }
                 val now = System.currentTimeMillis()
+                // One list for likes, whichever account they came from: an import goes into the
+                // liked list that already exists (whatever it is called) rather than creating a
+                // second one beside it.
+                val existingLikes = playlists.all()
+                    .firstOrNull { LikedSongs.isLikedName(it.name) && !it.id.startsWith("yt-pl:") }
+                    ?: playlists.all().firstOrNull { LikedSongs.isLikedName(it.name) }
                 val incoming = imported.map { yt ->
-                    // Keep YouTube and YouTube Music liked separate: rename YouTube's special playlists
-                    // so they don't mix with manually created YouTube Music liked playlists.
-                    val distinctName = when (yt.title) {
-                        "Liked videos" -> "YouTube Liked"
-                        "Uploads" -> "YouTube Uploads"
-                        "Favorites" -> "YouTube Favorites"
+                    val isLikes = yt.title == "Liked videos"
+                    val distinctName = when {
+                        isLikes -> LikedSongs.NAME
+                        yt.title == "Uploads" -> "YouTube Uploads"
+                        yt.title == "Favorites" -> "YouTube Favorites"
                         else -> yt.title
                     }
                     Playlist(
-                        id = "yt-pl:${yt.playlistId}",
+                        id = if (isLikes) existingLikes?.id ?: "yt-pl:${yt.playlistId}" else "yt-pl:${yt.playlistId}",
                         name = distinctName,
                         items = yt.items.map { video ->
                             PlaylistItem(
@@ -1372,6 +1473,25 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                     )
                 }
                 val (addedLists, addedItems) = withContext(Dispatchers.IO) { playlists.merge(incoming) }
+                // One list holds likes: a list an earlier import made is folded into the
+                // listener's own (or into the newest import's), and a name the app chose is
+                // renamed to what the list holds. Every row keeps the provider it came from.
+                runCatching {
+                    val lists = playlists.all()
+                    val target = lists.firstOrNull { LikedSongs.isLikedName(it.name) }
+                    if (target != null) {
+                        val (consolidated, moved) = consolidateLikes(lists, target.id)
+                        val renamed = consolidated.map {
+                            if (it.id == target.id && LikedSongs.isImportedName(it.name)) {
+                                it.copy(name = LikedSongs.NAME)
+                            } else {
+                                it
+                            }
+                        }
+                        val changed = moved > 0 || renamed != lists
+                        if (changed) playlists.replaceAll(renamed)
+                    }
+                }
                 youtubePrefs.edit().putLong("last_imported_at", now).apply()
                 refreshOfflineAudioState()
                 recordCloudSyncChanges()
@@ -2101,6 +2221,8 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     }
 
     private fun refreshOfflineAudioState() {
+        // A car that is open on a list should see the change without being reopened.
+        hub.notifyLibraryChanged()
         val currentPlaylists = playlists.all()
         val storedFiles = files.listStoredAudio()
         _state.update {
@@ -2116,6 +2238,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         // Cloud sync is opt-in. Before sign-in (or while signed out), keep no duplicate journal;
         // the first sync seeds local data and later syncs diff against the last applied snapshot.
         if (!cloudSync.connected) return
+        hub.notifyLibraryChanged()
         runCatching { cloudSync.observeLocalChanges() }
         _state.update { it.copy(syncPendingChanges = cloudSync.pendingChangeCount()) }
     }

@@ -72,6 +72,11 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // Android Auto browses and controls Soundtrail through a MediaBrowserService, and the
+    // lockscreen/Bluetooth/Auto controls all need one shared MediaSession. media1 (not media3)
+    // is deliberate: Soundtrail already plays through its own resolver and MediaPlayer, so the
+    // app needs a browse tree and a session bridge, not a player framework.
+    implementation("androidx.media:media:1.7.0")
     // Google Sign-In APIs are used for the user's explicit, read-only YouTube OAuth consent.
     implementation("com.google.android.gms:play-services-auth:21.3.0")
 

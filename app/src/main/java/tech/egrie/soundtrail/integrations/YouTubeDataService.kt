@@ -611,6 +611,44 @@ internal class YouTubeDataService(context: Context) {
         }
     }
 
+    /**
+     * Searches YouTube's music catalogue — the videos YouTube files under Music — instead of the
+     * listener's own playlists.
+     *
+     * The public Data API has no YouTube Music library endpoint, so this is the widest honest
+     * search available from a third-party app: it finds the songs (music videos, lyric videos and
+     * audio uploads of them), and each result carries the YouTube Music link for its video id, so
+     * the full catalogue version is one tap away in that app. What comes back plays here through
+     * the same player as everything else.
+     */
+    suspend fun searchCatalogue(
+        query: String,
+        limit: Int = MAX_CATALOGUE_RESULTS
+    ): List<TrackResult> {
+        if (query.isBlank()) return emptyList()
+        requireConnected("Connect your Google account to search YouTube.")
+        val bounded = limit.coerceIn(1, 50)
+        val parameters = listOf(
+            "part" to "snippet",
+            "type" to "video",
+            // 10 is the Music category; without it a search for a word can answer with news clips.
+            "videoCategoryId" to "10",
+            "maxResults" to bounded.toString(),
+            "q" to query
+        )
+        val useOAuth = oauthConnected
+        try {
+            val token = if (useOAuth) oauthAccessToken() else accessToken()
+            return YouTubeApiParser.catalogueTracks(apiGet("search", parameters, token), bounded)
+        } catch (e: YouTubeAuthExpiredException) {
+            if (!useOAuth) throw e
+            return YouTubeApiParser.catalogueTracks(
+                apiGet("search", parameters, oauthAccessToken(forceRefresh = true)),
+                bounded
+            )
+        }
+    }
+
     private suspend fun searchWithToken(query: String, token: String): List<TrackResult> {
         val now = System.currentTimeMillis()
         // Both branches produce a CachedLibrary, so the elvis result has one usable type.
@@ -780,6 +818,9 @@ internal class YouTubeDataService(context: Context) {
         private const val MAX_IMPORT_ITEMS_PER_PLAYLIST = 2000
         private const val MAX_PLAYLISTS_TO_SEARCH = 50
         private const val MAX_RESULTS = 20
+
+        /** How many songs one catalogue search may answer with. */
+        internal const val MAX_CATALOGUE_RESULTS = 12
         private const val LIBRARY_CACHE_MS = 120_000L
 
         /**
@@ -839,6 +880,56 @@ internal object YouTubeApiParser {
             }.ifBlank { "Unknown artist" }.take(120)
             YouTubeImportedItem(videoId = id, title = title.take(120), artist = artist)
         }
+    }
+
+    /**
+     * A catalogue search page: the songs YouTube itself found, rather than the ones already in
+     * the listener's playlists. Results are videos, so each row is a video id turned into the
+     * YouTube Music link for that same id — which is what the YouTube Music app opens.
+     *
+     * The channel is the artist the API gives, with the " - Topic" suffix that auto-generated
+     * music channels carry taken off; when there is no channel at all, an "Artist - Song" title
+     * is the fallback. Titles keep their production noise off the row (see [YouTubeTitles]).
+     */
+    fun catalogueTracks(
+        body: String,
+        limit: Int = YouTubeDataService.MAX_CATALOGUE_RESULTS
+    ): List<TrackResult> = runCatching { parseCatalogue(body, limit) }
+        .getOrElse { emptyList() }
+
+    /** A body that is not JSON at all is an answer with nothing in it, never a crash. */
+    private fun parseCatalogue(body: String, limit: Int): List<TrackResult> {
+        val items = JSONObject(body).optJSONArray("items") ?: return emptyList()
+        return (0 until items.length()).mapNotNull { index ->
+            val item = items.optJSONObject(index) ?: return@mapNotNull null
+            val snippet = item.optJSONObject("snippet") ?: return@mapNotNull null
+            val rawTitle = snippet.optString("title").takeIf(String::isNotBlank) ?: return@mapNotNull null
+            if (rawTitle.equals("Deleted video", ignoreCase = true) ||
+                rawTitle.equals("Private video", ignoreCase = true)
+            ) return@mapNotNull null
+            val id = item.optJSONObject("id")?.optString("videoId")?.takeIf(String::isNotBlank)
+                ?: return@mapNotNull null
+            if (!videoIdPattern.matches(id)) return@mapNotNull null
+
+            val channel = snippet.optString("videoOwnerChannelTitle").ifBlank {
+                snippet.optString("channelTitle")
+            }.removeSuffix(" - Topic").trim()
+            val fromTitle = YouTubeTitles.artistFromTitle(rawTitle)
+            val artist = channel.ifBlank { fromTitle.orEmpty() }
+
+            // When the artist came out of the title, it comes out of the row's title as well:
+            // "The xx - Sunsets" is one song, not a song called "The xx - Sunsets".
+            val cleaned = YouTubeTitles.clean(rawTitle)
+                .let { title -> fromTitle?.takeIf { channel.isBlank() }?.let { title.removePrefix("$it - ") } ?: title }
+                .trim()
+
+            TrackResult(
+                title = cleaned.take(120),
+                artist = artist.ifBlank { "Unknown artist" }.take(120),
+                url = YouTubeSearch.watchUrl(id),
+                provider = MusicProvider.YOUTUBE_MUSIC
+            )
+        }.distinctBy { it.url }.take(limit)
     }
 
     fun matchingTracks(body: String, query: String, playlistTitle: String): List<TrackResult> {

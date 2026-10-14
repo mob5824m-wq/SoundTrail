@@ -81,7 +81,8 @@ import java.util.Locale
 @Composable
 internal fun MusicSearchScreen(
     state: AppState, onSearch: (String) -> Unit, onSelectProvider: (SearchProvider) -> Unit,
-    onConnect: () -> Unit, onSelectTrack: (TrackResult) -> Unit, onAddLink: (String) -> Unit,
+    onConnect: () -> Unit, onSelectTrack: (TrackResult) -> Unit, onPlayTrack: (TrackResult) -> Unit,
+    onAddLink: (String) -> Unit,
     onLookup: (String, String) -> Unit, onSelectLookup: (SongInfo) -> Unit,
     onSearchYoutubeMusic: (String) -> Unit, onOpenYoutubeLibrary: () -> Unit,
     onNotice: (String) -> Unit
@@ -183,7 +184,7 @@ internal fun MusicSearchScreen(
                 )
                 if (youtubeExpanded) {
                     Spacer(Modifier.height(12.dp))
-                    Text("YouTube and YouTube Music are now kept separate. music.youtube.com links stay as YouTube Music, youtube.com / youtu.be links stay as YouTube. Liked YouTube (YouTube Liked) and YouTube Music liked stay in different playlists. All playback happens directly in Soundtrail.",
+                    Text("music.youtube.com links stay as YouTube Music and youtube.com / youtu.be links stay as YouTube, so every row says where it came from. Liked videos from your Google account are imported into one liked list — the same list your own likes live in, one song per link — because the import cannot see YouTube Music's account likes, which no third-party app can. All playback happens directly in Soundtrail.",
                         color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
                     Spacer(Modifier.height(10.dp))
                     OutlinedTextField(
@@ -247,7 +248,14 @@ internal fun MusicSearchScreen(
             }
         }
         items(state.results, key = { it.url }) { track ->
-            TrackRow(track) { onSelectTrack(track) }
+            TrackRow(
+                track,
+                onPin = { onSelectTrack(track) },
+                // Spotify is the one provider that plays in full somewhere else; its row says so.
+                onPlay = if (track.provider == MusicProvider.SPOTIFY) {
+                    { onPlayTrack(track) }
+                } else null
+            )
         }
         item {
             SurfaceCard(Modifier.fillMaxWidth()) {

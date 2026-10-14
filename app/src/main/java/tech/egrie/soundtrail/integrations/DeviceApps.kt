@@ -108,6 +108,17 @@ class DeviceApps(private val context: Context) {
         return openYouTubeMusicUrl(url)
     }
 
+    /**
+     * Opens one song in the YouTube Music app — the same video id, so it is the same recording —
+     * which is how a catalogue result is heard in full with YT Music's own account and quality.
+     */
+    fun openYouTubeMusicSong(url: String): Boolean {
+        val uri = Uri.parse(url)
+        if (uri.path != "/watch") return false
+        if (uri.getQueryParameter("v").isNullOrBlank()) return false
+        return openYouTubeMusicUrl(url)
+    }
+
     private fun openYouTubeMusicUrl(url: String): Boolean {
         val uri = Uri.parse(url)
         if (uri.scheme != "https" || uri.host != "music.youtube.com") return false

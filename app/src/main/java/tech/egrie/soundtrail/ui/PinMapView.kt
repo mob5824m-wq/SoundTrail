@@ -7,6 +7,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -160,6 +161,8 @@ private class TileFetcher(private val onLoaded: () -> Unit) {
 internal fun PinMapView(
     pins: List<MusicPin>,
     userLocation: GeoPoint?,
+    /** A pin chosen outside the map — a search result, or a row in the list — to open here. */
+    focusPin: MusicPin? = null,
     onPlay: (MusicPin) -> Unit,
     onMap: (GeoPoint) -> Unit,
     onDelete: (MusicPin) -> Unit,
@@ -186,6 +189,16 @@ internal fun PinMapView(
         )
         center = fittedCenter
         zoom = fittedZoom
+    }
+
+    // A pin picked somewhere else (a search hit, a row in the list) is brought into view with
+    // its card open, rather than leaving the listener to hunt for it on the map.
+    LaunchedEffect(focusPin?.id) {
+        val pin = focusPin ?: return@LaunchedEffect
+        center = pin.point
+        zoom = MapMath.clampZoom(maxOf(zoom, FOCUS_ZOOM))
+        selectedId = pin.id
+        userMoved = true
     }
 
     // A deleted (or externally removed) pin must not stay selected.
@@ -368,6 +381,23 @@ internal fun PinMapView(
             }
         }
 
+        // The two things a map is for, one tap away: where am I, and put a pin here. Long-press
+        // still drops a pin exactly where the finger is; this drops one where you are looking.
+        Column(
+            Modifier.align(Alignment.BottomStart).padding(start = 4.dp, bottom = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            MapControl("Me", "Centre the map on my location") {
+                val fix = userLocation ?: return@MapControl
+                center = fix
+                zoom = MapMath.clampZoom(maxOf(zoom, FOCUS_ZOOM))
+                userMoved = true
+            }
+            MapControl("Pin", "Drop a soundspot at the centre of the map") {
+                if (viewSize.width > 0f) onDropPin(center)
+            }
+        }
+
         if (selected != null) {
             Column(
                 Modifier.align(Alignment.BottomCenter).padding(horizontal = 4.dp, vertical = 10.dp)
@@ -427,6 +457,9 @@ private fun MapControl(label: String, contentDescription: String, onClick: () ->
         Text(label, color = Palette.text, style = MaterialTheme.typography.titleMedium)
     }
 }
+
+/** How close the map is when it is aimed at one soundspot. */
+private const val FOCUS_ZOOM = 15.0
 
 /** Provider colours match the pills used everywhere else in Soundtrail. */
 private fun pinColor(provider: MusicProvider): Color = when (provider) {

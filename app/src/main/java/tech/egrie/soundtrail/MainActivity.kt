@@ -13,9 +13,12 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.toArgb
 import androidx.core.content.ContextCompat
@@ -34,12 +37,15 @@ import tech.egrie.soundtrail.integrations.MusicProvider
 import tech.egrie.soundtrail.integrations.YouTubeDataService
 import tech.egrie.soundtrail.integrations.YouTubeSearch
 import tech.egrie.soundtrail.location.DeviceLocation
+import tech.egrie.soundtrail.ui.AssistantActions
 import tech.egrie.soundtrail.ui.ListsActions
 import tech.egrie.soundtrail.ui.MoodActions
 import tech.egrie.soundtrail.ui.Palette
 import tech.egrie.soundtrail.ui.PinDraft
 import tech.egrie.soundtrail.ui.SoundtrailApp
 import tech.egrie.soundtrail.ui.SoundtrailTheme
+import tech.egrie.soundtrail.voice.VoiceInput
+import tech.egrie.soundtrail.voice.VoiceSpeaker
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -139,6 +145,57 @@ class MainActivity : ComponentActivity() {
                     Manifest.permission.ACCESS_FINE_LOCATION
                 ))
             }
+            // The microphone and the speaker are the activity's: it owns the permission, the
+            // recognizer's lifetime, and the main thread both insist on. The view model only
+            // holds the words.
+            val voiceIn = remember { VoiceInput(this) }
+            val speaker = remember { VoiceSpeaker(this) }
+            var speakerReady by remember { mutableStateOf(false) }
+            DisposableEffect(Unit) {
+                speaker.onAvailabilityChanged { ready -> speakerReady = ready }
+                onDispose {
+                    voiceIn.release()
+                    speaker.shutdown()
+                }
+            }
+            // Every answer the app decided to say out loud, as it is decided.
+            LaunchedEffect(Unit) { model.speech.collect { line -> speaker.say(line) } }
+
+            val listen: () -> Unit = {
+                speaker.stop()
+                if (!voiceIn.available) {
+                    model.notify("This phone has no speech recognition available.")
+                } else {
+                    voiceIn.start(
+                        onPartial = { heard -> model.setAssistantListening(true, heard) },
+                        onFinal = { heard ->
+                            model.setAssistantListening(false, "")
+                            model.setAssistantInput(heard)
+                            model.ask(heard)
+                        },
+                        onFailure = { sentence ->
+                            model.setAssistantListening(false, "")
+                            model.notify(sentence)
+                        }
+                    )
+                    model.setAssistantListening(true, "")
+                }
+            }
+            val micPermission = rememberLauncherForActivityResult(
+                ActivityResultContracts.RequestPermission()
+            ) { granted ->
+                if (granted) listen()
+                else model.notify("Microphone access is needed to listen. You can type instead.")
+            }
+            val toggleMic: () -> Unit = {
+                when {
+                    voiceIn.isListening -> voiceIn.stop()
+                    ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+                        PackageManager.PERMISSION_GRANTED -> listen()
+                    else -> micPermission.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            }
+
             // The backup file is chosen and written/read entirely through the system picker.
             val exportBackupLauncher = rememberLauncherForActivityResult(
                 ActivityResultContracts.CreateDocument("application/json")
@@ -284,6 +341,15 @@ class MainActivity : ComponentActivity() {
                             model.notify("No YouTube Music app or browser found.")
                         }
                     },
+                    onPlayTrack = { track ->
+                        // The whole track in Spotify: a hand-off to an app the listener is
+                        // already signed in to, which is the only way a third-party app can
+                        // play a full Spotify song rather than its preview.
+                        val link = MusicLinkParser.parse(track.url)
+                        if (link == null || !apps.play(link)) {
+                            model.notify("Nothing can open ${track.provider.label} on this device.")
+                        }
+                    },
                     onOpenYoutubeLibrary = {
                         if (!apps.openYouTubeMusicLibrary()) {
                             model.notify("No YouTube Music app or browser found.")
@@ -304,6 +370,24 @@ class MainActivity : ComponentActivity() {
                             model.notify("No browser found.")
                         }
                     },
+                    assistant = AssistantActions(
+                        onInput = model::setAssistantInput,
+                        onAsk = { text -> model.ask(text) },
+                        onMic = toggleMic,
+                        onSetSpeakReplies = model::setAssistantSpeakReplies,
+                        onPlayHit = model::playAssistantHit,
+                        onOpenHitInYouTubeMusic = { hit ->
+                            val url = hit.musicUrl
+                            if (url == null || !apps.openYouTubeMusicSong(url)) {
+                                model.notify("Nothing can open YouTube Music on this device.")
+                            }
+                        },
+                        // Soundtrail fills this in itself: the Mood tab lives inside the app
+                        // shell, and the shell is what knows which tab is showing.
+                        onOpenMood = {},
+                        micAvailable = voiceIn.available,
+                        speakerAvailable = speakerReady
+                    ),
                     onSavePin = model::addPin,
                     onNotice = model::notify
                 )

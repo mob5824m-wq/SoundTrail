@@ -206,6 +206,22 @@ internal class JellyfinPlayer private constructor(context: Context) {
         }
     }
 
+    /**
+     * Moves within the item that is playing. This is what the car's scrubber, the lockscreen
+     * and a "previous" press that restarts the song all land on; the bar follows through
+     * [state] like it does for every other change.
+     */
+    fun seekTo(positionMs: Long) {
+        val media = player ?: return
+        val current = _state.value ?: return
+        val limit = current.durationMs.takeIf { it > 0L } ?: Long.MAX_VALUE
+        val target = positionMs.coerceIn(0L, limit)
+        runCatching { media.seekTo(target.toInt()) }
+        ticker?.cancel()
+        _state.update { it?.copy(positionMs = target, completed = false) }
+        if (current.playing) startTicker()
+    }
+
     /** Stops playback and clears the bar. */
     fun stop() {
         release()

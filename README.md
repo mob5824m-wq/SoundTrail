@@ -146,6 +146,11 @@ without it, the check still covers the XML drawables and every path. The generat
 kept inside the 66dp adaptive-icon safe circle, and the ripples are checked to stay inside the
 pin, so no launcher mask can crop the mark.
 
+The same file writes `drawable/ic_soundtrail_notification.xml`, the status-bar icon for the
+automation watch and the playback notification. Those are drawn at 24dp and tinted a single
+colour by the system, so that icon is a flat silhouette — the pin with the note knocked out of
+it — rather than the launcher artwork, whose dark tile would render as a solid blob.
+
    Debug builds are signed with the key committed at `keystore/soundtrail-debug.p12` — the standard public debug credentials, `androiddebugkey` / `android` — rather than the per-machine `~/.android/debug.keystore`. Your build, the CI build, and every published release therefore share one signature, so a newer APK installs straight over an older one as an update. See *Updating an installed build* below for the one-time exception.
 
 3. Optionally install Spotify, YouTube Music, and/or SoundCloud. An installed music app is **not** required for saving a pin; a browser can open supported links. For YouTube Music, configure microG and sign in inside your compatible music app if that is how your device is set up.

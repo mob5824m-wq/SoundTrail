@@ -12,7 +12,11 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Lists the device's microG/Google account so Connect Google can use it without a picker. -->
     <uses-permission android:name="android.permission.GET_ACCOUNTS" />
+    <!-- Voice: asked for at the moment the microphone button is pressed, never at launch, and
+         only while a listen is running. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-feature android:name="android.hardware.location" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
 
     <!-- Android 11+ limits package visibility. These are only used for app-status checks and handoff. -->
     <queries>
@@ -25,6 +29,14 @@
         <package android:name="app.revanced.android.gms" />
         <package android:name="com.mgoogle.android.gms" />
         <package android:name="com.google.android.gms" />
+        <!-- Android 11+ hides speech engines as well; without these the voice features would
+             find no recognizer and no text-to-speech on a phone that has both. -->
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
     </queries>
 
     <application

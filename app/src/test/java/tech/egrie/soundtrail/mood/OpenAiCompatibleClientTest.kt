@@ -125,6 +125,56 @@ class OpenAiCompatibleClientTest {
         assertNull(MoodAiUrls.arenaRouterFrom(emptyList()))
     }
 
+    @Test fun `the names the endpoint uses are shown, and the ids are still what is sent`() {
+        // Arena's own list, as its portal and gateway write it: the id a request must name, and
+        // the name every list Arena shows a person uses instead.
+        val body = JSONObject().apply {
+            put(
+                "data",
+                JSONArray()
+                    .put(
+                        JSONObject().apply {
+                            put("id", "coding-router-preview")
+                            put("name", "(Arena) Coding Router")
+                            put("arena_type", "direct")
+                        }
+                    )
+                    .put(
+                        JSONObject().apply {
+                            put("id", "claude-fable-5-1")
+                            put("name", "(Arena) Claude Fable 5.1")
+                        }
+                    )
+                    // A server with nothing to add: name repeats id, which is not a label.
+                    .put(JSONObject().put("id", "plain-model").put("name", "plain-model"))
+                    // A row with no name at all, and one that is not callable at all.
+                    .put(JSONObject().put("id", "bare-model"))
+                    .put(
+                        JSONObject().apply {
+                            put("id", "routing-row")
+                            put("name", "(Arena) Routing")
+                            put("arena_type", "routing")
+                        }
+                    )
+            )
+        }.toString()
+        val labels = MoodAiParser.parseOpenAiModelLabels(body)
+        assertEquals("(Arena) Coding Router", labels["coding-router-preview"])
+        assertEquals("(Arena) Claude Fable 5.1", labels["claude-fable-5-1"])
+        assertNull(labels["plain-model"])
+        assertNull(labels["bare-model"])
+        assertNull(labels["routing-row"])
+        // Whatever is shown, the ids are the request values and the skip rules still apply.
+        assertEquals(
+            listOf("coding-router-preview", "claude-fable-5-1", "plain-model", "bare-model"),
+            MoodAiParser.parseOpenAiModels(body)
+        )
+        // And an endpoint that reports no names has no labels, rather than labels equal to ids.
+        assertTrue(
+            MoodAiParser.parseOpenAiModelLabels("{\"data\":[{\"id\":\"gpt-4o-mini\"}]}").isEmpty()
+        )
+    }
+
     @Test fun `a key with no router alias falls back to the models it does have`() {
         // A key can be enabled for named models and no router alias at all — the portal shows a
         // list like Claude, GPT, Gemini, Kimi, and "Coding Router" unchecked. setup.sh falls back

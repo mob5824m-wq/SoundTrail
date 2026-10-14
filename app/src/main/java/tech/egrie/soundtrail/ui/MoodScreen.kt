@@ -388,7 +388,11 @@ private fun MoodReadingCard(mood: MoodUiState, actions: MoodActions, onNotice: (
                     ) {
                         mood.openAiModels.forEach { name ->
                             MoodPill(
-                                text = name,
+                                // The endpoint's own name where it gave one — Arena lists
+                                // `coding-router-preview` as "(Arena) Coding Router" — so the key's
+                                // entries can be recognised at a glance. The id is what a tap
+                                // selects, and the field below shows it.
+                                text = mood.openAiModelLabels[name] ?: name,
                                 selected = mood.openAiModel == name,
                                 onClick = { actions.onSetOpenAiModel(name) }
                             )

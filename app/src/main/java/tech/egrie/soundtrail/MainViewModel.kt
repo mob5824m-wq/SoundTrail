@@ -211,6 +211,12 @@ internal data class MoodUiState(
     val openAiModel: String = "",
     /** Models that endpoint listed on the last check. */
     val openAiModels: List<String> = emptyList(),
+    /**
+     * What the endpoint calls those models, when it gave names of its own — Arena lists the model
+     * a request must ask for (`coding-router-preview`) as `(Arena) Coding Router`. Display only:
+     * the id is what gets sent.
+     */
+    val openAiModelLabels: Map<String, String> = emptyMap(),
     /** Where a reading goes looking for music: the listener's own library, or a provider. */
     val searchTarget: MoodSearchTarget = MoodSearchTarget.default,
     /**
@@ -1119,6 +1125,11 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                         it.mood.openAiModels
                     } else {
                         emptyList()
+                    },
+                    openAiModelLabels = if (provider == MoodAiProvider.OPENAI_COMPATIBLE) {
+                        it.mood.openAiModelLabels
+                    } else {
+                        emptyMap()
                     }
                 )
             )
@@ -1284,6 +1295,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                     aiKeySaved = moodPrefs.keySet(MoodAiProvider.OPENAI_COMPATIBLE),
                     ollamaModels = emptyList(),
                     openAiModels = emptyList(),
+                    openAiModelLabels = emptyMap(),
                     aiReady = moodAi.configured,
                     aiNote = "Arena's gateway is filled in. Paste a key from the Keys page below, " +
                         "then press Test."
@@ -1324,7 +1336,8 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         }
         viewModelScope.launch {
             runCatching { moodAi.listModels() }
-                .onSuccess { models ->
+                .onSuccess { listing ->
+                    val models = listing.models
                     val before = _state.value.mood
                     val adapted = modelAfterList(before, models)
                     val swapped = openAi && adapted.isNotBlank() && adapted != before.openAiModel
@@ -1335,6 +1348,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                                 aiBusy = false,
                                 ollamaModels = if (openAi) it.mood.ollamaModels else models,
                                 openAiModels = if (openAi) models else it.mood.openAiModels,
+                                openAiModelLabels = if (openAi) listing.labels else it.mood.openAiModelLabels,
                                 openAiModel = if (openAi) moodPrefs.openAiModel else it.mood.openAiModel,
                                 aiNote = when {
                                     swapped && MoodAiUrls.isArenaRouter(adapted) ->

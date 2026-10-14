@@ -39,6 +39,20 @@ internal data class MoodAiReading(
     val explanation: String? = null
 )
 
+/**
+ * What an endpoint says it has: the ids a request must name, and — when the endpoint gives them —
+ * the names it calls them by.
+ *
+ * The two are not the same thing anywhere, and on Arena they differ most: the model a request must
+ * ask for is `coding-router-preview`, while every list Arena shows a person calls it
+ * `(Arena) Coding Router`. The picker shows the endpoint's own name so a key's entries can be
+ * recognised at a glance; the id is what is stored and sent, because that is what answers.
+ */
+internal data class MoodModelList(
+    val models: List<String> = emptyList(),
+    val labels: Map<String, String> = emptyMap()
+)
+
 /** A reading plus the songs that came with it. */
 internal data class MoodAiOutcome(
     val profile: MoodProfile,
@@ -182,7 +196,7 @@ internal class MoodAiService(private val store: MoodStore) {
         MoodAiProvider.OPENAI_COMPATIBLE -> {
             val base = requireOpenAiBase()
             val chosen = model
-            val listed = fetchOpenAiModelsOrNull(base)
+            val listed = fetchOpenAiModelsOrNull(base)?.models
             when {
                 // A few compatible servers serve only the chat route, so the honest test there is
                 // to ask for a reading rather than to list what the endpoint refuses to list.
@@ -211,7 +225,7 @@ internal class MoodAiService(private val store: MoodStore) {
     }
 
     /** The models the selected provider lists, for the picker. */
-    suspend fun listModels(): List<String> = when (provider) {
+    suspend fun listModels(): MoodModelList = when (provider) {
         MoodAiProvider.OPENAI_COMPATIBLE -> {
             val base = requireOpenAiBase()
             fetchOpenAiModelsOrNull(base) ?: throw MoodAiException(
@@ -219,7 +233,8 @@ internal class MoodAiService(private val store: MoodStore) {
                     "by hand — the app will still use it."
             )
         }
-        else -> fetchOllamaModels(requireOllamaBase())
+        // Ollama's tags are both the id and the name; there is nothing to label.
+        else -> MoodModelList(models = fetchOllamaModels(requireOllamaBase()))
     }
 
     // ----- OpenAI-compatible endpoints -----
@@ -237,11 +252,14 @@ internal class MoodAiService(private val store: MoodStore) {
      * failure worth stopping on: some compatible servers — and most bridges — publish only the
      * chat route, and the app works with a hand-typed model name there.
      */
-    private suspend fun fetchOpenAiModelsOrNull(base: String): List<String>? {
+    private suspend fun fetchOpenAiModelsOrNull(base: String): MoodModelList? {
         val response = openAiRequest(base, MoodAiUrls.openAiModelsUrl(base))
         if (response.code == 404 || response.code == 405) return null
         if (response.code !in 200..299) throw openAiHttpMessage(base, response.code, response.body)
-        return MoodAiParser.parseOpenAiModels(response.body)
+        return MoodModelList(
+            models = MoodAiParser.parseOpenAiModels(response.body),
+            labels = MoodAiParser.parseOpenAiModelLabels(response.body)
+        )
     }
 
     private suspend fun readWithOpenAi(
@@ -733,18 +751,34 @@ internal object MoodAiParser {
      * Arena's own `exo` entry. Its setup script skips both, so this picker does too; a tap on
      * either would send a request nothing answers.
      */
-    fun parseOpenAiModels(body: String): List<String> {
+    fun parseOpenAiModels(body: String): List<String> =
+        openAiModelRows(body).take(200).map { it.first }
+
+    /**
+     * What the endpoint calls its models, for the picker. Only names that differ from the id are
+     * kept: a server that returns `name` equal to `id` — or none at all, which is most of them —
+     * has nothing to say here, and a label repeating the id would just be noise above the field
+     * that already shows it.
+     */
+    fun parseOpenAiModelLabels(body: String): Map<String, String> =
+        openAiModelRows(body).take(200)
+            .mapNotNull { (id, name) -> name?.takeIf { it != id }?.let { id to it } }
+            .toMap()
+
+    /** The id and display name of every callable row, in the order the endpoint listed them. */
+    private fun openAiModelRows(body: String): List<Pair<String, String?>> {
         val root = runCatching { JSONObject(body) }.getOrNull() ?: return emptyList()
         val array = root.optJSONArray("data") ?: root.optJSONArray("models") ?: return emptyList()
-        val names = mutableListOf<String>()
+        val rows = mutableListOf<Pair<String, String?>>()
         for (index in 0 until array.length()) {
             val item = array.optJSONObject(index) ?: continue
             val id = item.optString("id").ifBlank { item.optString("name") }.trim()
             val arenaType = item.optString("arena_type").trim()
             if (arenaType == "routing" || (arenaType.isNotBlank() && id == "exo")) continue
-            if (id.isNotBlank() && names.none { it == id }) names += id
+            if (id.isBlank() || rows.any { it.first == id }) continue
+            rows += id to item.optString("name").trim().takeIf { it.isNotBlank() }
         }
-        return names.take(200)
+        return rows
     }
 
     /** An OpenAI-shaped error sentence — `{"error":{"message":…}}` — when the body carries one. */

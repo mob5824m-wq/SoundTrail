@@ -155,16 +155,19 @@ class OllamaClientTest {
         )
         assertTrue(message.contains("192.168.1.20:11434"))
         assertTrue(message.contains("OLLAMA_HOST=0.0.0.0:11434"))
-        // "this device" only appears in the loopback wording, which this case must not use.
-        assertFalse(message.contains("means this device"))
+        // The "it is this phone itself" wording belongs only to the loopback case.
+        assertFalse(message.contains("phone itself"))
     }
 
-    @Test fun `localhost on a phone is called out, because it means the phone itself`() {
+    @Test fun `localhost on a phone is called out, because it is the phone itself`() {
         val message = MoodAiParser.describeNetworkFailure(
             "http://localhost:11434",
             ConnectException("Connection refused")
         )
-        assertTrue(message.contains("means this device"))
+        // Covers both readings: Ollama on the phone, and a listener who meant their computer.
+        assertTrue(message.contains("this phone itself"))
+        assertTrue(message.contains("0.0.0.0:11434"))
+        assertFalse(message.contains("same network"))
     }
 
     @Test fun `a timeout reads as a timeout, not as a missing server`() {

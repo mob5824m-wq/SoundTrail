@@ -70,7 +70,9 @@ class AutoTreeTest {
         assertEquals(2, selection?.entries?.size)
         assertEquals(1, selection?.index)
         assertEquals("st:song:song-2", selection?.entries?.get(1)?.mediaId)
-        assertEquals("Road trip", selection?.entries?.first()?.detail)
+        // Each row knows which list it came from, under the artist.
+        assertEquals("Spotify · Road trip", selection?.entries?.first()?.detail)
+        assertEquals("An artist", selection?.entries?.first()?.subtitle)
     }
 
     @Test fun `a tapped pin queues the pins list at that pin`() {

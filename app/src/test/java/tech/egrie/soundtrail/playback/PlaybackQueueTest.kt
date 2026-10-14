@@ -78,12 +78,13 @@ class PlaybackQueueTest {
     @Test fun `an entry is only worth queueing when it has a source`() {
         val bare = QueueEntry(mediaId = "st:song:1", title = "No link")
         assertFalse(bare.hasSource)
-        assertEquals("No link", bare.subtitle)
         assertTrue(entry("a").hasSource)
         assertTrue(bare.copy(localFile = "1.mp3").hasSource)
         assertTrue(bare.copy(streamUrl = track).hasSource)
         // The second line of a row prefers the artist, and falls back to where it came from.
         assertEquals("Someone", entry("a").subtitle)
-        assertTrue(bare.copy(detail = "Trip mix").subtitle == "Trip mix")
+        assertEquals("Trip mix", bare.copy(detail = "Trip mix").subtitle)
+        // With neither, the row simply has one line.
+        assertEquals("", bare.subtitle)
     }
 }

@@ -38,6 +38,11 @@ import tech.egrie.soundtrail.integrations.MusicProvider
 import tech.egrie.soundtrail.integrations.SongInfo
 import tech.egrie.soundtrail.integrations.SoundCloudService
 import tech.egrie.soundtrail.integrations.SpotifyService
+import tech.egrie.soundtrail.assistant.AssistantAnswer
+import tech.egrie.soundtrail.assistant.AssistantHit
+import tech.egrie.soundtrail.assistant.AssistantLibrary
+import tech.egrie.soundtrail.assistant.AssistantParser
+import tech.egrie.soundtrail.assistant.toQueueEntry
 import tech.egrie.soundtrail.integrations.TrackResult
 import tech.egrie.soundtrail.integrations.GoogleAuthHealth
 import tech.egrie.soundtrail.integrations.GoogleAuthState
@@ -138,8 +143,34 @@ internal data class AppState(
     val microGReInstalled: Boolean = false,
     /** The mood reader: what the listener typed, what it meant, and the mix it produced. */
     val mood: MoodUiState = MoodUiState(),
+    /** The Ask tab: what was said or typed, and the answer to it. */
+    val assistant: AssistantUiState = AssistantUiState(),
     /** Health of the saved Google connection; never contains a token value. */
     val youtubeAuth: GoogleAuthHealth = GoogleAuthHealth(GoogleAuthState.NOT_CONNECTED)
+)
+
+/**
+ * Everything the Ask tab renders: the request in progress and the answer to the last one.
+ *
+ * The microphone itself is not here — it belongs to the activity, which owns the recognizer's
+ * lifetime and the permission. What this holds is the words, and what the app found for them.
+ */
+internal data class AssistantUiState(
+    val input: String = "",
+    /** True while the microphone is open; the activity reports it back as it changes. */
+    val listening: Boolean = false,
+    /** The words heard so far, shown while they are still being said. */
+    val partial: String = "",
+    /** True while the library and the catalogue are being searched. */
+    val thinking: Boolean = false,
+    /** The sentence the answer says, shown and — when [speakReplies] is on — spoken. */
+    val reply: String? = null,
+    /** What the answer found, best first. Empty while a request is still being understood. */
+    val hits: List<AssistantHit> = emptyList(),
+    /** What was asked, so an answer can explain itself. */
+    val question: String = "",
+    /** True when the reply should be read out loud. */
+    val speakReplies: Boolean = true
 )
 
 /**
@@ -293,6 +324,14 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
 
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val messages = _messages.asSharedFlow()
+
+    /**
+     * Sentences for the phone to say out loud. The speaking engine belongs to the activity (it
+     * owns an Android service and its lifetime), so the words are handed over rather than spoken
+     * here; when the listener has speech replies switched off, nothing is emitted at all.
+     */
+    private val _speech = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val speech = _speech.asSharedFlow()
 
     init {
         refreshDeviceStatus()
@@ -604,6 +643,141 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
 
     fun clearYouTubePlaybackCache() = hub.clearYouTubeCache()
 
+    // ----- Ask: talking to the app, and the answer coming back -----
+
+    /** What was typed or spoken, as it is typed or heard. */
+    fun setAssistantInput(text: String) {
+        _state.update { it.copy(assistant = it.assistant.copy(input = text.take(400))) }
+    }
+
+    /**
+     * The activity's report of the microphone: whether it is open, and the words so far. The
+     * words are shown while they are still being said, so a misheard request can be seen and
+     * stopped rather than discovered after the fact.
+     */
+    fun setAssistantListening(listening: Boolean, partial: String = "") {
+        _state.update {
+            it.copy(assistant = it.assistant.copy(listening = listening, partial = partial))
+        }
+    }
+
+    /** Whether answers are read out loud. Off means the reply is only on screen. */
+    fun setAssistantSpeakReplies(enabled: Boolean) {
+        _state.update { it.copy(assistant = it.assistant.copy(speakReplies = enabled)) }
+    }
+
+    /**
+     * Takes a request — typed, or what the microphone heard — and answers it.
+     *
+     * A description of a feeling goes to the mood reader, which is what that engine is for. A
+     * song goes to the listener's own library first, and then — when a Google account is
+     * connected — to YouTube's music catalogue, so the request works even for songs that were
+     * never saved here. Whatever is found is played through the same single player as everything
+     * else, queued in the order it is listed.
+     */
+    fun ask(text: String = _state.value.assistant.input) {
+        if (_state.value.assistant.thinking) return
+        val said = text.trim().take(400)
+        if (said.isBlank()) {
+            answer("Say or type what you would like to hear.", emptyList(), said)
+            return
+        }
+        val request = AssistantParser.parse(said)
+        if (request == null) {
+            answer("Say or type the song you would like to hear.", emptyList(), said)
+            return
+        }
+        if (request.mood) {
+            // The mood engine reads "i feel like something calm" better than a search would, and
+            // the mix it builds plays exactly as a mix always has.
+            setMoodText(request.query)
+            _state.update {
+                it.copy(assistant = it.assistant.copy(input = "", question = said, hits = emptyList(), reply = null))
+            }
+            analyzeMood(announce = true)
+            return
+        }
+        _state.update {
+            it.copy(
+                assistant = it.assistant.copy(
+                    thinking = true, input = "", question = said, reply = null, hits = emptyList()
+                )
+            )
+        }
+        viewModelScope.launch {
+            val snapshot = _state.value
+            val mine = AssistantLibrary.search(request, snapshot.pins, snapshot.playlists)
+            // A request that named somewhere else — "the xx on Spotify" — is about that service,
+            // not YouTube, so the catalogue is left alone and the library answers on its own.
+            val wantsYouTube = request.provider == null ||
+                request.provider == MusicProvider.YOUTUBE ||
+                request.provider == MusicProvider.YOUTUBE_MUSIC
+            val searched = youtubeData.connected && wantsYouTube
+            var failure: String? = null
+            val found = if (searched) {
+                try {
+                    withContext(Dispatchers.IO) { youtubeData.searchCatalogue(request.phrase) }
+                        .map { track ->
+                            AssistantHit(
+                                title = track.title,
+                                artist = track.artist,
+                                provider = track.provider,
+                                detail = track.provider.label,
+                                url = track.url,
+                                musicUrl = track.url
+                            )
+                        }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    failure = e.message ?: "YouTube search is unavailable."
+                    emptyList()
+                }
+            } else emptyList()
+
+            val hits = AssistantAnswer.merge(mine, found)
+            val playing = AssistantAnswer.playable(hits)
+            if (playing.isNotEmpty()) {
+                hub.play(playing.map { it.toQueueEntry() }, 0)
+            }
+            // A search that failed after the library already answered is not worth interrupting
+            // for; the songs are the answer.
+            val spokenError = failure.takeIf { hits.isEmpty() }
+            val sentence = AssistantAnswer.sentence(hits, searched = searched, error = spokenError)
+            answer(sentence, hits, said)
+        }
+    }
+
+    /** Plays one row of an answer, with the rest of the answer queued behind it. */
+    fun playAssistantHit(hit: AssistantHit) {
+        val hits = _state.value.assistant.hits
+        val playable = AssistantAnswer.playable(hits)
+        val index = playable.indexOfFirst { it.itemId != null && it.itemId == hit.itemId }
+            .takeIf { it >= 0 } ?: playable.indexOfFirst { it.url == hit.url }
+        if (playable.isEmpty() || index < 0) {
+            hub.playEntry(hit.toQueueEntry())
+            return
+        }
+        hub.play(playable.map { it.toQueueEntry() }, index)
+    }
+
+    /** Shows (and, when speech replies are on, says) one answer. */
+    private fun answer(sentence: String, hits: List<AssistantHit>, question: String) {
+        _state.update {
+            it.copy(
+                assistant = it.assistant.copy(
+                    thinking = false,
+                    listening = false,
+                    partial = "",
+                    reply = sentence,
+                    hits = hits,
+                    question = question
+                )
+            )
+        }
+        if (_state.value.assistant.speakReplies) _speech.tryEmit(AssistantAnswer.spoken(sentence))
+    }
+
     // ----- Mood: how you feel in, music out -----
 
     fun setMoodText(text: String) {
@@ -627,7 +801,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
      * unreadable output) falls back to the on-device engine with a short explanation, so the
      * feature never depends on a model being reachable. A quick-pick mood skips reading entirely.
      */
-    fun analyzeMood(quickMoodId: String? = null) {
+    fun analyzeMood(quickMoodId: String? = null, announce: Boolean = false) {
         val mood = _state.value.mood
         if (mood.analyzing) return
         val context = moodContext()
@@ -670,6 +844,18 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                         queuePlaying = false
                     )
                 )
+            }
+            // A request that came in by voice is answered out loud, in the same words the card
+            // shows; the mix itself is on the Mood tab.
+            if (announce) {
+                val said = buildString {
+                    append("That reads as ${profile.label}.")
+                    append(
+                        if (mix.isEmpty()) " Nothing in your library fits it yet."
+                        else " ${mix.size} song${if (mix.size == 1) "" else "s"} on the Mood tab."
+                    )
+                }
+                answer(said, emptyList(), _state.value.assistant.question)
             }
             // With tag lookups switched on, improve the mix in the background rather than
             // pretending the first pass knows more than it does.

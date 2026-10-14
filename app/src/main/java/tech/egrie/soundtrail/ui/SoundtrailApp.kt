@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.MyLocation
 import androidx.compose.material.icons.rounded.QueueMusic
@@ -87,7 +88,8 @@ internal data class PinDraft(
 }
 
 private enum class Tab(val label: String) {
-    HOME("Explore"), SEARCH("Search"), MOOD("Mood"), PINS("Pins"), LISTS("Lists"), CONNECT("Connect")
+    HOME("Explore"), SEARCH("Search"), ASK("Ask"), MOOD("Mood"), PINS("Pins"), LISTS("Lists"),
+    CONNECT("Connect")
 }
 
 private data class PinWithDistance(val pin: MusicPin, val distanceMeters: Double?)
@@ -112,6 +114,7 @@ internal fun SoundtrailApp(
     nowPlaying: StateFlow<NowPlaying?>,
     lists: ListsActions,
     mood: MoodActions,
+    assistant: AssistantActions,
     onLocate: () -> Unit,
     onSearch: (String) -> Unit,
     onSelectSearchProvider: (SearchProvider) -> Unit,
@@ -248,6 +251,13 @@ internal fun SoundtrailApp(
                         draft = PinDraft(lat = point.latitude, lon = point.longitude)
                     }
                 )
+                // The shell knows which tab is showing, so it is the one that can open the Mood
+                // tab from inside an answer.
+                Tab.ASK -> AssistantScreen(
+                    state,
+                    assistant.copy(onOpenMood = { tab = Tab.MOOD }),
+                    onNotice
+                )
                 Tab.MOOD -> MoodScreen(state, mood, onNotice)
                 Tab.LISTS -> ListsScreen(state, lists, onNotice)
                 Tab.CONNECT -> ConnectionsScreen(
@@ -291,6 +301,7 @@ private fun BottomTabs(selected: Tab, onSelect: (Tab) -> Unit) {
             val icon = when (tab) {
                 Tab.HOME -> Icons.Rounded.Home
                 Tab.SEARCH -> Icons.Rounded.Search
+                Tab.ASK -> Icons.Rounded.Mic
                 Tab.MOOD -> Icons.Rounded.Favorite
                 Tab.PINS -> Icons.Rounded.Bookmark
                 Tab.LISTS -> Icons.Rounded.QueueMusic

@@ -191,13 +191,22 @@ internal data class MoodUiState(
     val queueIndex: Int = -1,
     val queuePlaying: Boolean = false,
     val aiEnabled: Boolean = false,
-    /** Where a reading comes from when [aiEnabled]: on-device, Ollama, or a hosted model. */
+    /**
+     * Where a reading comes from when [aiEnabled]: on-device, Ollama, an OpenAI-compatible
+     * endpoint, or the fixed hosted model.
+     */
     val aiProvider: MoodAiProvider = MoodAiProvider.ON_DEVICE,
     val aiModel: String = MoodStore.DEFAULT_AI_MODEL,
     val ollamaUrl: String = "",
     val ollamaModel: String = DEFAULT_OLLAMA_MODEL,
     /** Models the listener's Ollama server reported on the last check. */
     val ollamaModels: List<String> = emptyList(),
+    /** An OpenAI-compatible endpoint, as typed. */
+    val openAiUrl: String = "",
+    /** The model asked for there; blank until the listener names one. */
+    val openAiModel: String = "",
+    /** Models that endpoint listed on the last check. */
+    val openAiModels: List<String> = emptyList(),
     /** True while a connection test or a model check is running. */
     val aiBusy: Boolean = false,
     /** A sentence from the last test, shown under the provider picker. */
@@ -315,6 +324,8 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 aiModel = moodPrefs.aiModel,
                 ollamaUrl = moodPrefs.ollamaUrl,
                 ollamaModel = moodPrefs.ollamaModel,
+                openAiUrl = moodPrefs.openAiUrl,
+                openAiModel = moodPrefs.openAiModel,
                 aiKeySet = moodPrefs.keySet(moodPrefs.aiProvider),
                 aiReady = moodAi.configured,
                 enrichEnabled = moodPrefs.tagLookupEnabled
@@ -1032,7 +1043,12 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                     aiKeySet = moodPrefs.keySet(provider),
                     aiKeySaved = moodPrefs.keySet(provider),
                     aiNote = null,
-                    ollamaModels = if (provider == MoodAiProvider.OLLAMA) it.mood.ollamaModels else emptyList()
+                    ollamaModels = if (provider == MoodAiProvider.OLLAMA) it.mood.ollamaModels else emptyList(),
+                    openAiModels = if (provider == MoodAiProvider.OPENAI_COMPATIBLE) {
+                        it.mood.openAiModels
+                    } else {
+                        emptyList()
+                    }
                 )
             )
         }
@@ -1044,6 +1060,10 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                     "Ollama selected. Only your mood description goes to that address."
                 provider == MoodAiProvider.OLLAMA ->
                     "Add your Ollama server's address below, or press Test to check it."
+                provider == MoodAiProvider.OPENAI_COMPATIBLE && moodAi.configured ->
+                    "That endpoint is ready. Only your mood description goes to the address you typed."
+                provider == MoodAiProvider.OPENAI_COMPATIBLE ->
+                    "Add the endpoint's address and the model name below, or press Test to check it."
                 moodPrefs.keySet(provider) -> "${provider.short} selected."
                 else -> "Paste an API key from ${provider.keyUrl} to use ${provider.short}."
             }
@@ -1074,17 +1094,70 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         _state.update { it.copy(mood = it.mood.copy(ollamaModel = moodPrefs.ollamaModel, aiNote = null)) }
     }
 
-    /** Asks the Ollama server which models it has, so the listener picks instead of guessing. */
+    /**
+     * The address of an OpenAI-compatible endpoint, accepted in whatever form it was pasted —
+     * a bare host, a whole `…/v1/chat/completions` from a README, or a LAN address with no scheme.
+     */
+    fun setMoodOpenAiUrl(url: String) {
+        moodPrefs.openAiUrl = url
+        val normalized = MoodAiUrls.normalizeOpenAi(url)
+        _state.update {
+            it.copy(
+                mood = it.mood.copy(
+                    openAiUrl = moodPrefs.openAiUrl,
+                    aiReady = moodAi.configured,
+                    aiNote = when {
+                        url.isBlank() -> null
+                        normalized == null ->
+                            "That does not look like an address. Try https://api.openai.com/v1"
+                        else -> "Using ${MoodAiUrls.display(normalized)}"
+                    }
+                )
+            )
+        }
+    }
+
+    fun setMoodOpenAiModel(name: String) {
+        moodPrefs.openAiModel = name
+        _state.update {
+            it.copy(
+                mood = it.mood.copy(
+                    openAiModel = moodPrefs.openAiModel,
+                    aiReady = moodAi.configured,
+                    aiNote = null
+                )
+            )
+        }
+    }
+
+    /**
+     * Asks the selected endpoint which models it has, so the listener picks instead of guessing:
+     * the tags an Ollama server has pulled, or the ids an OpenAI-compatible endpoint lists. A
+     * server that publishes no list is told apart from one that cannot be reached, because the
+     * first case still works with a model name typed by hand.
+     */
     fun detectMoodModels() {
         val mood = _state.value.mood
         if (mood.aiBusy) return
-        if (MoodAiUrls.normalize(mood.ollamaUrl) == null) {
+        val openAi = mood.aiProvider == MoodAiProvider.OPENAI_COMPATIBLE
+        if (openAi) {
+            if (MoodAiUrls.normalizeOpenAi(mood.openAiUrl) == null) {
+                notify("Add the endpoint's address first, for example https://api.openai.com/v1.")
+                return
+            }
+        } else if (MoodAiUrls.normalize(mood.ollamaUrl) == null) {
             notify("Add your Ollama server's address first, for example http://192.168.0.20:11434.")
             return
         }
-        moodPrefs.aiProvider = MoodAiProvider.OLLAMA
+        if (!openAi) moodPrefs.aiProvider = MoodAiProvider.OLLAMA
         _state.update {
-            it.copy(mood = it.mood.copy(aiProvider = MoodAiProvider.OLLAMA, aiBusy = true, aiNote = null))
+            it.copy(
+                mood = it.mood.copy(
+                    aiProvider = moodPrefs.aiProvider,
+                    aiBusy = true,
+                    aiNote = null
+                )
+            )
         }
         viewModelScope.launch {
             runCatching { moodAi.listModels() }
@@ -1093,11 +1166,16 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                         it.copy(
                             mood = it.mood.copy(
                                 aiBusy = false,
-                                ollamaModels = models,
-                                aiNote = if (models.isEmpty()) {
-                                    "That server answered but has no models yet. Run: ollama pull ${it.mood.ollamaModel}"
-                                } else {
-                                    "${models.size} model${if (models.size == 1) "" else "s"} found — tap one to use it."
+                                ollamaModels = if (openAi) it.mood.ollamaModels else models,
+                                openAiModels = if (openAi) models else it.mood.openAiModels,
+                                aiNote = when {
+                                    models.isEmpty() && openAi ->
+                                        "That endpoint answered but lists no models. Type the name " +
+                                            "of the one you want — the app will still use it."
+                                    models.isEmpty() ->
+                                        "That server answered but has no models yet. Run: ollama pull ${it.mood.ollamaModel}"
+                                    else ->
+                                        "${models.size} model${if (models.size == 1) "" else "s"} found — tap one to use it."
                                 },
                                 aiReady = moodAi.configured
                             )
@@ -1106,7 +1184,13 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 }
                 .onFailure { error ->
                     _state.update { it.copy(mood = it.mood.copy(aiBusy = false, aiNote = error.message)) }
-                    notify(error.message ?: "That Ollama server could not be reached.")
+                    notify(
+                        error.message ?: if (openAi) {
+                            "That endpoint could not be reached."
+                        } else {
+                            "That Ollama server could not be reached."
+                        }
+                    )
                 }
         }
     }
@@ -1149,15 +1233,22 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                     aiKeySet = saved,
                     aiKeySaved = saved,
                     aiReady = moodAi.configured,
-                    aiNote = if (saved && provider == MoodAiProvider.OLLAMA) {
-                        "Token saved. It is sent only to that address, as a bearer token."
-                    } else null
+                    aiNote = when {
+                        !saved -> null
+                        provider == MoodAiProvider.OLLAMA ->
+                            "Token saved. It is sent only to that address, as a bearer token."
+                        provider == MoodAiProvider.OPENAI_COMPATIBLE ->
+                            "Key saved. It is sent only to that address, as a bearer token."
+                        else -> null
+                    }
                 )
             )
         }
         if (saved) {
             notify("Saved, encrypted with this device's key store.")
-            if (provider == MoodAiProvider.GEMINI) testMoodAi()
+            if (provider == MoodAiProvider.GEMINI || provider == MoodAiProvider.OPENAI_COMPATIBLE) {
+                testMoodAi()
+            }
         } else {
             notify("Key cleared. The on-device engine reads your mood.")
         }
@@ -1190,6 +1281,15 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         MoodAiProvider.OLLAMA ->
             "Add your Ollama server's address (for example http://192.168.0.20:11434). " +
                 "Reading on-device until then."
+        MoodAiProvider.OPENAI_COMPATIBLE -> when {
+            MoodAiUrls.normalizeOpenAi(moodPrefs.openAiUrl) == null ->
+                "Add the endpoint's address (for example https://api.openai.com/v1). Reading " +
+                    "on-device until then."
+            moodPrefs.openAiModel.isBlank() ->
+                "Name the model to ask for at that endpoint. Reading on-device until then."
+            else ->
+                "That endpoint is set up; test it from the Mood tab. Reading on-device until then."
+        }
         MoodAiProvider.GEMINI ->
             "Paste a Google AI Studio API key to use ${provider.short}. Reading on-device until then."
     }

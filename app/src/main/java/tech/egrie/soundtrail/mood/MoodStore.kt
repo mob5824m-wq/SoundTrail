@@ -43,6 +43,20 @@ internal class MoodStore(context: Context) {
             .ifBlank { DEFAULT_OLLAMA_MODEL }
         set(value) = prefs.edit().putString("ollama_model", sanitizeOllamaModel(value)).apply()
 
+    /**
+     * An OpenAI-compatible endpoint, as typed; normalised by [MoodAiUrls.normalizeOpenAi] before
+     * use. It covers every server that speaks `/v1/chat/completions` — a hosted API, a model on
+     * the listener's own machine, or a bridge to something that has no API of its own.
+     */
+    var openAiUrl: String
+        get() = prefs.getString("openai_url", "").orEmpty()
+        set(value) = prefs.edit().putString("openai_url", value.trim().take(200)).apply()
+
+    /** The model to ask for there. Blank until the listener names one or picks from a list. */
+    var openAiModel: String
+        get() = prefs.getString("openai_model", "").orEmpty()
+        set(value) = prefs.edit().putString("openai_model", sanitizeOpenAiModel(value)).apply()
+
     /** Whether the listener agreed to tag lookups against TheAudioDB's free metadata API. */
     var tagLookupEnabled: Boolean
         get() = prefs.getBoolean("tag_lookup", false)
@@ -58,13 +72,15 @@ internal class MoodStore(context: Context) {
         set(value) = prefs.edit().putInt("last_energy", value ?: -1).apply()
 
     /**
-     * The credential for a provider, if any. Ollama's is optional — only a proxy would need it.
-     * The Gemini key also checks the older single-key name, so an install that saved a key
-     * before providers existed keeps working.
+     * The credential for a provider, if any. Ollama's is optional — only a proxy would need it —
+     * and so is an OpenAI-compatible server's, which a model running on the listener's own
+     * machine usually does not ask for. The Gemini key also checks the older single-key name, so
+     * an install that saved a key before providers existed keeps working.
      */
     fun key(provider: MoodAiProvider): String? = when (provider) {
         MoodAiProvider.ON_DEVICE -> null
         MoodAiProvider.OLLAMA -> secrets.get(OLLAMA_KEY)?.takeIf(String::isNotBlank)
+        MoodAiProvider.OPENAI_COMPATIBLE -> secrets.get(OPENAI_COMPATIBLE_KEY)?.takeIf(String::isNotBlank)
         MoodAiProvider.GEMINI ->
             (secrets.get(GEMINI_KEY) ?: secrets.get(LEGACY_AI_KEY))?.takeIf(String::isNotBlank)
     }
@@ -72,17 +88,23 @@ internal class MoodStore(context: Context) {
     fun keySet(provider: MoodAiProvider): Boolean = key(provider) != null
 
     fun saveKey(provider: MoodAiProvider, value: String) {
-        if (provider == MoodAiProvider.ON_DEVICE) return
+        val name = keyName(provider) ?: return
         val trimmed = value.trim()
-        val name = if (provider == MoodAiProvider.OLLAMA) OLLAMA_KEY else GEMINI_KEY
         if (trimmed.isBlank()) secrets.remove(name) else secrets.put(name, trimmed)
     }
 
     fun clearKey(provider: MoodAiProvider) {
-        if (provider == MoodAiProvider.ON_DEVICE) return
-        val name = if (provider == MoodAiProvider.OLLAMA) OLLAMA_KEY else GEMINI_KEY
+        val name = keyName(provider) ?: return
         secrets.remove(name)
         if (provider == MoodAiProvider.GEMINI) secrets.remove(LEGACY_AI_KEY)
+    }
+
+    /** The secret slot a provider's credential lives in; null for the one that takes none. */
+    private fun keyName(provider: MoodAiProvider): String? = when (provider) {
+        MoodAiProvider.ON_DEVICE -> null
+        MoodAiProvider.OLLAMA -> OLLAMA_KEY
+        MoodAiProvider.OPENAI_COMPATIBLE -> OPENAI_COMPATIBLE_KEY
+        MoodAiProvider.GEMINI -> GEMINI_KEY
     }
 
     // ----- Learned track tags -----
@@ -134,6 +156,7 @@ internal class MoodStore(context: Context) {
         const val DEFAULT_AI_MODEL = "gemini-2.0-flash"
         private const val GEMINI_KEY = "mood_gemini_key"
         private const val OLLAMA_KEY = "mood_ollama_key"
+        private const val OPENAI_COMPATIBLE_KEY = "mood_openai_key"
 
         /** The single-key name used before providers existed; still read, never written. */
         private const val LEGACY_AI_KEY = "mood_ai_key"
@@ -159,5 +182,19 @@ internal class MoodStore(context: Context) {
             .filter { it.isLetterOrDigit() || it == ':' || it == '/' || it == '.' || it == '-' || it == '_' }
             .trim('.', ':', '/')
             .ifBlank { DEFAULT_OLLAMA_MODEL }
+
+        /**
+         * A model name for an OpenAI-compatible endpoint. Wider still, because these names carry
+         * vendor prefixes and tags — `openai/gpt-4o`, `meta-llama/Llama-3.1-8B-Instruct:latest` —
+         * and it stays blank when the listener has not named one yet, since there is no model this
+         * app could assume any particular server has.
+         */
+        fun sanitizeOpenAiModel(value: String): String = value.trim()
+            .take(80)
+            .filter {
+                it.isLetterOrDigit() || it == '-' || it == '_' || it == '.' ||
+                    it == ':' || it == '/' || it == '@'
+            }
+            .trim('.', ':', '/')
     }
 }

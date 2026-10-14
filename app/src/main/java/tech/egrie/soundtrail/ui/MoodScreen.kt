@@ -75,6 +75,9 @@ internal data class MoodActions(
     val onSetAiModel: (String) -> Unit,
     val onSetOllamaUrl: (String) -> Unit,
     val onSetOllamaModel: (String) -> Unit,
+    /** The address of an OpenAI-compatible endpoint, and the model to ask for there. */
+    val onSetOpenAiUrl: (String) -> Unit,
+    val onSetOpenAiModel: (String) -> Unit,
     val onDetectModels: () -> Unit,
     val onTestAi: () -> Unit,
     val onSaveAiKey: (String) -> Unit,
@@ -226,6 +229,9 @@ private fun MoodReadingCard(mood: MoodUiState, actions: MoodActions, onNotice: (
                         !mood.aiEnabled -> "On-device \u00b7 works offline, nothing sent"
                         provider == MoodAiProvider.ON_DEVICE -> "On-device \u00b7 nothing sent"
                         provider == MoodAiProvider.OLLAMA -> "Ollama \u00b7 ${mood.ollamaModel}"
+                        provider == MoodAiProvider.OPENAI_COMPATIBLE ->
+                            "OpenAI-compatible \u00b7 " +
+                                mood.openAiModel.ifBlank { "no model chosen yet" }
                         else -> "Gemini \u00b7 ${mood.aiModel}"
                     },
                     color = Palette.secondary, style = MaterialTheme.typography.bodyMedium
@@ -336,6 +342,77 @@ private fun MoodReadingCard(mood: MoodUiState, actions: MoodActions, onNotice: (
                 if (showKeyField) {
                     KeyField("Ollama token", keyDraft, { keyDraft = it }, mood, provider, actions)
                 }
+            }
+
+            MoodAiProvider.OPENAI_COMPATIBLE -> {
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = mood.openAiUrl,
+                    onValueChange = actions.onSetOpenAiUrl,
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("Endpoint address") },
+                    placeholder = { Text("https://api.openai.com/v1") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    PrimaryButton(
+                        if (mood.aiBusy) "Checking\u2026" else "Find models",
+                        actions.onDetectModels,
+                        Modifier.weight(1f),
+                        enabled = !mood.aiBusy && mood.openAiUrl.isNotBlank()
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    TextButton(onClick = actions.onTestAi, enabled = !mood.aiBusy) {
+                        Text("Test", color = Palette.lilac)
+                    }
+                }
+                if (mood.openAiModels.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        mood.openAiModels.forEach { name ->
+                            MoodPill(
+                                text = name,
+                                selected = mood.openAiModel == name,
+                                onClick = { actions.onSetOpenAiModel(name) }
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = mood.openAiModel,
+                    onValueChange = actions.onSetOpenAiModel,
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("Model") },
+                    placeholder = { Text("gpt-4o-mini") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
+                )
+                Spacer(Modifier.height(4.dp))
+                TextButton(onClick = { showKeyField = !showKeyField }) {
+                    Text(
+                        if (showKeyField) "Hide API key" else "Add the API key (only if it asks for one)",
+                        color = Palette.lilac
+                    )
+                }
+                if (showKeyField) {
+                    KeyField("API key", keyDraft, { keyDraft = it }, mood, provider, actions)
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Anything that speaks OpenAI's chat-completions API works here: OpenAI, " +
+                        "OpenRouter, a model running on your own machine, or a bridge in front of " +
+                        "a service that has no API of its own. Paste the address however you found " +
+                        "it \u2014 a whole \u2026/v1/chat/completions endpoint is trimmed for you, " +
+                        "and a bare host gets /v1. A server that wants no key is fine: leave the " +
+                        "key empty and none is sent.",
+                    color = Palette.muted, style = MaterialTheme.typography.labelMedium
+                )
             }
 
             MoodAiProvider.GEMINI -> {

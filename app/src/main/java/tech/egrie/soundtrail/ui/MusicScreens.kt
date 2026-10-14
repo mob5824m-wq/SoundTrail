@@ -184,7 +184,7 @@ internal fun MusicSearchScreen(
                 )
                 if (youtubeExpanded) {
                     Spacer(Modifier.height(12.dp))
-                    Text("YouTube and YouTube Music are now kept separate. music.youtube.com links stay as YouTube Music, youtube.com / youtu.be links stay as YouTube. Liked YouTube (YouTube Liked) and YouTube Music liked stay in different playlists. All playback happens directly in Soundtrail.",
+                    Text("music.youtube.com links stay as YouTube Music and youtube.com / youtu.be links stay as YouTube, so every row says where it came from. Liked videos from your Google account are imported into one liked list — the same list your own likes live in, one song per link — because the import cannot see YouTube Music's account likes, which no third-party app can. All playback happens directly in Soundtrail.",
                         color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
                     Spacer(Modifier.height(10.dp))
                     OutlinedTextField(

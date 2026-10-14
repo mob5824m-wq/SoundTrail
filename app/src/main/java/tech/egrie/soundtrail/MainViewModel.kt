@@ -336,8 +336,13 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                         )
                     }
                 }
-                // The mix played to its end: say so once, the way the app always has.
-                if (current?.completed == true && current.itemId == moodQueueKeys.lastOrNull()) {
+                // The mix played to its end: say so once, the way the app always has. The
+                // queue still has to be that very mix — the car, or another tap in the app,
+                // may have replaced it with a list of its own.
+                if (current?.completed == true && moodQueueKeys.isNotEmpty() &&
+                    current.itemId == moodQueueKeys.last() &&
+                    hub.queueState.value.entries.map { it.mediaId } == moodQueueKeys
+                ) {
                     moodQueueKeys = emptyList()
                     notify("That's the end of the mood mix.")
                 }

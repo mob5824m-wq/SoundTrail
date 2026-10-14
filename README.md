@@ -1,6 +1,6 @@
 # Soundtrail — music for the places you love
 
-An Android app that saves **Spotify**, **YouTube Music**, **SoundCloud**, and **your own Jellyfin server's** songs as private, location-based pins, with an **in-app map**, a **mood engine that turns how you feel into a mix from your own library**, offline-audio management, local playlists, opt-in place/motion/time automations, **JSON backup/export**, optional **end-to-end encrypted cloud sync (public server by default, self-hostable)**, and background Jellyfin playback with system media controls.
+An Android app that saves **Spotify**, **YouTube Music**, **SoundCloud**, and **your own Jellyfin server's** songs as private, location-based pins, with an **in-app map**, a **mood engine that turns how you feel into a mix from your own library**, offline-audio management, local playlists, opt-in place/motion/time automations, **JSON backup/export**, optional **end-to-end encrypted cloud sync (public server by default, self-hostable)**, and background playback with notification, lockscreen, Bluetooth and **Android Auto** controls.
 
 ## What connects, and how
 
@@ -14,6 +14,7 @@ An Android app that saves **Spotify**, **YouTube Music**, **SoundCloud**, and **
 | Mood mixes | **Free, on-device, no account.** Describe how you feel (or tap a quick pick); a small, explainable engine on the phone reads it into a sound profile and scores the songs in your own pins and playlists against it. Optional extras, both off by default: TheAudioDB genre/mood lookups and a model reading — a local **Ollama** server you run, or a hosted model with your own key. Your songs, playlists, pins, and places never leave the device. |
 | YouTube playlists & search (optional) | Two explicit sign-in options request only the `youtube.readonly` scope and call the official YouTube Data API v3. **Google account** uses Google Sign-In via Play services or standard microG (Android OAuth client; the access token is requested on demand, held in memory, and never persisted). **Client ID** opens Google in your browser with your own Desktop OAuth client and PKCE (no client secret); access and refresh tokens are encrypted with Android Keystore. The Client ID path needs no Google services and is the one that works alongside MicroG RE. Once connected, Soundtrail can both search videos in your playlists AND import those playlists (including Liked videos and Uploads) into your local library. This does **not** expose YouTube Music-only collections (saved songs/albums/mixes); see setup below. |
 | YouTube links | The official YouTube Data API integration is read-only metadata access. A separate, optional audio-only extraction action uses your configured sync server (the public default or a self-hosted one), has no YouTube login/cookies, and must only be used for content you own or have permission to download. |
+| Android Auto | Soundtrail is a media app for the car: Android Auto browses **pins and playlists** and plays the songs inside them, with play/pause, next/previous and a scrubber, through the same player the phone uses. Nothing is uploaded and no account is involved — the car sees the library already on the phone, and only rows that can actually play here are listed. See *Android Auto* below for how to enable it and who is allowed to connect. |
 | Your audio files | Download eligible Jellyfin tracks or permitted public YouTube audio for offline playback, or attach audio you already own or are authorized to use. Files are copied into private app storage; audio is not cloud-synced. |
 | Map tiles | The Pins tab's **Map** view draws an OpenStreetMap-based map on-device: raster tiles are fetched from CARTO's public tile server (`basemaps.cartocdn.com`) for the visible area only. Tile requests reveal the visible map area; pin coordinates are rendered locally and are not included in tile requests. Attribution stays on screen. |
 | Backup files | **Export** writes pins, playlists, and automations to a JSON file you choose; **Import** reads one back additively. The backup file goes only where you put it. Logins and audio files are excluded. |
@@ -34,6 +35,45 @@ An Android app that saves **Spotify**, **YouTube Music**, **SoundCloud**, and **
 - **Motion inference**: GPS speed bands — under 0.5 m/s stationary, to 2.6 walking, to 7.5 running (covers cycling), above that driving. It is an estimate; tunnels and poor GPS delay or miss triggers.
 - **Battery**: continuous GPS watching uses noticeably more battery. The watch runs only while its toggle is on and its notification is visible.
 - **Privacy**: by default, pins, coordinates, playlists, automations, and imported audio stay on the device. If you opt in to cloud sync, pins (including coordinates), playlist metadata, song links, and automation rules are encrypted before leaving the phone; the server stores ciphertext and account/session metadata for sync. The separate YouTube extractor receives the requested video ID and temporarily processes its audio. Downloaded audio and provider credentials are never synced. Map tiles reveal only the visible area, not your saved pin coordinates. For YouTube playlist search, Soundtrail fetches metadata and matches your query on-device; it does not send the query to YouTube.
+
+## Android Auto
+
+Soundtrail is a **media app for the car**. Plug the phone in (or connect wirelessly), open
+Android Auto, and Soundtrail appears in the media launcher with this phone's own library:
+
+- **Pins** and **every playlist** are browsable lists, and the songs inside them are the rows
+  that play. A song with no link and no attached copy is left out rather than shown as a row
+  that does nothing.
+- Tapping a song plays it, queueing the list it came from: **next**, **previous** and the
+  scrubber in the car work, and the open list highlights the row that is playing.
+- Pressing play with nothing chosen starts the first song of your first playlist, or of your
+  pins if you have no playlists.
+- **Voice search works on-device**: "play <song> by <artist> on Soundtrail" is matched against
+  the titles, artists and places already saved on the phone. The query is never sent anywhere.
+- What the car shows is exactly what the app's own bar and the notification show, because all
+  of them drive one player and one queue. Pausing on the phone pauses the car, and the reverse
+  is true too.
+
+**Enabling it.** The app declares the car's media service and its browse tree; on the phone,
+Android Auto decides what to list. A release built by Google Play has to be reviewed for
+Android Auto before it appears there. For a debug or sideloaded build, open the **Android Auto
+app → Settings → Version** (tap it ten times) to unlock **Developer settings**, then enable
+**Unknown sources** — the app then appears in the launcher, and in the **Desktop Head Unit**
+(`desktop-head-unit`) used for testing. Apps that are not approved stay invisible in a
+production car even with developer mode on, so this is a per-build decision as much as a
+per-phone one.
+
+**Who may connect.** The car runs in another app, so the browse service has to be exported —
+and something has to decide who is asking. `AutoClientPolicy` allows the app itself, the known
+car hosts (`com.google.android.projection.gearhead`, Android Automotive's `com.android.car.media`),
+the Google app, `com.android.systemui`, and anything the platform has already trusted with
+`MEDIA_CONTENT_CONTROL`. The caller is identified by the **uid the system reports**, not the
+package name it claims, so an app cannot borrow one of those names. Everyone else is answered
+with "no root": the pins, the places and the playlists stay invisible. If you use another car
+host and want it listed, add its package to `KNOWN_HOSTS` in `AutoClientPolicy`.
+
+The car never sees more than the app's own library: no provider token, no Jellyfin address, no
+audio file, and no screen of the app itself.
 
 ## Mood mixes
 
@@ -148,6 +188,12 @@ without it, the check still covers the XML drawables and every path. The generat
 kept inside the 66dp adaptive-icon safe circle, and the ripples are checked to stay inside the
 pin, so no launcher mask can crop the mark.
 
+The car and notification transport icons (`drawable/ic_media_play.xml`, `ic_media_pause`,
+`ic_media_next`, `ic_media_previous`, `ic_media_stop`) are hand-written, and deliberately built
+from whole command groups so the same check passes them. `drawable-nodpi/soundtrail_artwork.png`
+is the app's mark as a plain PNG: a car host loads an icon URI itself, and the `ic_soundtrail`
+mipmap id resolves to the adaptive **icon XML** on API 26+, which it could not decode.
+
 The same file writes `drawable/ic_soundtrail_notification.xml`, the status-bar icon for the
 automation watch and the playback notification. Those are drawn at 24dp and tinted a single
 colour by the system, so that icon is a flat silhouette — the pin with the note knocked out of
@@ -239,6 +285,7 @@ Details worth knowing:
 - **Mood:** open the **Mood** tab, describe how you feel in a few words (or tap a quick pick and an energy level), and tap **Build my mood mix**. Soundtrail reads it on the device and ranks the songs in your pins and playlists against the mood; each row explains itself, and the mix plays in order. Save it as a playlist, or hand the mood to YouTube Music — the latter needs no sign-in. The Explore tab's *What's your mood?* card and the same YouTube Music button are one tap in.
 - **Share:** in Spotify, YouTube Music, or SoundCloud, share a **song** link to Soundtrail to open a prefilled pin editor.
 - **Jellyfin:** connect your server on the Connect tab, pick the *Jellyfin* chip on Search, and add its songs to a pin or playlist. Stream in-app or in the background with notification/lockscreen controls. In a playlist, tap the download icon to save an eligible track privately for offline playback; Jellyfin decides whether your account may download it.
+- **In the car:** install the app, allow it in Android Auto (developer mode + unknown sources for a sideloaded build), and pick Soundtrail from the media launcher. Your pins and playlists are there; a playlist song plays through the rest of its list.
 - **Backup and sync:** export/import a portable JSON backup, or use end-to-end encrypted cloud sync from **Connect → Cloud sync** — either the public default server or one you deploy yourself. Save the recovery key before using another device.
 - **Lists:** create a playlist and add songs. Jellyfin items can be downloaded offline with the download action; use **♪** to attach an audio file you already own. Other **⬇ Get** actions only hand a link to another app. Turn on the watch and create an automation — for example, *"Morning commute" → playlist "Drive" · while driving · 07:00–09:00* — then tap the notification when it fires.
 - Supported links: `open.spotify.com/track/<id>`, `spotify:track:<id>`, `music.youtube.com/watch?v=<id>`, `youtube.com/watch?v=<id>`, `youtu.be/<id>`, `soundcloud.com/<artist>/<track>` (including `www.`/`m.` hosts and `/s-<token>` secret trails), and `on.soundcloud.com/<token>` or `soundcloud.app.goo.gl/<token>` share links. Tracking parameters are removed. Playlists, artist profiles, site pages, and unknown domains are rejected.
@@ -250,7 +297,8 @@ Details worth knowing:
 - Spotify, SoundCloud, and Jellyfin tokens (plus SoundCloud's Client Secret and short-lived PKCE state) are stored with Android Keystore AES-GCM. The Google-account YouTube connection stores only an encrypted account label; Google services supplies an OAuth access token on demand, which Soundtrail holds in memory for the API request and never persists. The Client ID YouTube connection instead stores its own access and refresh tokens encrypted with Android Keystore, like Spotify. Disconnect clears local state and best-effort asks Google to revoke the grant. Backups are disabled. Revoke access any time from your provider account settings.
 - TheAudioDB lookups send the artist and title you type and store nothing. Lookup-offered links must pass the same URL allowlist as manual links.
 - The mood engine runs on the device: your description, your library, and the mix are never uploaded. If you switch a model on, the mood description (plus the energy hint, the hour, and whether you are moving) goes to the address you chose — your own Ollama server, or Google AI Studio — and nothing else does: song titles, artists, playlists, pins, and places never leave the device, and switching back to **On-device** returns to the offline reading. Secrets (a Gemini key, or an Ollama proxy token) are Keystore-encrypted, never synced, excluded from exports, and removed with **Remove**. Tag lookups are the only path that sends artist and title (to TheAudioDB), and only for the specific songs a mix is unsure about, and only when you have switched them on.
-- **Jellyfin streaming playback can continue in the background.** Streams run under a `mediaPlayback` foreground service with a MediaStyle notification and lockscreen/Bluetooth controls. Streaming itself is not cached; a separate explicit playlist download saves eligible audio privately, capped at 250 MiB per item and subject to Jellyfin's access rules. The access token travels in a request header, not in a URL. There is no queue or next/previous track, and the media session uses the platform's deprecated-but-supported `android.media.MediaSession`.
+- **Jellyfin streaming playback can continue in the background.** Streams run under a `mediaPlayback` foreground service with a MediaStyle notification and lockscreen/Bluetooth controls. Streaming itself is not cached; a separate explicit playlist download saves eligible audio privately, capped at 250 MiB per item and subject to Jellyfin's access rules. The access token travels in a request header, not in a URL. The same background service, notification and media session carry every other provider too — Spotify previews, SoundCloud streams, YouTube audio prepared by your own sync server, and attached offline copies — so lockscreen and car controls always act on one stream.
+- **The car sees the library, not the logins.** Android Auto browses pins, playlists and their songs through an exported media browser service; the connection is refused to callers that are not the car hosts, the system's media surfaces, or apps already trusted with media control (`AutoClientPolicy`). Provider tokens, the Jellyfin address and downloaded audio are never reachable through it, and playback still resolves through the app's own connections.
 - **Plain HTTP is permitted for the address you type yourself.** A home Jellyfin server usually speaks `http://`, and the platform's security config cannot know your server's address in advance, so `network_security_config.xml` allows cleartext traffic for the app. Soundtrail still contacts only the address you entered — every other provider API stays HTTPS-only, and certificates are validated against the system trust store with user-installed CAs never trusted.
 - The official YouTube Data API feature is read-only metadata access; YouTube Music playback stays in its app. A separate, optional, unofficial self-hosted extractor can request audio-only streams for public videos after a rights confirmation. It uses no YouTube/Morphe session or cookies, does not handle access-restricted media, and may stop working if YouTube changes its site. Jellyfin downloads use the server's official authenticated endpoint and remain subject to your rights and the server's permissions.
 - Motion detection is a GPS-speed estimate, not a sensor fusion product: expect misses at poor accuracy, and driving/running thresholds are approximate. Automations use cooldown-based re-arming (15 minutes), not edge triggering, so a rule can re-fire after its cooldown if conditions still hold.
@@ -264,6 +312,6 @@ Details worth knowing:
 python3 -m unittest discover -s server -v
 ```
 
-Unit tests cover the existing URL/provider, backup, map, playlist, and automation behavior plus Jellyfin download validation, YouTube video-ID parsing, YouTube browser-OAuth URL/redirect/token handling, recovery-key encoding, AES-GCM event encryption, tamper rejection, deterministic tombstone merges, and sync-payload handling (including keeping local audio filenames out of ciphertext). They also pin down the two rules that protect a saved login — which token-refresh failures may ask for a new sign-in and which must keep the stored grant — and the mood layer: the on-device reading (negation, intensifiers, emoji, time-of-day tilts, low-confidence fallbacks), the tag vocabulary, the mixer's scoring/variety/deduplication rules, and the model client — the strict, clamping reply parser across every supported shape (Gemini, Ollama, OpenAI-compatible, bare JSON), Ollama's model list and error sentences, the address normaliser, and the wording of the unreachable-server messages. Python `unittest` coverage exercises account/session isolation and deletion, opaque event pagination/idempotency, checkpoint compaction, rate limits including trusted-proxy IP handling, and authorized audio-route validation/stream cleanup. GitHub Actions runs the Android build and uploads a debug APK, plus the server API tests across Python 3.10 and 3.14.
+Unit tests cover the existing URL/provider, backup, map, playlist, and automation behavior plus Jellyfin download validation, YouTube video-ID parsing, YouTube browser-OAuth URL/redirect/token handling, recovery-key encoding, AES-GCM event encryption, tamper rejection, deterministic tombstone merges, and sync-payload handling (including keeping local audio filenames out of ciphertext). They also pin down the two rules that protect a saved login — which token-refresh failures may ask for a new sign-in and which must keep the stored grant — and the playback layer added for the car: queue navigation and its boundaries, the media ids the session and the browse tree agree on, the tree the car is handed (which rows are lists, which are playable, what a tap queues, what voice search matches) and the rule that decides which apps may connect at all. They also cover the mood layer: the on-device reading (negation, intensifiers, emoji, time-of-day tilts, low-confidence fallbacks), the tag vocabulary, the mixer's scoring/variety/deduplication rules, and the model client — the strict, clamping reply parser across every supported shape (Gemini, Ollama, OpenAI-compatible, bare JSON), Ollama's model list and error sentences, the address normaliser, and the wording of the unreachable-server messages. Python `unittest` coverage exercises account/session isolation and deletion, opaque event pagination/idempotency, checkpoint compaction, rate limits including trusted-proxy IP handling, and authorized audio-route validation/stream cleanup. GitHub Actions runs the Android build and uploads a debug APK, plus the server API tests across Python 3.10 and 3.14.
 
 Documentation: [YouTube Data API v3](https://developers.google.com/youtube/v3) · [Google OAuth for Android](https://developers.google.com/identity/sign-in/android/start-integrating) · [Google OAuth for installed apps](https://developers.google.com/identity/protocols/oauth2/native-app) · [Google Cloud Console](https://console.cloud.google.com/) · [Jellyfin API](https://api.jellyfin.org/) · [Jellyfin authentication](https://jellyfin.org/docs/general/administration/configuration/#security) · [Spotify PKCE](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow) · [SoundCloud API guide](https://developers.soundcloud.com/docs/api/guide) · [SoundCloud app registration](https://developers.soundcloud.com/docs/api/register-app) · [TheAudioDB free music API](https://www.theaudiodb.com/free_music_api) · [Foreground service types](https://developer.android.com/about/versions/14/changes/fgs-types-required) · [microG](https://microg.org/) · [OpenStreetMap](https://www.openstreetmap.org/copyright) · [CARTO map tiles](https://carto.com/developers/maps/)

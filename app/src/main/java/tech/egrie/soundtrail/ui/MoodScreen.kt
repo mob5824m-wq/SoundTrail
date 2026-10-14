@@ -52,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import tech.egrie.soundtrail.AppState
 import tech.egrie.soundtrail.MoodUiState
 import tech.egrie.soundtrail.mood.MoodAiProvider
+import tech.egrie.soundtrail.mood.MoodAiUrls
 import tech.egrie.soundtrail.mood.MoodEngine
 import tech.egrie.soundtrail.mood.MoodMixTrack
 import tech.egrie.soundtrail.mood.MoodProfile

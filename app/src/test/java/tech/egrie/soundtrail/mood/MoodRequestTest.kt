@@ -120,15 +120,18 @@ class MoodRequestTest {
     }
 
     @Test fun `a model that answers with songs or tracks is still understood`() {
-        val songs = JSONArray().put(JSONObject().put("title", "Nightcall").put("artist", "Kavinsky"))
-        assertEquals(1, MoodAiParser.parse(replyWith(songs))!!.picks.size)
-        val swapped = JSONObject().apply {
-            put("mood", "Calm")
-            put("valence", 0.5)
-            put("energy", 0.5)
-            put("tracks", JSONArray().put(JSONObject().put("title", "Nightcall").put("artist", "Kavinsky")))
-        }.toString()
-        assertEquals(1, MoodAiParser.parse(swapped)!!.picks.size)
+        val one = JSONArray().put(JSONObject().put("title", "Nightcall").put("artist", "Kavinsky"))
+        // Three names for the same list, because a model asked for "picks" reaches for the word
+        // it likes better often enough that refusing the other two would lose real songs.
+        listOf("picks", "songs", "tracks").forEach { key ->
+            val reply = JSONObject().apply {
+                put("mood", "Calm")
+                put("valence", 0.5)
+                put("energy", 0.5)
+                put(key, one)
+            }.toString()
+            assertEquals("the $key shape", 1, MoodAiParser.parse(reply)!!.picks.size)
+        }
     }
 
     @Test fun `a plain string is split the way music databases write it`() {

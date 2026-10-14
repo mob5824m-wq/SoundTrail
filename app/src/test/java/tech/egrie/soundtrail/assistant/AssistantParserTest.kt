@@ -199,7 +199,7 @@ class AssistantParserTest {
         // A feeling with no lead-in is left alone too: that is the mood cue path's job.
         assertNull(AssistantParser.findMusic("i feel like something calm"))
         // And a naming one is still read as a search, unchanged.
-        assertEquals("the xx sunsets", AssistantParser.parse("play the xx sunsets")?.phrase.lowercase())
+        assertEquals("the xx sunsets", AssistantParser.parse("play the xx sunsets")?.phrase?.lowercase())
     }
 
 }

@@ -17,23 +17,34 @@ class AssistantParserTest {
 
     @Test
     fun `a plain request is the song`() {
-        assertEquals("Sunsets", AssistantParser.parse("Play Sunsets")?.phrase)
+        // Nothing to strip, so the words are searched as they were said.
         assertEquals("Bohemian Rhapsody", AssistantParser.parse("bohemian rhapsody")?.phrase)
+        // A verb in front of a two-word title is a command, and comes off.
+        assertEquals("Bohemian Rhapsody", AssistantParser.parse("Play Bohemian Rhapsody")?.phrase)
+    }
+
+    @Test
+    fun `a one-word title keeps the verb, because the title may be the verb`() {
+        // "Play Sunsets" searches for "Play Sunsets": YouTube finds the song either way, and a
+        // song actually called "Play" is still findable. Matching drops the command word, so the
+        // library still answers (see AssistantLibraryTest).
+        assertEquals("Play Sunsets", AssistantParser.parse("Play Sunsets")?.phrase)
+        assertEquals("Play Play", AssistantParser.parse("Play Play")?.phrase)
     }
 
     @Test
     fun `command words come off however they were said`() {
         val cases = mapOf(
-            "Hey Soundtrail, play Sunsets" to "Sunsets",
-            "Okay Soundtrail, could you play Sunsets" to "Sunsets",
-            "Can you play Sunsets" to "Sunsets",
-            "I want to hear Sunsets" to "Sunsets",
-            "please play Sunsets" to "Sunsets",
-            "find me Sunsets" to "Sunsets",
-            "put on Sunsets" to "Sunsets",
-            "search for Sunsets" to "Sunsets",
-            "queue up Sunsets" to "Sunsets",
-            "start playing Sunsets" to "Sunsets"
+            "Hey Soundtrail, play Bohemian Rhapsody" to "Bohemian Rhapsody",
+            "Okay Soundtrail, could you play Bohemian Rhapsody" to "Bohemian Rhapsody",
+            "Can you play Bohemian Rhapsody" to "Bohemian Rhapsody",
+            "I want to hear Bohemian Rhapsody" to "Bohemian Rhapsody",
+            "please play Bohemian Rhapsody" to "Bohemian Rhapsody",
+            "find me Bohemian Rhapsody" to "Bohemian Rhapsody",
+            "put on Bohemian Rhapsody" to "Bohemian Rhapsody",
+            "search for Bohemian Rhapsody" to "Bohemian Rhapsody",
+            "queue up Bohemian Rhapsody" to "Bohemian Rhapsody",
+            "start playing Bohemian Rhapsody" to "Bohemian Rhapsody"
         )
         // Sorting the keys makes the failure message name the phrase that broke.
         cases.toSortedMap().forEach { (said, expected) ->
@@ -51,29 +62,44 @@ class AssistantParserTest {
     }
 
     @Test
-    fun `a title that starts with a command word keeps it`() {
-        // "Play" is dropped only when the song still has two words to stand on.
-        assertEquals("Play", AssistantParser.parse("Play Play")?.phrase)
-        assertEquals("Play That Funky Music", AssistantParser.parse("Play That Funky Music")?.phrase)
+    fun `a title that starts with a command word is not read as two commands`() {
+        // What follows the verb begins with a command word of its own, so nothing comes off.
+        assertEquals("Play Search and Destroy", AssistantParser.parse("Play Search and Destroy")?.phrase)
+        assertEquals("Play Start Me Up", AssistantParser.parse("Play Start Me Up")?.phrase)
+        assertEquals("Play Queue the Night", AssistantParser.parse("Play Queue the Night")?.phrase)
+    }
+
+    @Test
+    fun `the words as said are kept for a title a command word was hiding`() {
+        val request = AssistantParser.parse("Play That Funky Music")
+        // The command comes off the phrase that is searched first...
+        assertEquals("That Funky Music", request?.phrase)
+        // ...and the sentence as spoken stays, for a search that finds nothing to try again.
+        assertEquals("Play That Funky Music", request?.spoken)
     }
 
     @Test
     fun `the app a listener names is where the look should go`() {
         assertEquals(
             MusicProvider.YOUTUBE_MUSIC,
-            AssistantParser.parse("Play Sunsets on YouTube Music")?.provider
+            AssistantParser.parse("Play Bohemian Rhapsody on YouTube Music")?.provider
         )
         assertEquals(
             MusicProvider.SPOTIFY,
-            AssistantParser.parse("Play Sunsets on Spotify")?.provider
+            AssistantParser.parse("Play Bohemian Rhapsody on Spotify")?.provider
         )
         assertEquals(
             MusicProvider.SOUNDCLOUD,
             AssistantParser.parse("Sunsets by The xx on SoundCloud")?.provider
         )
+        // Where to look is not part of the song.
         assertEquals(
-            "Sunsets",
-            AssistantParser.parse("Play Sunsets on YouTube Music")?.query
+            "Bohemian Rhapsody",
+            AssistantParser.parse("Play Bohemian Rhapsody on YouTube Music")?.query
+        )
+        assertEquals(
+            "Bohemian Rhapsody",
+            AssistantParser.parse("Play Bohemian Rhapsody on YouTube Music.")?.query
         )
     }
 
@@ -94,19 +120,11 @@ class AssistantParserTest {
 
     @Test
     fun `dictation punctuation is cleaned rather than searched for`() {
-        assertEquals(
-            "Sunsets",
-            AssistantParser.parse("Play Sunsets.")?.phrase
-        )
-        assertEquals(
-            "The xx",
-            AssistantParser.parse("play Sunsets by The xx!")?.artist
-        )
-        // A recogniser's pause is not part of the song.
-        assertEquals(
-            "Sunsets",
-            AssistantParser.parse("Okay Soundtrail, play Sunsets")?.phrase
-        )
+        // A recogniser's full stop, exclamation or pause is not part of the song.
+        assertEquals("Play Sunsets", AssistantParser.parse("Play Sunsets.")?.phrase)
+        assertEquals("Bohemian Rhapsody", AssistantParser.parse("Play Bohemian Rhapsody!")?.phrase)
+        assertEquals("The xx", AssistantParser.parse("play Sunsets by The xx!")?.artist)
+        assertEquals("Bohemian Rhapsody", AssistantParser.parse("Okay Soundtrail, play Bohemian Rhapsody")?.phrase)
     }
 
     @Test
@@ -120,7 +138,13 @@ class AssistantParserTest {
 
     @Test
     fun `the song word is dropped when it is only a label`() {
+        // "the song X" is how people say it, so the label comes off...
         assertEquals("Sunsets", AssistantParser.parse("Play the song Sunsets")?.phrase)
-        assertEquals("Sunsets", AssistantParser.parse("Play track Sunsets")?.phrase)
+        assertEquals("Sunsets", AssistantParser.parse("Play the track Sunsets")?.phrase)
+        // ...and a bare "song" only when a title still has two words to stand on, so "Song 2"
+        // keeps its name.
+        assertEquals("Bohemian Rhapsody", AssistantParser.parse("Play song Bohemian Rhapsody")?.phrase)
+        assertEquals("Song 2", AssistantParser.parse("Play Song 2")?.phrase)
+        assertEquals("Song 2", AssistantParser.parse("Play Song 2 by Blur")?.title)
     }
 }

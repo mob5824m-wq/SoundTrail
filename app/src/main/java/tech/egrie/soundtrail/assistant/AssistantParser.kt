@@ -17,7 +17,12 @@ internal data class AssistantRequest(
     val artist: String? = null,
     val provider: MusicProvider? = null,
     /** True when this is a description of how the listener feels, not a song to look for. */
-    val mood: Boolean = false
+    val mood: Boolean = false,
+    /**
+     * The request without the "on <app>" tail but with every command word still in it — the
+     * words as they were said, which a search that found nothing can fall back on.
+     */
+    val spoken: String = ""
 ) {
     /**
      * The phrase a search should be given: the artist first when the request named one, since
@@ -114,11 +119,15 @@ internal object AssistantParser {
         }
 
         val named = nameSong(asked)
+        // "the song X" said without an artist leaves the label on the query, so it comes off
+        // here too — the title survives even when it is one word, because "the" is what says
+        // the word after it is a title rather than part of the command.
         return AssistantRequest(
-            query = named?.second ?: asked,
+            query = named?.second ?: asked.stripSongWords().ifBlank { asked },
             title = named?.second,
             artist = named?.first,
-            provider = provider
+            provider = provider,
+            spoken = body
         )
     }
 
@@ -147,8 +156,17 @@ internal object AssistantParser {
             for (lead in leadIns) {
                 if (!current.startsWith(lead, ignoreCase = true)) continue
                 val rest = current.removeRange(0, lead.length).trimStart()
-                if (rest.isEmpty()) break
-                if (lead.trim().split(' ').size == 1 && rest.split(' ').size < 2) break
+                // Nothing but the command was said: there is no request in it.
+                if (rest.isEmpty()) return ""
+                if (lead.trim().split(' ').size == 1) {
+                    // A single command word comes off only when a title of at least two words
+                    // follows it — "Play Sunsets" keeps its words, because the song may well be
+                    // called "Play" — and never when what follows starts with a command word of
+                    // its own, which is how "Play Search and Destroy" and "Play Start Me Up"
+                    // survive being read as two commands in a row.
+                    if (rest.split(' ').size < 2) break
+                    if (leadIns.any { rest.startsWith(it, ignoreCase = true) }) break
+                }
                 current = rest
                 changed = true
                 break

@@ -51,7 +51,11 @@ internal object AssistantLibrary {
      */
     private val fillerWords = setOf(
         "the", "a", "an", "of", "from", "in", "at", "on", "for", "to", "my", "me", "that",
-        "this", "song", "songs", "track", "tracks", "tune", "music"
+        "this", "song", "songs", "track", "tracks", "tune", "music",
+        // Command words stay in a short request ("play Sunsets" keeps its "play" so that a song
+        // actually called "Play" is still findable), so they cannot be words to match on.
+        "play", "plays", "playing", "queue", "start", "find", "search", "put", "please",
+        "hear", "listen", "want", "would", "can", "could", "you", "some"
     )
 
     fun search(request: AssistantRequest, pins: List<MusicPin>, playlists: List<Playlist>): List<AssistantHit> {

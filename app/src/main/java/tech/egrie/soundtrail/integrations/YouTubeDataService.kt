@@ -894,7 +894,11 @@ internal object YouTubeApiParser {
     fun catalogueTracks(
         body: String,
         limit: Int = YouTubeDataService.MAX_CATALOGUE_RESULTS
-    ): List<TrackResult> {
+    ): List<TrackResult> = runCatching { parseCatalogue(body, limit) }
+        .getOrElse { emptyList() }
+
+    /** A body that is not JSON at all is an answer with nothing in it, never a crash. */
+    private fun parseCatalogue(body: String, limit: Int): List<TrackResult> {
         val items = JSONObject(body).optJSONArray("items") ?: return emptyList()
         return (0 until items.length()).mapNotNull { index ->
             val item = items.optJSONObject(index) ?: return@mapNotNull null
@@ -910,10 +914,17 @@ internal object YouTubeApiParser {
             val channel = snippet.optString("videoOwnerChannelTitle").ifBlank {
                 snippet.optString("channelTitle")
             }.removeSuffix(" - Topic").trim()
-            val artist = channel.ifBlank { YouTubeTitles.artistFromTitle(rawTitle).orEmpty() }
+            val fromTitle = YouTubeTitles.artistFromTitle(rawTitle)
+            val artist = channel.ifBlank { fromTitle.orEmpty() }
+
+            // When the artist came out of the title, it comes out of the row's title as well:
+            // "The xx - Sunsets" is one song, not a song called "The xx - Sunsets".
+            val cleaned = YouTubeTitles.clean(rawTitle)
+                .let { title -> fromTitle?.takeIf { channel.isBlank() }?.let { title.removePrefix("$it - ") } ?: title }
+                .trim()
 
             TrackResult(
-                title = YouTubeTitles.clean(rawTitle).take(120),
+                title = cleaned.take(120),
                 artist = artist.ifBlank { "Unknown artist" }.take(120),
                 url = YouTubeSearch.watchUrl(id),
                 provider = MusicProvider.YOUTUBE_MUSIC

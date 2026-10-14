@@ -716,17 +716,25 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             var failure: String? = null
             val found = if (searched) {
                 try {
-                    withContext(Dispatchers.IO) { youtubeData.searchCatalogue(request.phrase) }
-                        .map { track ->
-                            AssistantHit(
-                                title = track.title,
-                                artist = track.artist,
-                                provider = track.provider,
-                                detail = track.provider.label,
-                                url = track.url,
-                                musicUrl = track.url
-                            )
-                        }
+                    // One look at the request as it was understood; a title that a command word
+                    // was hiding ("Play That Funky Music") gets a second look as it was said,
+                    // but only when the first found nothing at all.
+                    var hits = withContext(Dispatchers.IO) { youtubeData.searchCatalogue(request.phrase) }
+                    if (hits.isEmpty() && request.spoken.isNotBlank() &&
+                        !request.spoken.equals(request.phrase, ignoreCase = true)
+                    ) {
+                        hits = withContext(Dispatchers.IO) { youtubeData.searchCatalogue(request.spoken) }
+                    }
+                    hits.map { track ->
+                        AssistantHit(
+                            title = track.title,
+                            artist = track.artist,
+                            provider = track.provider,
+                            detail = track.provider.label,
+                            url = track.url,
+                            musicUrl = track.url
+                        )
+                    }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {

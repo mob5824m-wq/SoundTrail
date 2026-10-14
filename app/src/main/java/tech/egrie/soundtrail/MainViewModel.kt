@@ -56,6 +56,7 @@ import tech.egrie.soundtrail.integrations.YouTubeSearch
 import tech.egrie.soundtrail.location.DeviceLocation
 import tech.egrie.soundtrail.mood.DEFAULT_OLLAMA_MODEL
 import tech.egrie.soundtrail.mood.MoodAiException
+import tech.egrie.soundtrail.mood.MoodAiOutcome
 import tech.egrie.soundtrail.mood.MoodAiProvider
 import tech.egrie.soundtrail.mood.MoodAiService
 import tech.egrie.soundtrail.mood.MoodAiUrls
@@ -64,8 +65,11 @@ import tech.egrie.soundtrail.mood.MoodContext
 import tech.egrie.soundtrail.mood.MoodEngine
 import tech.egrie.soundtrail.mood.MoodMixTrack
 import tech.egrie.soundtrail.mood.MoodMixer
+import tech.egrie.soundtrail.mood.MoodPickResolver
 import tech.egrie.soundtrail.mood.MoodProfile
+import tech.egrie.soundtrail.mood.MoodPickSearch
 import tech.egrie.soundtrail.mood.MoodStore
+import tech.egrie.soundtrail.mood.MoodSearchTarget
 import tech.egrie.soundtrail.mood.TrackMoodTags
 import tech.egrie.soundtrail.playback.JellyfinPlayer
 import tech.egrie.soundtrail.playback.LibraryMedia
@@ -207,6 +211,15 @@ internal data class MoodUiState(
     val openAiModel: String = "",
     /** Models that endpoint listed on the last check. */
     val openAiModels: List<String> = emptyList(),
+    /** Where a reading goes looking for music: the listener's own library, or a provider. */
+    val searchTarget: MoodSearchTarget = MoodSearchTarget.default,
+    /**
+     * The songs the last reading turned up, resolved to something real: a stored song, a search
+     * result with a link, or a row that opens the app that owns it.
+     */
+    val found: List<AssistantHit> = emptyList(),
+    /** A sentence about the search: what it could not match, or why it found nothing. */
+    val foundNote: String? = null,
     /** True while a connection test or a model check is running. */
     val aiBusy: Boolean = false,
     /** A sentence from the last test, shown under the provider picker. */
@@ -277,6 +290,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
      * different song.
      */
     private val hub = PlaybackHub.shared(application)
+    private val moodPicks = MoodPickResolver(youtubeData, jellyfin, spotify, soundcloud)
 
     /**
      * The app's one player, shared with [tech.egrie.soundtrail.playback.PlaybackService] so
@@ -326,6 +340,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 ollamaModel = moodPrefs.ollamaModel,
                 openAiUrl = moodPrefs.openAiUrl,
                 openAiModel = moodPrefs.openAiModel,
+                searchTarget = moodPrefs.searchTarget,
                 aiKeySet = moodPrefs.keySet(moodPrefs.aiProvider),
                 aiReady = moodAi.configured,
                 enrichEnabled = moodPrefs.tagLookupEnabled
@@ -695,6 +710,28 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             answer("Say or type what you would like to hear.", emptyList(), said)
             return
         }
+        // "find music on Spotify that fits: rainy sunday" is the request the Mood tab builds for
+        // a model, so the same sentence typed or spoken here goes the same way: the service it
+        // names becomes the reading's target, and the words after "that fits" become the mood —
+        // rather than the whole sentence being searched for as if it were a song title.
+        AssistantParser.findMusic(said)?.let { find ->
+            find.provider?.let { provider ->
+                val target = MoodSearchTarget.forProvider(provider)
+                if (target != _state.value.mood.searchTarget) {
+                    applyMoodSearchTarget(target, announce = false)
+                }
+            }
+            setMoodText(find.text)
+            _state.update {
+                it.copy(
+                    assistant = it.assistant.copy(
+                        input = "", question = said, hits = emptyList(), reply = null
+                    )
+                )
+            }
+            analyzeMood(announce = true)
+            return
+        }
         val request = AssistantParser.parse(said)
         if (request == null) {
             answer("Say or type the song you would like to hear.", emptyList(), said)
@@ -831,34 +868,59 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             notify(missingProviderSetting(mood.aiProvider))
         }
         _state.update { it.copy(mood = it.mood.copy(analyzing = true, error = null, savedPlaylistName = null)) }
+        val target = mood.searchTarget
         viewModelScope.launch {
-            val profile = try {
+            val outcome = try {
                 when {
                     quickMoodId != null ->
-                        MoodEngine.forMood(quickMoodId, context) ?: MoodEngine.analyze(mood.text, context)
-                    useModel -> moodAi.readMood(mood.text, context)
-                    else -> MoodEngine.analyze(mood.text, context)
+                        MoodAiOutcome(
+                            MoodEngine.forMood(quickMoodId, context) ?: MoodEngine.analyze(mood.text, context)
+                        )
+                    useModel -> moodAi.readMood(mood.text, context, target)
+                    else -> MoodAiOutcome(MoodEngine.analyze(mood.text, context))
                 }
             } catch (e: MoodAiException) {
                 notify("${e.message} Reading it on the device instead.")
-                MoodEngine.analyze(mood.text, context)
+                MoodAiOutcome(MoodEngine.analyze(mood.text, context))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                MoodEngine.analyze(mood.text, context)
+                MoodAiOutcome(MoodEngine.analyze(mood.text, context))
             }
+            val profile = outcome.profile
             val candidates = moodCandidates()
             val mix = MoodMixer.build(profile, candidates)
             val untagged = MoodMixer.untagged(candidates).size
+            // The songs the answer came with are looked up for real before anything is offered:
+            // a model's suggestion becomes a row only once a search or the listener's own library
+            // has confirmed it exists. With no model in the loop, the reading's own phrases are
+            // what the chosen provider is asked for.
+            val search = try {
+                when {
+                    outcome.picks.isNotEmpty() -> withContext(Dispatchers.IO) {
+                        moodPicks.fromPicks(outcome.picks, target, _state.value.pins, _state.value.playlists)
+                    }
+                    target != MoodSearchTarget.LIBRARY -> withContext(Dispatchers.IO) {
+                        moodPicks.fromTerms(profile.searchTerms, target)
+                    }
+                    else -> MoodPickSearch()
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                MoodPickSearch(error = e.message ?: "${target.short} could not be searched.")
+            }
             _state.update {
                 it.copy(
                     mood = it.mood.copy(
                         analyzing = false,
                         profile = profile,
                         mix = mix,
+                        found = search.hits,
+                        foundNote = foundNote(search, target, fromModel = outcome.picks.isNotEmpty()),
                         librarySize = candidates.size,
                         untaggedCount = untagged,
-                        error = if (mix.isEmpty()) {
+                        error = if (mix.isEmpty() && search.hits.isEmpty()) {
                             "Nothing in your library yet — add a song or a link, or search YouTube Music below."
                         } else null,
                         queueIndex = -1,
@@ -869,11 +931,20 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             // A request that came in by voice is answered out loud, in the same words the card
             // shows; the mix itself is on the Mood tab.
             if (announce) {
+                val found = search.hits.size
                 val said = buildString {
                     append("That reads as ${profile.label}.")
                     append(
-                        if (mix.isEmpty()) " Nothing in your library fits it yet."
-                        else " ${mix.size} song${if (mix.size == 1) "" else "s"} on the Mood tab."
+                        when {
+                            found > 0 && mix.isEmpty() ->
+                                " ${found} song${if (found == 1) "" else "s"} found " +
+                                    "${target.phrase} on the Mood tab."
+                            found > 0 ->
+                                " ${found} song${if (found == 1) "" else "s"} found " +
+                                    "${target.phrase}, and ${mix.size} in your library."
+                            mix.isEmpty() -> " Nothing in your library fits it yet."
+                            else -> " ${mix.size} song${if (mix.size == 1) "" else "s"} on the Mood tab."
+                        }
                     )
                 }
                 answer(said, emptyList(), _state.value.assistant.question)
@@ -1095,6 +1166,69 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     }
 
     /**
+     * Where the next reading looks for music. Changing it re-runs nothing on its own: the pills
+     * say what the next request will ask, and the sentence above them shows it word for word.
+     */
+    fun setMoodSearchTarget(target: MoodSearchTarget) = applyMoodSearchTarget(target, announce = true)
+
+    /** The same, for requests that already said where to look and need no announcement. */
+    private fun applyMoodSearchTarget(target: MoodSearchTarget, announce: Boolean) {
+        moodPrefs.searchTarget = target
+        _state.update {
+            it.copy(
+                mood = it.mood.copy(
+                    searchTarget = target,
+                    found = emptyList(),
+                    foundNote = null
+                )
+            )
+        }
+        if (!announce) return
+        notify(
+            when (target) {
+                MoodSearchTarget.LIBRARY ->
+                    "Readings will pick from your own pins and playlists."
+                MoodSearchTarget.YOUTUBE_MUSIC ->
+                    "Readings will name songs on YouTube Music; those rows open that app."
+                else -> "Readings will look ${target.phrase} and play what the search finds."
+            }
+        )
+    }
+
+    /** Plays one found song, with the rest of the findings queued behind it. */
+    fun playMoodFound(hit: AssistantHit) {
+        val playable = AssistantAnswer.playable(_state.value.mood.found)
+        val index = playable.indexOfFirst { it.itemId != null && it.itemId == hit.itemId }
+            .takeIf { it >= 0 } ?: playable.indexOfFirst { it.url == hit.url }
+        if (playable.isEmpty() || index < 0) {
+            hub.playEntry(hit.toQueueEntry())
+            return
+        }
+        hub.play(playable.map { it.toQueueEntry() }, index)
+    }
+
+    /** Queues everything the reading found, in the order it was listed. */
+    fun playAllMoodFound() {
+        val playable = AssistantAnswer.playable(_state.value.mood.found)
+        if (playable.isEmpty()) {
+            notify("Nothing in these findings plays on this phone — open one in its own app instead.")
+            return
+        }
+        hub.play(playable.map { it.toQueueEntry() }, 0)
+    }
+
+    /**
+     * Opens a found song where it lives, for the rows this app cannot start itself — a YouTube
+     * Music suggestion, or a catalogue hit whose full version belongs to that app.
+     */
+    fun openMoodFound(hit: AssistantHit) {
+        val url = hit.musicUrl ?: hit.url
+        if (url.isNullOrBlank() || !apps.openWeb(url)) {
+            notify("Nothing on this phone can open that link.")
+        }
+    }
+
+    /**
      * The address of an OpenAI-compatible endpoint, accepted in whatever form it was pasted —
      * a bare host, a whole `…/v1/chat/completions` from a README, or a LAN address with no scheme.
      */
@@ -1203,10 +1337,14 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                                 openAiModels = if (openAi) models else it.mood.openAiModels,
                                 openAiModel = if (openAi) moodPrefs.openAiModel else it.mood.openAiModel,
                                 aiNote = when {
-                                    swapped ->
+                                    swapped && MoodAiUrls.isArenaRouter(adapted) ->
                                         "Arena: \u201C${before.openAiModel}\u201D is not enabled for " +
                                             "this key, so \u201C$adapted\u201D is selected — the same " +
                                             "choice Arena's own setup script makes."
+                                    swapped ->
+                                        "Arena: this key has no router alias, so \u201C$adapted\u201D " +
+                                            "is selected from the models it is enabled for — the " +
+                                            "same choice Arena's own setup script makes."
                                     models.isEmpty() && openAi ->
                                         "That endpoint answered but lists no models. Type the name " +
                                             "of the one you want — the app will still use it."
@@ -1234,6 +1372,29 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     }
 
     /**
+     * What to say about a search, in one line, without overstating what happened: how many of the
+     * named songs were found, what could not be matched, and — when nothing came back at all —
+     * whether that was the provider's complaint, a missing connection, or simply no match.
+     */
+    private fun foundNote(
+        search: MoodPickSearch,
+        target: MoodSearchTarget,
+        fromModel: Boolean
+    ): String? = when {
+        search.hits.isNotEmpty() && search.unmatched > 0 ->
+            "${search.hits.size} of the songs named were found ${target.phrase}; " +
+                "${search.unmatched} could not be matched to anything real and were left out."
+        search.hits.isNotEmpty() -> null
+        search.error != null -> search.error
+        search.unmatched > 0 -> "None of the songs named could be found ${target.phrase}."
+        target == MoodSearchTarget.LIBRARY && fromModel ->
+            "None of the songs named are in your library — the mix below is built from what is."
+        target == MoodSearchTarget.LIBRARY -> null
+        fromModel -> "Nothing that was named could be found ${target.phrase}."
+        else -> "Nothing came back from ${target.short} for that."
+    }
+
+    /**
      * The model to keep once a list has arrived. A model already in the list is kept as it is, and
      * Ollama's tags are left alone — they were typed or tapped deliberately. Arena is the one case
      * that changes on its own: a key may have any of Arena's router aliases enabled, and Arena's
@@ -1246,9 +1407,9 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         if (!MoodAiUrls.isArena(MoodAiUrls.normalizeOpenAi(mood.openAiUrl))) return mood.openAiModel
         // A name the listener typed themselves is theirs to keep; only the preset alias is Arena's
         // to move, and it is moved only when the key turned out not to have it.
-        val presetAlias = MoodAiUrls.ARENA_ROUTER_MODELS.any { it == mood.openAiModel }
+        val presetAlias = MoodAiUrls.isArenaRouter(mood.openAiModel)
         if (mood.openAiModel.isNotBlank() && !presetAlias) return mood.openAiModel
-        return MoodAiUrls.arenaRouterFrom(models) ?: mood.openAiModel
+        return MoodAiUrls.arenaModelFrom(models) ?: mood.openAiModel
     }
 
     /** Probes the selected provider and reports exactly what happened. */

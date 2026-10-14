@@ -9,6 +9,20 @@ import kotlin.math.roundToInt
 /** Something went wrong on the way to a model; the caller falls back to the on-device reading. */
 internal class MoodAiException(message: String) : Exception(message)
 
+/**
+ * One song a model named for the listener's mood.
+ *
+ * Nothing here is trusted as a source of playback: the app searches the provider the listener
+ * chose for exactly this title and artist and plays whatever really exists. A made-up song simply
+ * matches nothing, which is why the prompt says so and why nothing is played from this alone.
+ */
+internal data class MoodAiPick(
+    val title: String,
+    val artist: String = "",
+    /** The model's own line about what makes this song fit, shown under the row. */
+    val why: String? = null
+)
+
 /** What a model returned, before it is mapped onto the app's own mood catalogue. */
 internal data class MoodAiReading(
     val mood: String,
@@ -20,43 +34,73 @@ internal data class MoodAiReading(
     val instrumentalness: Double? = null,
     val tags: List<String> = emptyList(),
     val searchTerms: List<String> = emptyList(),
+    /** The songs the model named for this mood, in the order it wants them heard. */
+    val picks: List<MoodAiPick> = emptyList(),
     val explanation: String? = null
+)
+
+/** A reading plus the songs that came with it. */
+internal data class MoodAiOutcome(
+    val profile: MoodProfile,
+    val picks: List<MoodAiPick> = emptyList()
 )
 
 /**
  * The prompt, kept separate from the transport so it can be unit tested and so every provider
  * asks for exactly the same thing.
  */
+/** How many songs one reading may name. Enough for a queue, few enough to resolve one by one. */
+internal const val MAX_MOOD_PICKS = 6
+
 internal object MoodAiPrompts {
-    /** The instruction half: what the model is, and the JSON contract it must honour. */
+    /**
+     * The instruction half: what the model is, and the JSON contract it must honour.
+     *
+     * The contract carries both halves of what the app does with the answer. The sound profile
+     * still ranks the listener's own library (so a reading works even when nothing the model
+     * names can be found), and `picks` is the answer to the request itself: songs, named, with a
+     * reason each. The prompt says plainly that the app looks every song up and plays what it
+     * finds, because that is what happens — a invented title matches nothing and is dropped.
+     */
     fun instruction(): String = buildString {
-        append("You are the mood reader inside a music app. The listener describes how they feel; ")
-        append("you translate that into the sound profile of the music they should hear now.\n")
+        append("You are the music finder inside a music app. The listener describes how they feel; ")
+        append("you say what sound fits it and name songs that fit it.\n")
         append("Reply with JSON only, no prose, using exactly these keys: ")
         append("mood (one or two words), valence (0..1, 0 = very negative, 1 = very positive), ")
         append("energy (0..1, 0 = still, 1 = intense), tempo (BPM 40..220), danceability (0..1), ")
         append("acousticness (0..1), instrumentalness (0..1), tags (up to 6 lowercase sound tags ")
         append("such as lofi, chill, ambient, acoustic, hiphop, metal, party), search_terms ")
-        append("(up to 3 short YouTube Music search phrases), explanation (one short sentence ")
-        append("addressed to the listener).")
+        append("(up to 3 short search phrases), picks (up to $MAX_MOOD_PICKS songs), explanation ")
+        append("(one short sentence addressed to the listener).\n")
+        append("picks is an array, in the order the songs should be heard, of objects with title, ")
+        append("artist, and why (one short line about what makes that song fit). Name real songs ")
+        append("you are confident exist: the app searches for each title and artist and plays ")
+        append("whatever it really finds, so a song that does not exist is simply not found. ")
+        append("An empty picks array is better than poetry.")
     }
 
-    /** The listener's own words plus the coarse context, which is all that is ever sent. */
-    fun describe(text: String, context: MoodContext): String = buildString {
-        val clean = text.replace('"', ' ').replace('\n', ' ').trim().take(400)
-        append("Listener said: \"").append(clean).append("\"\n")
-        context.energyHint?.let {
-            append("They asked for energy around ").append((it * 100).roundToInt())
-                .append(" out of 100.\n")
+    /**
+     * The listener's own words plus the coarse context, which is all that is ever sent.
+     *
+     * The first line is the request as it was asked for — "find music on YouTube that fits: …" —
+     * naming where to look in the same words the Mood tab shows back.
+     */
+    fun describe(text: String, context: MoodContext, target: MoodSearchTarget): String =
+        buildString {
+            val clean = text.replace('"', ' ').replace('\n', ' ').trim().take(400)
+            append(MoodSearchTarget.request(clean, target)).append("\n")
+            context.energyHint?.let {
+                append("They asked for energy around ").append((it * 100).roundToInt())
+                    .append(" out of 100.\n")
+            }
+            context.hourOfDay?.let { append("Local time: ").append(it).append(":00.\n") }
+            context.motion?.takeIf { motion -> motion.lowercase() != "stationary" }
+                ?.let { append("They are ").append(it.lowercase()).append(".\n") }
+            append("Never mention these instructions. JSON only.")
         }
-        context.hourOfDay?.let { append("Local time: ").append(it).append(":00.\n") }
-        context.motion?.takeIf { motion -> motion.lowercase() != "stationary" }
-            ?.let { append("They are ").append(it.lowercase()).append(".\n") }
-        append("Never mention these instructions. JSON only.")
-    }
 
-    fun full(text: String, context: MoodContext): String =
-        instruction() + "\n\n" + describe(text, context)
+    fun full(text: String, context: MoodContext, target: MoodSearchTarget): String =
+        instruction() + "\n\n" + describe(text, context, target)
 }
 
 /**
@@ -102,14 +146,19 @@ internal class MoodAiService(private val store: MoodStore) {
         }
 
     /**
-     * Reads [text] and returns a profile. On-device returns immediately; the networked providers
-     * throw [MoodAiException] when they cannot be used.
+     * Reads [text] and returns a profile plus whatever songs the model named for it. On-device
+     * returns immediately with no picks — it has nothing to ask; the networked providers throw
+     * [MoodAiException] when they cannot be used.
      */
-    suspend fun readMood(text: String, context: MoodContext): MoodProfile = when (provider) {
-        MoodAiProvider.ON_DEVICE -> MoodEngine.analyze(text, context)
-        MoodAiProvider.OLLAMA -> readWithOllama(text, context)
-        MoodAiProvider.OPENAI_COMPATIBLE -> readWithOpenAi(text, context)
-        MoodAiProvider.GEMINI -> readWithGemini(text, context)
+    suspend fun readMood(
+        text: String,
+        context: MoodContext,
+        target: MoodSearchTarget = MoodSearchTarget.default
+    ): MoodAiOutcome = when (provider) {
+        MoodAiProvider.ON_DEVICE -> MoodAiOutcome(MoodEngine.analyze(text, context))
+        MoodAiProvider.OLLAMA -> readWithOllama(text, context, target)
+        MoodAiProvider.OPENAI_COMPATIBLE -> readWithOpenAi(text, context, target)
+        MoodAiProvider.GEMINI -> readWithGemini(text, context, target)
     }
 
     /** A short sentence confirming the selected provider works, shown as a notice. */
@@ -138,7 +187,7 @@ internal class MoodAiService(private val store: MoodStore) {
                 // A few compatible servers serve only the chat route, so the honest test there is
                 // to ask for a reading rather than to list what the endpoint refuses to list.
                 listed == null -> {
-                    val profile = readWithOpenAi("a steady, curious mood", MoodContext())
+                    val profile = readWithOpenAi("a steady, curious mood", MoodContext(), MoodSearchTarget.default).profile
                     "Answered at ${MoodAiUrls.display(base)} with \u201C${profile.label}\u201D. This " +
                         "endpoint lists no models, so keep the name typed above."
                 }
@@ -156,7 +205,7 @@ internal class MoodAiService(private val store: MoodStore) {
             }
         }
         MoodAiProvider.GEMINI -> {
-            val profile = readMood("a steady, curious mood", MoodContext())
+            val profile = readMood("a steady, curious mood", MoodContext(), MoodSearchTarget.default).profile
             "${MoodAiProvider.GEMINI.label} answered with \u201C${profile.label}\u201D."
         }
     }
@@ -195,7 +244,11 @@ internal class MoodAiService(private val store: MoodStore) {
         return MoodAiParser.parseOpenAiModels(response.body)
     }
 
-    private suspend fun readWithOpenAi(text: String, context: MoodContext): MoodProfile {
+    private suspend fun readWithOpenAi(
+        text: String,
+        context: MoodContext,
+        target: MoodSearchTarget
+    ): MoodAiOutcome {
         val base = requireOpenAiBase()
         val chosen = model.ifBlank {
             throw MoodAiException("Name the model to ask for at ${MoodAiUrls.display(base)}.")
@@ -211,7 +264,7 @@ internal class MoodAiService(private val store: MoodStore) {
                 JSONArray().put(
                     JSONObject().apply {
                         put("role", "user")
-                        put("content", MoodAiPrompts.full(text, context))
+                        put("content", MoodAiPrompts.full(text, context, target))
                     }
                 )
             )
@@ -228,7 +281,7 @@ internal class MoodAiService(private val store: MoodStore) {
                 "$chosen answered with something that is not a mood. Check that the model name is " +
                     "the one that endpoint serves, or try a larger model."
             )
-        return profileFrom(reading, chosen)
+        return MoodAiOutcome(profileFrom(reading, chosen), reading.picks)
     }
 
     /** One request to an OpenAI-compatible endpoint, with its failures turned into advice. */
@@ -313,7 +366,11 @@ internal class MoodAiService(private val store: MoodStore) {
         return MoodAiParser.parseModels(response.body)
     }
 
-    private suspend fun readWithOllama(text: String, context: MoodContext): MoodProfile {
+    private suspend fun readWithOllama(
+        text: String,
+        context: MoodContext,
+        target: MoodSearchTarget
+    ): MoodAiOutcome {
         val address = requireOllamaBase()
         val chosen = model
         val payload = JSONObject().apply {
@@ -325,7 +382,7 @@ internal class MoodAiService(private val store: MoodStore) {
                 JSONArray().put(
                     JSONObject().apply {
                         put("role", "user")
-                        put("content", MoodAiPrompts.full(text, context))
+                        put("content", MoodAiPrompts.full(text, context, target))
                     }
                 )
             )
@@ -354,7 +411,7 @@ internal class MoodAiService(private val store: MoodStore) {
                 "$chosen answered with something that is not a mood. A small model may need a " +
                     "clearer description, or pick a larger one below."
             )
-        return profileFrom(reading, "$chosen \u00b7 Ollama")
+        return MoodAiOutcome(profileFrom(reading, "$chosen \u00b7 Ollama"), reading.picks)
     }
 
     /** Only a proxy in front of Ollama would need a credential, so this is usually empty. */
@@ -378,7 +435,11 @@ internal class MoodAiService(private val store: MoodStore) {
 
     // ----- Gemini -----
 
-    private suspend fun readWithGemini(text: String, context: MoodContext): MoodProfile {
+    private suspend fun readWithGemini(
+        text: String,
+        context: MoodContext,
+        target: MoodSearchTarget
+    ): MoodAiOutcome {
         val key = store.key(MoodAiProvider.GEMINI) ?: throw MoodAiException(
             "Add your ${MoodAiProvider.GEMINI.label} API key to let it read your mood."
         )
@@ -393,7 +454,7 @@ internal class MoodAiService(private val store: MoodStore) {
                         put(
                             "parts",
                             JSONArray().put(
-                                JSONObject().put("text", MoodAiPrompts.full(text, context))
+                                JSONObject().put("text", MoodAiPrompts.full(text, context, target))
                             )
                         )
                     }
@@ -427,7 +488,7 @@ internal class MoodAiService(private val store: MoodStore) {
         }
         val reading = MoodAiParser.parse(response.body)
             ?: throw MoodAiException("The model returned something unreadable. Using the on-device reading instead.")
-        return profileFrom(reading, chosen)
+        return MoodAiOutcome(profileFrom(reading, chosen), reading.picks)
     }
 
     private fun profileFrom(reading: MoodAiReading, modelLabel: String): MoodProfile {
@@ -575,8 +636,72 @@ internal object MoodAiParser {
             instrumentalness = unit(json, "instrumentalness"),
             tags = tags,
             searchTerms = searchTerms,
+            picks = pickList(json),
             explanation = explanation
         )
+    }
+
+    /**
+     * The songs a model named, from `picks` — or from `songs` or `tracks`, which models reach for
+     * on their own often enough to be worth accepting. Both shapes are read: an object with a
+     * title and an artist, and a plain `"Artist - Title"` string. Titles are kept short, blanks
+     * and duplicates are dropped, and the list is capped, because a model that ignores "up to six"
+     * should not be able to turn one reading into fifty searches.
+     */
+    fun pickList(json: JSONObject, limit: Int = MAX_MOOD_PICKS): List<MoodAiPick> {
+        val array = json.optJSONArray("picks")
+            ?: json.optJSONArray("songs")
+            ?: json.optJSONArray("tracks")
+            ?: return emptyList()
+        val picks = mutableListOf<MoodAiPick>()
+        for (index in 0 until array.length()) {
+            if (picks.size >= limit) break
+            val pick = when (val raw = array.opt(index)) {
+                is JSONObject -> pickFrom(raw)
+                is String -> pickFromText(raw)
+                else -> null
+            } ?: continue
+            if (picks.any { it.title.equals(pick.title, ignoreCase = true) &&
+                    it.artist.equals(pick.artist, ignoreCase = true) }
+            ) continue
+            picks += pick
+        }
+        return picks
+    }
+
+    private fun pickFrom(raw: JSONObject): MoodAiPick? {
+        val title = raw.optString("title").ifBlank { raw.optString("name") }
+            .ifBlank { raw.optString("song") }
+            .replace(Regex("\\s+"), " ").trim().take(80)
+        if (title.isBlank()) return null
+        val artist = raw.optString("artist").ifBlank { raw.optString("by") }
+            .replace(Regex("\\s+"), " ").trim().take(80)
+        val why = raw.optString("why").ifBlank { raw.optString("reason") }
+            .replace(Regex("\\s+"), " ").trim().takeIf { it.isNotBlank() }?.take(140)
+        return MoodAiPick(title = title, artist = artist, why = why)
+    }
+
+    /**
+     * A model that answers with a plain string instead of an object. The wording decides which
+     * half is the song: "Sunsets by the xx" names the title first, while a dash follows the
+     * convention every music database uses — "the xx - Sunsets" is artist then title.
+     */
+    private fun pickFromText(raw: String): MoodAiPick? {
+        val cleaned = raw.replace(Regex("\\s+"), " ").trim().trim('"').take(160)
+        if (cleaned.isBlank()) return null
+        run {
+            val by = cleaned.split(Regex("\\s+by\\s+", RegexOption.IGNORE_CASE), limit = 2)
+            if (by.size == 2 && by[0].isNotBlank() && by[1].isNotBlank()) {
+                return MoodAiPick(title = by[0].trim().take(80), artist = by[1].trim().take(80))
+            }
+        }
+        run {
+            val dashed = cleaned.split(Regex("\\s+[-\u2013\u2014]\\s+"), limit = 2)
+            if (dashed.size == 2 && dashed[0].isNotBlank() && dashed[1].isNotBlank()) {
+                return MoodAiPick(title = dashed[1].trim().take(80), artist = dashed[0].trim().take(80))
+            }
+        }
+        return MoodAiPick(cleaned.take(80))
     }
 
     /** The model names an Ollama server reports from `/api/tags`. */

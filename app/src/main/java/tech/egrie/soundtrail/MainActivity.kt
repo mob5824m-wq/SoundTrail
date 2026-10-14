@@ -277,6 +277,10 @@ class MainActivity : ComponentActivity() {
                         onTestAi = model::testMoodAi,
                         onSaveAiKey = model::saveMoodAiKey,
                         onClearAiKey = model::clearMoodAiKey,
+                        onSetSearchTarget = model::setMoodSearchTarget,
+                        onPlayFound = model::playMoodFound,
+                        onPlayAllFound = model::playAllMoodFound,
+                        onOpenFound = model::openMoodFound,
                         onOpenInYouTubeMusic = {
                             if (!model.openMoodInYouTubeMusic()) {
                                 model.notify("No YouTube Music app or browser found.")

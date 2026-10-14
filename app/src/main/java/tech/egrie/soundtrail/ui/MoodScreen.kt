@@ -51,11 +51,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import tech.egrie.soundtrail.AppState
 import tech.egrie.soundtrail.MoodUiState
+import tech.egrie.soundtrail.assistant.AssistantHit
 import tech.egrie.soundtrail.mood.MoodAiProvider
 import tech.egrie.soundtrail.mood.MoodAiUrls
 import tech.egrie.soundtrail.mood.MoodEngine
 import tech.egrie.soundtrail.mood.MoodMixTrack
 import tech.egrie.soundtrail.mood.MoodProfile
+import tech.egrie.soundtrail.mood.MoodSearchTarget
 import tech.egrie.soundtrail.mood.MoodSource
 
 /** Everything the Mood tab can ask the app to do. */
@@ -85,6 +87,11 @@ internal data class MoodActions(
     val onTestAi: () -> Unit,
     val onSaveAiKey: (String) -> Unit,
     val onClearAiKey: () -> Unit,
+    /** Where a reading looks for music, and what to do with the songs it turns up. */
+    val onSetSearchTarget: (MoodSearchTarget) -> Unit,
+    val onPlayFound: (AssistantHit) -> Unit,
+    val onPlayAllFound: () -> Unit,
+    val onOpenFound: (AssistantHit) -> Unit,
     val onOpenInYouTubeMusic: () -> Unit
 )
 
@@ -110,6 +117,8 @@ internal fun MoodScreen(state: AppState, actions: MoodActions, onNotice: (String
         Spacer(Modifier.height(14.dp))
 
         MoodInputCard(mood, actions)
+        Spacer(Modifier.height(12.dp))
+        MoodFindCard(mood, state, actions, onNotice)
         Spacer(Modifier.height(10.dp))
 
         mood.profile?.let { profile ->
@@ -475,6 +484,168 @@ private fun MoodReadingCard(mood: MoodUiState, actions: MoodActions, onNotice: (
                     "failure falls back to the on-device reading.",
                 color = Palette.muted, style = MaterialTheme.typography.labelMedium
             )
+        }
+    }
+}
+
+/**
+ * Where a reading goes looking, and what it came back with.
+ *
+ * The first thing on the card is the request itself, word for word: "find music on YouTube that
+ * fits: …". The listener asked for the music, so they get to see the sentence that was asked on
+ * their behalf — and changing the pills changes that sentence. Under it sit the songs that were
+ * found, each resolved to something real: a stored song that plays here, a search result that
+ * plays here, or a row that opens the app which owns it.
+ */
+@Composable
+private fun MoodFindCard(
+    mood: MoodUiState,
+    state: AppState,
+    actions: MoodActions,
+    onNotice: (String) -> Unit
+) {
+    val target = mood.searchTarget
+    val playable = mood.found.count { it.playable }
+    val text = mood.text.trim().ifBlank { "how you feel" }
+    // Choosing a provider that is not connected yet is a legitimate choice — it says where the
+    // next reading should look — but the listener should hear about it now, not from a failed
+    // search after they have typed out how they feel.
+    val missing = target.missingConnection(
+        spotify = state.spotifyConnected,
+        soundcloud = state.soundcloudConnected,
+        jellyfin = state.jellyfinConnected,
+        youtube = state.youtubeDataConnected
+    )
+
+    SurfaceCard(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(43.dp).background(Palette.primary.copy(alpha = .14f), CircleShape),
+                contentAlignment = Alignment.Center) {
+                Icon(Icons.Rounded.Search, null, tint = Palette.primary)
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Find music on", style = MaterialTheme.typography.titleLarge)
+                Text(
+                    if (mood.aiEnabled && mood.aiReady && mood.aiProvider != MoodAiProvider.ON_DEVICE) {
+                        "The model is asked for songs, and each one is looked up"
+                    } else {
+                        "Your own reading searches the provider with its phrases"
+                    },
+                    color = Palette.secondary, style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            MoodSearchTarget.values().forEach { option ->
+                MoodPill(
+                    text = option.short,
+                    selected = target == option,
+                    onClick = {
+                        actions.onSetSearchTarget(option)
+                        option.missingConnection(
+                            spotify = state.spotifyConnected,
+                            soundcloud = state.soundcloudConnected,
+                            jellyfin = state.jellyfinConnected,
+                            youtube = state.youtubeDataConnected
+                        )?.let(onNotice)
+                    }
+                )
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        // The request as the model receives it, so nothing is sent on the listener's behalf that
+        // they cannot read here first.
+        Text(
+            MoodSearchTarget.request(text, target),
+            color = Palette.muted, style = MaterialTheme.typography.labelMedium
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(target.blurb, color = Palette.muted, style = MaterialTheme.typography.labelMedium)
+        missing?.let { sentence ->
+            Spacer(Modifier.height(6.dp))
+            Text(sentence, color = Palette.lilac, style = MaterialTheme.typography.labelMedium)
+        }
+
+        if (mood.found.isNotEmpty()) {
+            Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Found ${target.phrase}",
+                    style = MaterialTheme.typography.labelMedium, color = Palette.secondary,
+                    modifier = Modifier.weight(1f)
+                )
+                if (playable > 1) {
+                    TextButton(onClick = actions.onPlayAllFound) {
+                        Text("Play all $playable", color = Palette.primary)
+                    }
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            mood.found.forEach { hit ->
+                MoodFoundRow(hit, actions)
+                Spacer(Modifier.height(6.dp))
+            }
+        }
+        mood.foundNote?.let { note ->
+            Spacer(Modifier.height(2.dp))
+            Text(note, color = Palette.secondary, style = MaterialTheme.typography.labelMedium)
+        }
+        if (target == MoodSearchTarget.YOUTUBE_MUSIC) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "YouTube Music rows are suggestions with a search link, because that service " +
+                    "publishes no API this app may search with. Everything else here plays in " +
+                    "Soundtrail itself.",
+                color = Palette.muted, style = MaterialTheme.typography.labelSmall
+            )
+        }
+    }
+}
+
+/** One song a reading turned up: play it here, or open it where it lives. */
+@Composable
+private fun MoodFoundRow(hit: AssistantHit, actions: MoodActions) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Palette.surface)
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier.size(38.dp).clip(CircleShape).background(Palette.elevated),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                Icons.Rounded.PlayArrow,
+                contentDescription = if (hit.playable) "Play ${hit.title}" else null,
+                tint = if (hit.playable) Palette.primary else Palette.muted
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(hit.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.titleMedium)
+            Text(
+                listOfNotNull(
+                    hit.artist.takeIf(String::isNotBlank),
+                    hit.detail.takeIf(String::isNotBlank)
+                ).joinToString(" \u00b7 "),
+                maxLines = 2, overflow = TextOverflow.Ellipsis, color = Palette.secondary,
+                style = MaterialTheme.typography.labelMedium
+            )
+        }
+        if (hit.playable) {
+            IconButton(onClick = { actions.onPlayFound(hit) }, modifier = Modifier.size(38.dp)) {
+                Icon(Icons.Rounded.PlayArrow, "Play ${hit.title}", tint = Palette.primary)
+            }
+        } else if (hit.musicUrl != null || hit.url != null) {
+            TextButton(onClick = { actions.onOpenFound(hit) }) {
+                Text("Open", color = Palette.lilac)
+            }
         }
     }
 }

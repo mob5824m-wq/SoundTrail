@@ -218,6 +218,21 @@ internal object MoodAiUrls {
     fun arenaRouterFrom(models: List<String>): String? =
         ARENA_ROUTER_MODELS.firstOrNull { alias -> models.any { it == alias } }
 
+    /** True when a name is one of Arena's router aliases rather than a model of its own. */
+    fun isArenaRouter(model: String): Boolean = ARENA_ROUTER_MODELS.any { it == model }
+
+    /**
+     * The model to keep from a list a key is enabled for.
+     *
+     * A key may be enabled for a router alias, for a handful of named models (Claude, GPT, Gemini,
+     * Kimi and the rest), or for both. The alias is preferred when the key has one, because that is
+     * what Arena's own setup script picks; when it has none, the first model the key is enabled for
+     * is used, which is the same fallback `setup.sh` makes with `models[0]`. Either way the name
+     * that comes back is one that authenticated discovery returned — never a guess.
+     */
+    fun arenaModelFrom(models: List<String>): String? =
+        arenaRouterFrom(models) ?: models.firstOrNull()
+
     /** True when an address is Arena's gateway, so the app can offer its keys page. */
     fun isArena(base: String?): Boolean =
         base != null && hostOf(base) == "api.preview.arena.ai"

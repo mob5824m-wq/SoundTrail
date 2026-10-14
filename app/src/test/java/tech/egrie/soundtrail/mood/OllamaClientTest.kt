@@ -184,9 +184,17 @@ class OllamaClientTest {
     @Test fun `every provider asks for the same json contract, with the listener's words`() {
         val prompt = MoodAiPrompts.full(
             "tired but I want something warm for the drive home",
-            MoodContext(hourOfDay = 17, energyHint = 0.55, motion = "Driving")
+            MoodContext(hourOfDay = 17, energyHint = 0.55, motion = "Driving"),
+            MoodSearchTarget.YOUTUBE
         )
         assertTrue(prompt.contains("tired but I want something warm for the drive home"))
+        // The request it is asked to answer, naming the service the listener picked.
+        assertTrue(prompt.startsWith("You are the music finder inside a music app"))
+        assertTrue(
+            prompt.contains(
+                "find music on YouTube that fits: \"tired but I want something warm for the drive home\""
+            )
+        )
         assertTrue(prompt.contains("JSON only"))
         listOf("mood", "valence", "energy", "tempo", "danceability", "acousticness",
             "instrumentalness", "tags", "search_terms", "explanation").forEach { key ->
@@ -198,16 +206,25 @@ class OllamaClientTest {
     }
 
     @Test fun `the prompt carries nothing else about the listener`() {
-        // The contract the privacy note makes: only the description and coarse context go out.
-        val prompt = MoodAiPrompts.full("quiet and calm", MoodContext())
+        // The contract the privacy note makes: only the description and the coarse context go out.
+        // The keys the answer must use are named — title and artist, so that the app has something
+        // to search for — but nothing about what the listener owns is, because nothing else is ever
+        // handed to the builder: the prompt is the instruction, the request, and the description.
+        val prompt = MoodAiPrompts.full("quiet and calm", MoodContext(), MoodSearchTarget.LIBRARY)
         assertTrue(prompt.length < 1_600)
-        assertFalse(prompt.contains("title"))
+        assertTrue(prompt.contains("title, artist, and why"))
         assertFalse(prompt.contains("playlist"))
         assertFalse(prompt.contains("pin"))
+        assertTrue(prompt.startsWith(MoodAiPrompts.instruction()))
+        assertTrue(prompt.contains("find music in your own library that fits: \"quiet and calm\""))
     }
 
     @Test fun `a quiet context adds no context lines at all`() {
-        val prompt = MoodAiPrompts.full("something happy", MoodContext())
+        val prompt = MoodAiPrompts.full(
+            "something happy",
+            MoodContext(),
+            MoodSearchTarget.SOUNDCLOUD
+        )
         assertFalse(prompt.contains("Local time"))
         assertFalse(prompt.contains("They are "))
         assertFalse(prompt.contains("energy around"))

@@ -125,6 +125,23 @@ class OpenAiCompatibleClientTest {
         assertNull(MoodAiUrls.arenaRouterFrom(emptyList()))
     }
 
+    @Test fun `a key with no router alias falls back to the models it does have`() {
+        // A key can be enabled for named models and no router alias at all — the portal shows a
+        // list like Claude, GPT, Gemini, Kimi, and "Coding Router" unchecked. setup.sh falls back
+        // to models[0] there, and so does the app, rather than leaving an alias that will 404.
+        val named = listOf("claude-fable-5-1", "gpt-6-sol", "gemini-3.8-flash", "kimi-k3")
+        assertEquals("claude-fable-5-1", MoodAiUrls.arenaModelFrom(named))
+        assertNull(MoodAiUrls.arenaRouterFrom(named))
+        // With an alias present, the alias still wins, whichever position it is in.
+        assertEquals(
+            "coding-router-preview",
+            MoodAiUrls.arenaModelFrom(listOf("claude-fable-5-1", "coding-router-preview"))
+        )
+        assertNull(MoodAiUrls.arenaModelFrom(emptyList()))
+        assertTrue(MoodAiUrls.isArenaRouter("max-v0"))
+        assertTrue(!MoodAiUrls.isArenaRouter("claude-fable-5-1"))
+    }
+
     @Test fun `Arena's gateway is an endpoint like any other, so its preset has to normalise cleanly`() {
         val base = MoodAiUrls.normalizeOpenAi(MoodAiUrls.ARENA_BASE_URL)!!
         assertEquals("https://api.preview.arena.ai/v1", base)

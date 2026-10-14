@@ -147,4 +147,59 @@ class AssistantParserTest {
         assertEquals("Song 2", AssistantParser.parse("Play Song 2")?.phrase)
         assertEquals("Song 2", AssistantParser.parse("Play Song 2 by Blur")?.title)
     }
+
+    // ----- "find music on Spotify that fits …": the request the Mood tab builds -----
+
+    @Test
+    fun `a find-my-music request names the service and the feeling`() {
+        val said = AssistantParser.findMusic("find music on Spotify that fits: tired but warm")!!
+        assertEquals("tired but warm", said.text)
+        assertEquals(MusicProvider.SPOTIFY, said.provider)
+        // The same sentence without the colon, and the way a person would say it out loud.
+        assertEquals(
+            "rainy sunday",
+            AssistantParser.findMusic("find me music on YouTube that fits rainy sunday")?.text
+        )
+        assertEquals(
+            MusicProvider.YOUTUBE,
+            AssistantParser.findMusic("find me music on YouTube that fits rainy sunday")?.provider
+        )
+        assertEquals(
+            MusicProvider.YOUTUBE_MUSIC,
+            AssistantParser.findMusic("find music on YouTube Music that fits driving at night")?.provider
+        )
+        val soundcloud = AssistantParser.findMusic("find music on SoundCloud which suits a long walk")!!
+        assertEquals(MusicProvider.SOUNDCLOUD, soundcloud.provider)
+        assertEquals("a long walk", soundcloud.text)
+        assertEquals(
+            MusicProvider.JELLYFIN,
+            AssistantParser.findMusic("find music on Jellyfin that matches quiet focus")?.provider
+        )
+    }
+
+    @Test
+    fun `the service is optional, and the joiner comes off either way`() {
+        val plain = AssistantParser.findMusic("find music that fits: homesick")!!
+        assertEquals("homesick", plain.text)
+        assertNull(plain.provider)
+        // "goes with", "to suit", and a plain "for" are the same request in different words.
+        assertEquals("a slow morning", AssistantParser.findMusic("find music that goes with a slow morning")?.text)
+        assertEquals("a slow morning", AssistantParser.findMusic("find music for a slow morning")?.text)
+        assertEquals("a rainy day", AssistantParser.findMusic("find music on Spotify for a rainy day")?.text)
+        assertEquals("a rainy day", AssistantParser.findMusic("find music to suit a rainy day")?.text)
+    }
+
+    @Test
+    fun `a find request that is really a song stays a song request`() {
+        // "find music by the xx" names an artist: it is a search, not a mood, and the ordinary
+        // parser has to get it — this reader must not claim it first.
+        assertNull(AssistantParser.findMusic("find music by the xx"))
+        assertNull(AssistantParser.findMusic("find music"))
+        assertNull(AssistantParser.findMusic("play sunsets"))
+        // A feeling with no lead-in is left alone too: that is the mood cue path's job.
+        assertNull(AssistantParser.findMusic("i feel like something calm"))
+        // And a naming one is still read as a search, unchanged.
+        assertEquals("the xx sunsets", AssistantParser.parse("play the xx sunsets")?.phrase.lowercase())
+    }
+
 }

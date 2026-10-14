@@ -57,6 +57,14 @@ internal class MoodStore(context: Context) {
         get() = prefs.getString("openai_model", "").orEmpty()
         set(value) = prefs.edit().putString("openai_model", sanitizeOpenAiModel(value)).apply()
 
+    /**
+     * Where a mood reading goes looking for music. Defaults to the listener's own library, so an
+     * install that has never touched this setting asks no provider anything.
+     */
+    var searchTarget: MoodSearchTarget
+        get() = MoodSearchTarget.from(prefs.getString("search_target", null))
+        set(value) = prefs.edit().putString("search_target", value.id).apply()
+
     /** Whether the listener agreed to tag lookups against TheAudioDB's free metadata API. */
     var tagLookupEnabled: Boolean
         get() = prefs.getBoolean("tag_lookup", false)

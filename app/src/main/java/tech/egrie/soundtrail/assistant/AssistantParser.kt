@@ -3,6 +3,18 @@ package tech.egrie.soundtrail.assistant
 import tech.egrie.soundtrail.integrations.MusicProvider
 
 /**
+ * A "find me music that fits this" request: the words that describe the feeling, and the service
+ * to look on when one was named. This is the shape the Mood tab sends to a model, so a listener
+ * who types or says it in the Ask tab is asking the same question the card asks.
+ */
+internal data class MoodFindRequest(
+    /** The description of how they feel, with the request and the service taken off it. */
+    val text: String,
+    /** Where they asked for it to be found, or null when they left it to the app. */
+    val provider: MusicProvider? = null
+)
+
+/**
  * What a spoken request means, once the command words are off it.
  *
  * A dictation is a sentence: "hey soundtrail, can you play Sunsets by the XX on YouTube Music".
@@ -80,6 +92,35 @@ internal object AssistantParser {
         "put me in the mood", "make me a mix", "build a mix"
     )
 
+    /** "find music", "find me some music" — the lead of a request for a feeling. */
+    private val findMusicLead = Regex(
+        "^\\s*(?:please\\s+)?find\\s+(?:(?:me|us|some|any)\\s+){0,2}music\\b",
+        RegexOption.IGNORE_CASE
+    )
+
+    /**
+     * "on Spotify" in such a request: the service to look on. It may sit right after the lead —
+     * the commonest shape by far, "find music on YouTube that fits …" — or at the end, so the
+     * pattern is anchored on either a space or the start of what is left.
+     */
+    private val findMusicProvider = Regex(
+        "(?:^|\\s+)on\\s+(youtube music|youtube|spotify|soundcloud|jellyfin)\\b",
+        RegexOption.IGNORE_CASE
+    )
+
+    /**
+     * What joins the request to the words: "that fits", "which suits", "to match", or a plain
+     * "for". Removed before the feeling is read, so the mood engine is handed the feeling and
+     * not the grammar around it.
+     */
+    private val findMusicFits = Regex(
+        "^\\s*(?:(?:that|which|to)\\s+)?(?:fits?|matches?|suits?|goes\\s+with)\\b\\s*:?\\s*",
+        RegexOption.IGNORE_CASE
+    )
+
+    /** "find music for a slow morning": nothing joins the two halves but the word "for". */
+    private val findMusicFor = Regex("^\\s*for\\s+", RegexOption.IGNORE_CASE)
+
     /**
      * "the song …", "the track …" said before a title. The article is what makes it safe: the
      * bare words are only dropped when a title still has two words to stand on, so "Song 2"
@@ -137,6 +178,30 @@ internal object AssistantParser {
      * Turns dictation into plain words: curly quotes straightened, commas and full stops that a
      * recogniser inserts as pauses removed, runs of space collapsed.
      */
+    /**
+     * The feeling inside a "find music on Spotify that fits …" request, or null when the
+     * sentence is something else entirely.
+     *
+     * Only a sentence that is actually about a feeling is claimed: there has to be a joining
+     * phrase ("that fits"), a named service, or a mood cue. "Find music by the xx" is a song
+     * request, and is left for the ordinary parser to read as one.
+     */
+    fun findMusic(spoken: String): MoodFindRequest? {
+        val said = normalise(spoken)
+        val lead = findMusicLead.find(said) ?: return null
+        var rest = said.substring(lead.range.last + 1).trim()
+        var provider: MusicProvider? = null
+        findMusicProvider.find(rest)?.let { hit ->
+            provider = providerHints.firstOrNull { it.first == hit.groupValues[1].lowercase() }?.second
+            rest = rest.removeRange(hit.range).trim()
+        }
+        val joiner = findMusicFits.find(rest) ?: findMusicFor.find(rest)
+        if (joiner != null) rest = rest.removeRange(joiner.range).trim()
+        if (joiner == null && provider == null && !looksLikeAFeeling(said)) return null
+        val text = rest.trim(':').trim().trim('"').trim()
+        return text.takeIf { it.isNotBlank() }?.let { MoodFindRequest(it, provider) }
+    }
+
     private fun normalise(spoken: String): String = spoken
         .replace('\u2018', '\'').replace('\u2019', '\'').replace('\u201B', '\'')
         .replace('\u201C', '"').replace('\u201D', '"')

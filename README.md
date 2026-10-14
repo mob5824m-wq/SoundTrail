@@ -230,6 +230,12 @@ from whole command groups so the same check passes them. `drawable-nodpi/soundtr
 is the app's mark as a plain PNG: a car host loads an icon URI itself, and the `ic_soundtrail`
 mipmap id resolves to the adaptive **icon XML** on API 26+, which it could not decode.
 
+The app draws that same icon for its own logo: `BrandHeader`, the mark beside the wordmark at the
+top of every tab, renders `drawable/ic_soundtrail` rather than a second, hand-drawn copy of the
+mark. The icon's own padding is the adaptive icon's safe zone and its tile is the colour of the
+app's background, so what shows in the header is the pin; change the geometry in the generator and
+both the launcher icon and the in-app logo change together.
+
 The same file writes `drawable/ic_soundtrail_notification.xml`, the status-bar icon for the
 automation watch and the playback notification. Those are drawn at 24dp and tinted a single
 colour by the system, so that icon is a flat silhouette — the pin with the note knocked out of

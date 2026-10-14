@@ -127,6 +127,25 @@ Soundtrail validates the grant with a read-only `playlists.list` request. When *
    adb install app/build/outputs/apk/debug/app-debug.apk
    ```
 
+### The launcher icon
+
+The icon is generated, not hand-drawn: **`tools/build_icon.py`** holds the geometry (a lime map
+pin with a dark note and two sound ripples), writes the adaptive icon, the legacy vector, the
+Android 13+ themed silhouette, and every mipmap PNG, and validates each path first. Android reads
+vector path data in whole command groups, so a `c` carrying 22 numbers — three and a half
+groups — leaves the drawable wrong or undrawable; that is exactly what happened to the note in
+the previous icon. After changing the geometry, or anything in the palette it mirrors, run:
+
+```bash
+python3 tools/build_icon.py          # rewrites app/src/main/res/{drawable,mipmap-*}
+python3 tools/build_icon.py --check  # what CI runs; fails on drift or a malformed path
+```
+
+The generator uses [Pillow](https://python-pillow.org/) for the PNGs (`pip install pillow`);
+without it, the check still covers the XML drawables and every path. The generated geometry is
+kept inside the 66dp adaptive-icon safe circle, and the ripples are checked to stay inside the
+pin, so no launcher mask can crop the mark.
+
    Debug builds are signed with the key committed at `keystore/soundtrail-debug.p12` — the standard public debug credentials, `androiddebugkey` / `android` — rather than the per-machine `~/.android/debug.keystore`. Your build, the CI build, and every published release therefore share one signature, so a newer APK installs straight over an older one as an update. See *Updating an installed build* below for the one-time exception.
 
 3. Optionally install Spotify, YouTube Music, and/or SoundCloud. An installed music app is **not** required for saving a pin; a browser can open supported links. For YouTube Music, configure microG and sign in inside your compatible music app if that is how your device is set up.

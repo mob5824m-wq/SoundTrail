@@ -196,8 +196,16 @@ internal fun PinCard(
     }
 }
 
+/**
+ * One search result.
+ *
+ * Tapping the row pins the song — that is what the app is for. When the provider can play the
+ * whole track in its own app ([onPlay]), the row also carries a play button: Spotify is the case
+ * this exists for, where opening the song in Spotify plays it in full rather than as Soundtrail's
+ * 30-second preview.
+ */
 @Composable
-internal fun TrackRow(track: TrackResult, onPin: () -> Unit) {
+internal fun TrackRow(track: TrackResult, onPin: () -> Unit, onPlay: (() -> Unit)? = null) {
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Palette.surface)
             .clickable(onClick = onPin).padding(12.dp),
@@ -210,6 +218,19 @@ internal fun TrackRow(track: TrackResult, onPin: () -> Unit) {
                 style = MaterialTheme.typography.titleMedium)
             Text(track.artist, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodyMedium, color = Palette.secondary)
+        }
+        if (onPlay != null) {
+            Box(
+                Modifier.size(34.dp).clip(CircleShape).background(Palette.elevated)
+                    .clickable(onClick = onPlay),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Rounded.PlayArrow, contentDescription = "Play ${track.title} in ${track.provider.label}",
+                    tint = Palette.primary, modifier = Modifier.size(20.dp)
+                )
+            }
+            Spacer(Modifier.width(8.dp))
         }
         Icon(Icons.Rounded.Add, contentDescription = "Pin ${track.title}", tint = Palette.primary)
         Spacer(Modifier.width(5.dp))

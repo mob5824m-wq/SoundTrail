@@ -341,6 +341,15 @@ class MainActivity : ComponentActivity() {
                             model.notify("No YouTube Music app or browser found.")
                         }
                     },
+                    onPlayTrack = { track ->
+                        // The whole track in Spotify: a hand-off to an app the listener is
+                        // already signed in to, which is the only way a third-party app can
+                        // play a full Spotify song rather than its preview.
+                        val link = MusicLinkParser.parse(track.url)
+                        if (link == null || !apps.play(link)) {
+                            model.notify("Nothing can open ${track.provider.label} on this device.")
+                        }
+                    },
                     onOpenYoutubeLibrary = {
                         if (!apps.openYouTubeMusicLibrary()) {
                             model.notify("No YouTube Music app or browser found.")

@@ -26,6 +26,8 @@ import tech.egrie.soundtrail.data.MusicPin
 import tech.egrie.soundtrail.data.PinStore
 import tech.egrie.soundtrail.data.Playlist
 import tech.egrie.soundtrail.data.PlaylistItem
+import tech.egrie.soundtrail.data.LikedSongs
+import tech.egrie.soundtrail.data.consolidateLikes
 import tech.egrie.soundtrail.data.PlaylistStore
 import tech.egrie.soundtrail.data.StoredAudioFile
 import tech.egrie.soundtrail.integrations.AudioDbService
@@ -1440,17 +1442,22 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             try {
                 val imported: List<YouTubeImportedPlaylist> = withContext(Dispatchers.IO) { youtubeData.importPlaylists() }
                 val now = System.currentTimeMillis()
+                // One list for likes, whichever account they came from: an import goes into the
+                // liked list that already exists (whatever it is called) rather than creating a
+                // second one beside it.
+                val existingLikes = playlists.all()
+                    .firstOrNull { LikedSongs.isLikedName(it.name) && !it.id.startsWith("yt-pl:") }
+                    ?: playlists.all().firstOrNull { LikedSongs.isLikedName(it.name) }
                 val incoming = imported.map { yt ->
-                    // Keep YouTube and YouTube Music liked separate: rename YouTube's special playlists
-                    // so they don't mix with manually created YouTube Music liked playlists.
-                    val distinctName = when (yt.title) {
-                        "Liked videos" -> "YouTube Liked"
-                        "Uploads" -> "YouTube Uploads"
-                        "Favorites" -> "YouTube Favorites"
+                    val isLikes = yt.title == "Liked videos"
+                    val distinctName = when {
+                        isLikes -> LikedSongs.NAME
+                        yt.title == "Uploads" -> "YouTube Uploads"
+                        yt.title == "Favorites" -> "YouTube Favorites"
                         else -> yt.title
                     }
                     Playlist(
-                        id = "yt-pl:${yt.playlistId}",
+                        id = if (isLikes) existingLikes?.id ?: "yt-pl:${yt.playlistId}" else "yt-pl:${yt.playlistId}",
                         name = distinctName,
                         items = yt.items.map { video ->
                             PlaylistItem(
@@ -1466,6 +1473,25 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                     )
                 }
                 val (addedLists, addedItems) = withContext(Dispatchers.IO) { playlists.merge(incoming) }
+                // One list holds likes: a list an earlier import made is folded into the
+                // listener's own (or into the newest import's), and a name the app chose is
+                // renamed to what the list holds. Every row keeps the provider it came from.
+                runCatching {
+                    val lists = playlists.all()
+                    val target = lists.firstOrNull { LikedSongs.isLikedName(it.name) }
+                    if (target != null) {
+                        val (consolidated, moved) = consolidateLikes(lists, target.id)
+                        val renamed = consolidated.map {
+                            if (it.id == target.id && LikedSongs.isImportedName(it.name)) {
+                                it.copy(name = LikedSongs.NAME)
+                            } else {
+                                it
+                            }
+                        }
+                        val changed = moved > 0 || renamed != lists
+                        if (changed) playlists.replaceAll(renamed)
+                    }
+                }
                 youtubePrefs.edit().putLong("last_imported_at", now).apply()
                 refreshOfflineAudioState()
                 recordCloudSyncChanges()

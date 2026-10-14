@@ -81,7 +81,8 @@ import java.util.Locale
 @Composable
 internal fun MusicSearchScreen(
     state: AppState, onSearch: (String) -> Unit, onSelectProvider: (SearchProvider) -> Unit,
-    onConnect: () -> Unit, onSelectTrack: (TrackResult) -> Unit, onAddLink: (String) -> Unit,
+    onConnect: () -> Unit, onSelectTrack: (TrackResult) -> Unit, onPlayTrack: (TrackResult) -> Unit,
+    onAddLink: (String) -> Unit,
     onLookup: (String, String) -> Unit, onSelectLookup: (SongInfo) -> Unit,
     onSearchYoutubeMusic: (String) -> Unit, onOpenYoutubeLibrary: () -> Unit,
     onNotice: (String) -> Unit
@@ -247,7 +248,14 @@ internal fun MusicSearchScreen(
             }
         }
         items(state.results, key = { it.url }) { track ->
-            TrackRow(track) { onSelectTrack(track) }
+            TrackRow(
+                track,
+                onPin = { onSelectTrack(track) },
+                // Spotify is the one provider that plays in full somewhere else; its row says so.
+                onPlay = if (track.provider == MusicProvider.SPOTIFY) {
+                    { onPlayTrack(track) }
+                } else null
+            )
         }
         item {
             SurfaceCard(Modifier.fillMaxWidth()) {

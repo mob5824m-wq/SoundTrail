@@ -1298,7 +1298,11 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                     openAiModelLabels = emptyMap(),
                     aiReady = moodAi.configured,
                     aiNote = "Arena's gateway is filled in. Paste a key from the Keys page below, " +
-                        "then press Test."
+                        "then press Test: on Arena that sends one short reading as well, because " +
+                        "a model list proves nothing there. Arena's free-router keys are issued " +
+                        "for its own coding harnesses (Claude Code, the Code tab in Claude " +
+                        "Desktop, OpenCode) and are refused to everything else, this app " +
+                        "included; a key from a workspace with API access reads here."
                 )
             )
         }
@@ -1438,8 +1442,20 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         viewModelScope.launch {
             runCatching { moodAi.testConnection() }
                 .onSuccess { note ->
-                    _state.update { it.copy(mood = it.mood.copy(aiBusy = false, aiNote = note)) }
-                    notify(note)
+                    // A passing test says the endpoint answers; it does not say readings will use
+                    // it. That is the switch at the top of the card, and it is off on a fresh
+                    // install — so say so here, where someone who has just pasted a key is
+                    // looking, rather than leaving them to wonder why nothing ever goes out.
+                    val current = _state.value.mood
+                    val shown =
+                        if (!current.aiEnabled && current.aiProvider != MoodAiProvider.ON_DEVICE) {
+                            "$note Readings still come from the on-device engine until the switch " +
+                                "at the top of this card is on."
+                        } else {
+                            note
+                        }
+                    _state.update { it.copy(mood = it.mood.copy(aiBusy = false, aiNote = shown)) }
+                    notify(shown)
                 }
                 .onFailure { error ->
                     val message = error.message ?: "That model could not be reached."

@@ -208,13 +208,34 @@ internal class MoodAiService(private val store: MoodStore) {
                 listed.isEmpty() -> "Reached ${MoodAiUrls.display(base)}, but it lists no models."
                 else -> {
                     val hasChosen = chosen.isNotBlank() && listed.any { it == chosen }
-                    "Reached ${MoodAiUrls.display(base)} \u00b7 ${listed.size} model" +
+                    val listedNote = "Reached ${MoodAiUrls.display(base)} \u00b7 ${listed.size} model" +
                         (if (listed.size == 1) "" else "s") + " listed" +
                         when {
                             hasChosen -> ""
                             chosen.isBlank() -> " \u00b7 tap one to use it"
                             else -> " \u00b7 \u201C$chosen\u201D is not among them, tap one below"
                         }
+                    // A list is not an answer, and on Arena it is not even a promise of one: its
+                    // free router serves its own harnesses only, so a key can list models and be
+                    // refused every request — which is exactly what a listener who tested a key,
+                    // saw "reached", and then found an empty usage page has run into. The test
+                    // therefore asks one short reading, the same request the Mood tab makes, and
+                    // says so: that call is the only kind Arena counts, so a passing test is
+                    // something the listener can go and look at.
+                    // Nothing to ask with when no model is chosen yet: the list itself is the
+                    // answer then, and its "tap one to use it" is the next step.
+                    if (!MoodAiUrls.isArena(base) || chosen.isBlank()) {
+                        listedNote
+                    } else {
+                        val profile = readWithOpenAi(
+                            "a steady, curious mood",
+                            MoodContext(),
+                            MoodSearchTarget.default
+                        ).profile
+                        "$listedNote \u00b7 a reading came back as \u201C${profile.label}\u201D, so " +
+                            "this key answers here. That request is what appears in Arena's " +
+                            "usage — a model list is not what that page counts."
+                    }
                 }
             }
         }
@@ -337,10 +358,19 @@ internal class MoodAiService(private val store: MoodStore) {
             // The endpoint's own sentence is kept when it has one: an Arena gateway answering
             // "missing or invalid bearer token" says more than "rejected the key" ever could.
             code == 401 || code == 403 -> {
-                val advice =
-                    "The endpoint at $shown rejected the API key. Check the key, and that the " +
-                        "address is the API root — for OpenAI that is https://api.openai.com/v1."
-                detail?.let { "$advice The endpoint said: $it" } ?: advice
+                // A refusal about the client is not a refusal about the key, and Arena's is the
+                // one that happens in practice: its free-router keys are issued for its own
+                // coding harnesses, so no key the listener can create on that page serves this
+                // app. Blaming the key there would send them round the same loop again.
+                val refusal = MoodAiParser.openAiHarnessRefusal(body)
+                if (refusal != null) {
+                    MoodAiParser.describeOpenAiHarnessRefusal(base, refusal, detail)
+                } else {
+                    val advice =
+                        "The endpoint at $shown rejected the API key. Check the key, and that the " +
+                            "address is the API root — for OpenAI that is https://api.openai.com/v1."
+                    detail?.let { "$advice The endpoint said: $it" } ?: advice
+                }
             }
             code == 404 && detail != null -> detail
             code == 404 ->
@@ -786,6 +816,51 @@ internal object MoodAiParser {
         JSONObject(body).optJSONObject("error")?.optString("message")?.trim()
             ?.takeIf { it.isNotBlank() }?.take(200)
     }.getOrNull()
+
+    /**
+     * Arena's refusal code when its gateway turned the **client** away instead of rejecting the
+     * key.
+     *
+     * Arena's free-router keys are issued for Arena's own coding harnesses, so a request from
+     * anywhere else — this app included — comes back as `free_router_harness_restricted` rather
+     * than an answer. The code is read from `error.code`, `error.type`, or the top level, because
+     * the code is the part Arena's wording cannot change; a rejected key carries
+     * `invalid_request_error` instead and must keep the advice about the key. Null when the body
+     * says nothing of the kind.
+     */
+    fun openAiHarnessRefusal(body: String): String? {
+        val root = runCatching { JSONObject(body) }.getOrNull() ?: return null
+        val error = root.optJSONObject("error")
+        val codes = listOfNotNull(
+            error?.optString("code")?.takeIf(String::isNotBlank),
+            error?.optString("type")?.takeIf(String::isNotBlank),
+            root.optString("code").takeIf(String::isNotBlank),
+            root.optString("type").takeIf(String::isNotBlank)
+        ).map { it.trim().lowercase() }
+        return MoodAiUrls.ARENA_HARNESS_REFUSALS.firstOrNull { refusal -> refusal in codes }
+    }
+
+    /**
+     * What to say when Arena turned this app away.
+     *
+     * The key is not the problem, and saying that it is would send the listener off to create a
+     * key that was never going to work here. Arena's free-router keys are served to its own
+     * harnesses only, so no reading can run from this card on one — which is also why a refused
+     * request, which never reaches a model, leaves Arena's usage page empty. The gateway's own
+     * sentence is kept beside the advice when it sent one, and the code is named so it can be
+     * looked up in Arena's own documentation.
+     */
+    fun describeOpenAiHarnessRefusal(base: String, code: String, detail: String?): String {
+        val advice =
+            "${MoodAiUrls.display(base)} accepted the key and turned this app away. Arena's " +
+                "free-router keys are served only to Arena's own coding harnesses — Claude Code, " +
+                "the Code tab in Claude Desktop, and OpenCode — so a reading cannot run from " +
+                "here on one, and a request that is refused reaches no model and registers no " +
+                "usage. Use a key from a workspace with API access, or read with another " +
+                "provider."
+        val said = detail?.let { "Arena said: $it ($code)" } ?: "(Arena's code: $code)"
+        return "$advice $said"
+    }
 
     /**
      * Turns a socket failure at an OpenAI-compatible endpoint into something a listener can act

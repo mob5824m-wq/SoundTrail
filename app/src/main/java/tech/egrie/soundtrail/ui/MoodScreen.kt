@@ -419,7 +419,10 @@ private fun MoodReadingCard(mood: MoodUiState, actions: MoodActions, onNotice: (
                             onClick = {
                                 onNotice(
                                     "Create a key at ${MoodAiUrls.ARENA_KEYS_URL} \u2014 copy it " +
-                                        "while the dialog is open; it is not shown again."
+                                        "while the dialog is open; it is not shown again. Arena's " +
+                                        "free-router keys are for its own coding harnesses " +
+                                        "(Claude Code, the Code tab in Claude Desktop, OpenCode), " +
+                                        "so this card needs one from a workspace with API access."
                                 )
                             }
                         ) {

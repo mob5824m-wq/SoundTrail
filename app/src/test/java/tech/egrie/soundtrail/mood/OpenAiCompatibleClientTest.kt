@@ -320,6 +320,64 @@ class OpenAiCompatibleClientTest {
         assertNull(MoodAiParser.openAiError("not json"))
     }
 
+    @Test fun `a refusal about the app is told apart from a rejected key`() {
+        // Arena's free router is documented as serving its own harnesses only, so anything else
+        // is turned away with a code of its own. The sentence around it is Arena's to reword, so
+        // the code is the part that is read.
+        assertEquals(
+            "free_router_harness_restricted",
+            MoodAiParser.openAiHarnessRefusal(
+                "{\"error\":{\"code\":\"free_router_harness_restricted\"," +
+                    "\"message\":\"This key is limited to interactive Claude Code sessions.\"}}"
+            )
+        )
+        // Cowork, print mode and the Agent SDK get the other code, and `type` carries it too.
+        assertEquals(
+            "organization_client_restricted",
+            MoodAiParser.openAiHarnessRefusal(
+                "{\"error\":{\"type\":\"organization_client_restricted\",\"message\":\"Not enabled.\"}}"
+            )
+        )
+        // The code is matched case-insensitively, and at the top level as well.
+        assertEquals(
+            "free_router_harness_restricted",
+            MoodAiParser.openAiHarnessRefusal("{\"code\":\"FREE_ROUTER_HARNESS_RESTRICTED\"}")
+        )
+        // A bad key is not a harness refusal: that one keeps the advice about the key.
+        assertNull(
+            MoodAiParser.openAiHarnessRefusal(
+                "{\"error\":{\"message\":\"Incorrect API key provided: sk-***\"," +
+                    "\"type\":\"invalid_request_error\"}}"
+            )
+        )
+        assertNull(MoodAiParser.openAiHarnessRefusal("{\"detail\":\"nope\"}"))
+        assertNull(MoodAiParser.openAiHarnessRefusal("not json"))
+    }
+
+    @Test fun `a refused app is told the key is not the problem, and a refusal is not usage`() {
+        val sentence = MoodAiParser.describeOpenAiHarnessRefusal(
+            "https://api.preview.arena.ai/v1",
+            "free_router_harness_restricted",
+            "This key is limited to interactive Claude Code sessions."
+        )
+        assertTrue(sentence.contains("api.preview.arena.ai/v1"))
+        assertTrue(sentence.contains("free-router"))
+        assertTrue(sentence.contains("Claude Code"))
+        assertTrue(sentence.contains("usage"))
+        assertTrue(sentence.contains("workspace with API access"))
+        assertTrue(sentence.contains("This key is limited to interactive Claude Code sessions."))
+        assertTrue(sentence.contains("free_router_harness_restricted"))
+        // The advice stands on its own when Arena sent no sentence of its own.
+        val bare = MoodAiParser.describeOpenAiHarnessRefusal(
+            "https://api.preview.arena.ai/v1",
+            "organization_client_restricted",
+            null
+        )
+        assertTrue(bare.contains("workspace with API access"))
+        assertTrue(bare.contains("organization_client_restricted"))
+        assertTrue(!bare.contains("Arena said"))
+    }
+
     @Test fun `an unreachable endpoint says what to check, and localhost is the phone`() {
         val loopback = MoodAiParser.describeOpenAiNetworkFailure(
             "http://localhost:8000/v1",

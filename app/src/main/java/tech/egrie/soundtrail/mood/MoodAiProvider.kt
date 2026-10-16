@@ -214,6 +214,22 @@ internal object MoodAiUrls {
         "max-v0"
     )
 
+    /**
+     * The refusals Arena's gateway makes about the **client** rather than the key.
+     *
+     * Arena's free router is documented as serving its own harnesses — interactive Claude Code,
+     * the Code tab in Claude Desktop, and OpenCode — so a request from anything else is turned
+     * away with `free_router_harness_restricted`, and a client the workspace blocks (Cowork,
+     * print mode, the Agent SDK) with `organization_client_restricted`. Both are recognised by
+     * code and never by wording, so a reworded sentence on Arena's side cannot change the advice
+     * the app gives, and a genuinely bad key — which answers `invalid_request_error` — keeps the
+     * advice about the key.
+     */
+    val ARENA_HARNESS_REFUSALS = listOf(
+        "free_router_harness_restricted",
+        "organization_client_restricted"
+    )
+
     /** The router alias to use from an Arena model list: the preferred one, else the first present. */
     fun arenaRouterFrom(models: List<String>): String? =
         ARENA_ROUTER_MODELS.firstOrNull { alias -> models.any { it == alias } }

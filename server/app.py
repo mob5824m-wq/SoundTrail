@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import uuid
+import backup as managed_backups
 from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -750,19 +751,55 @@ def make_handler(db_path: str):
     return Handler
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"Ignoring {name}: expected a whole number, got {raw!r}.", flush=True)
+        return default
+
+
 def serve() -> None:
     db_path = os.environ.get("SOUNDTRAIL_DB") or str(DEFAULT_DB_PATH)
     host = os.environ.get("SOUNDTRAIL_HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8080"))
     initialize_db(db_path)
+
+    # Managed backups are part of the service, not an external cron job to remember. The thread
+    # takes a verified snapshot at startup and then on the interval, pruning old versions. Set
+    # SOUNDTRAIL_BACKUP_INTERVAL_SECONDS=0 to turn it off and manage copies yourself.
+    backup_stop = threading.Event()
+    backup_interval = max(
+        0,
+        _env_int("SOUNDTRAIL_BACKUP_INTERVAL_SECONDS", managed_backups.DEFAULT_INTERVAL_SECONDS),
+    )
+    backup_keep = max(1, _env_int("SOUNDTRAIL_BACKUP_KEEP", managed_backups.DEFAULT_KEEP))
+    if backup_interval > 0:
+        threading.Thread(
+            target=managed_backups.backup_loop,
+            args=(db_path, None, backup_keep, backup_interval, backup_stop),
+            name="soundtrail-managed-backups",
+            daemon=True,
+        ).start()
+
     httpd = ThreadingHTTPServer((host, port), make_handler(db_path))
     httpd.daemon_threads = True
     print(f"Soundtrail encrypted-sync API listening on {host}:{port}; database={db_path}")
+    if backup_interval > 0:
+        folder = managed_backups.default_backup_dir(Path(db_path))
+        print(
+            f"Managed backups: every {backup_interval}s into {folder} "
+            f"(keeping {backup_keep}); set SOUNDTRAIL_BACKUP_INTERVAL_SECONDS=0 to disable."
+        )
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        backup_stop.set()
         httpd.server_close()
 
 

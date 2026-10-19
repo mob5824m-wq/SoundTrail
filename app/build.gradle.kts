@@ -79,9 +79,18 @@ dependencies {
     implementation("androidx.media:media:1.7.0")
     // Google Sign-In APIs are used for the user's explicit, read-only YouTube OAuth consent.
     implementation("com.google.android.gms:play-services-auth:21.3.0")
+    // Optional activity recognition (Transition API). Off by default: motion is inferred from
+    // GPS speed unless the listener switches Google activity recognition on, and that path is
+    // guarded at runtime so a phone without Play services keeps working.
+    implementation("com.google.android.gms:play-services-location:21.3.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
+    // On-device smoke tests. They need a device or emulator to run, and CI compiles them
+    // (:app:assembleDebugAndroidTest) so they cannot rot between releases.
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:core-ktx:1.6.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
     // Real org.json for JVM unit tests (the android.jar copy is stubbed locally).
     testImplementation("org.json:json:20240303")
 }

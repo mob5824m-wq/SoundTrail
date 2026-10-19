@@ -131,7 +131,10 @@ internal fun mergePlaylists(existing: List<Playlist>, incoming: List<Playlist>):
 }
 
 /** Private playlist store; optional sync sends only encrypted metadata, never audio files. */
-class PlaylistStore(context: Context) {
+class PlaylistStore(
+    context: Context,
+    private val onChanged: (() -> Unit)? = null
+) {
     private val prefs = context.getSharedPreferences("soundtrail_playlists", Context.MODE_PRIVATE)
 
     fun all(): List<Playlist> {
@@ -249,5 +252,6 @@ class PlaylistStore(context: Context) {
             })
         }
         prefs.edit().putString("playlists", array.toString()).apply()
+        onChanged?.invoke()
     }
 }

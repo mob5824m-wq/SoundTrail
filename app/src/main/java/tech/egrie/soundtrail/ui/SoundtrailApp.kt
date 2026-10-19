@@ -138,6 +138,7 @@ internal fun SoundtrailApp(
     backupBusy: Boolean,
     onExportBackup: () -> Unit,
     onImportBackup: () -> Unit,
+    managedBackups: ManagedBackupControls,
     onCreateCloudSyncAccount: (server: String, email: String, password: String) -> Unit,
     onSignInCloudSync: (server: String, email: String, password: String) -> Unit,
     onUnlockCloudSync: (String) -> Unit,
@@ -196,6 +197,16 @@ internal fun SoundtrailApp(
                 TextButton(onClick = { pendingDelete = null }) { Text("Keep it") }
             },
             containerColor = Palette.elevated
+        )
+    }
+
+    // The destination question belongs to the app, not to the Mood tab: a spoken request on the
+    // Ask tab can trigger a model reading too, and it must ask from wherever the listener is.
+    state.mood.consentRequest?.let { request ->
+        MoodAiConsentDialog(
+            request = request,
+            onConfirm = mood.onConfirmAiConsent,
+            onCancel = mood.onCancelAiConsent
         )
     }
 
@@ -274,6 +285,7 @@ internal fun SoundtrailApp(
                     onConnectYouTubeData, onConnectYouTubeOAuth, onDisconnectYouTubeData, onOpenYouTubeSetup,
                     onImportYouTubePlaylists, onSetYouTubeAutoImport,
                     backupBusy, onExportBackup, onImportBackup,
+                    managedBackups,
                     state.syncBusy, onCreateCloudSyncAccount, onSignInCloudSync,
                     onUnlockCloudSync, onSyncCloudData, onShowCloudRecoveryKey,
                     onForgetCloudRecoveryKey, onDismissCloudRecoveryKey, onSetCloudSyncAutoEnabled,

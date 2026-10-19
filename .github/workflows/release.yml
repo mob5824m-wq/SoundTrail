@@ -49,7 +49,7 @@ jobs:
 
       # Tests and APK build finish before anything is pushed, so a failure leaves main untouched.
       - name: Test and build the release APK
-        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug --stacktrace
+        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
 
       - name: Commit, tag, and push the release version
         env:

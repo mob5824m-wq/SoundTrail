@@ -587,8 +587,6 @@ internal class MoodAiService(private val store: MoodStore) {
     }
 
     companion object {
-        private const val GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
-
         /** Long enough for a cloud model to answer, short enough to notice a dead connection. */
         private const val GEMINI_READ_TIMEOUT_MS = 30_000
 

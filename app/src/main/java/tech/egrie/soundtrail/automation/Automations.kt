@@ -6,8 +6,17 @@ import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.abs
 
-/** Motion inferred on-device from GPS speed; no Play Services or activity API involved. */
+/** The app's motion vocabulary. GPS speed is the default source; see [MotionSource]. */
 enum class MotionKind(val label: String) { STATIONARY("Stationary"), WALKING("Walking"), RUNNING("Running"), DRIVING("Driving") }
+
+/**
+ * Where a motion reading came from. Google's activity recognition is optional and off by
+ * default; when it is not in use, every reading is [GPS].
+ */
+enum class MotionSource(val label: String) {
+    GPS("GPS speed"),
+    ACTIVITY_RECOGNITION("Google activity recognition")
+}
 
 /** Pure speed-based classification. Speeds are m/s; NaN/negative counts as stationary. */
 object MotionClassifier {
@@ -98,7 +107,10 @@ object AutomationEngine {
 }
 
 /** Persists rules and local last-fired timestamps; optional sync sends rules only as ciphertext. */
-class AutomationStore(context: Context) {
+class AutomationStore(
+    context: Context,
+    private val onChanged: (() -> Unit)? = null
+) {
     private val prefs = context.getSharedPreferences("soundtrail_automations", Context.MODE_PRIVATE)
 
     fun all(): List<AutomationRule> {
@@ -174,6 +186,7 @@ class AutomationStore(context: Context) {
             })
         }
         prefs.edit().putString("rules", array.toString()).apply()
+        onChanged?.invoke()
     }
 }
 
@@ -181,6 +194,8 @@ class AutomationStore(context: Context) {
 data class WatchStatus(
     val running: Boolean = false,
     val motion: MotionKind = MotionKind.STATIONARY,
+    /** Which source produced [motion], so the UI can say so honestly. */
+    val motionSource: MotionSource = MotionSource.GPS,
     val location: GeoPoint? = null,
     val minuteOfDay: Int = 0,
     val updatedAt: Long = 0L

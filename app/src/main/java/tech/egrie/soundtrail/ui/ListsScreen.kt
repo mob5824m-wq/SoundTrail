@@ -62,6 +62,7 @@ import tech.egrie.soundtrail.AppState
 import tech.egrie.soundtrail.OfflineAudioItem
 import tech.egrie.soundtrail.automation.AutomationRule
 import tech.egrie.soundtrail.automation.MotionKind
+import tech.egrie.soundtrail.automation.MotionSource
 import tech.egrie.soundtrail.data.Playlist
 import tech.egrie.soundtrail.data.PlaylistItem
 import tech.egrie.soundtrail.integrations.MusicLinkParser
@@ -74,6 +75,8 @@ import java.util.UUID
 /** Everything the Lists tab can ask the app to do. */
 data class ListsActions(
     val onToggleWatch: (Boolean) -> Unit,
+    /** Opt in or out of Google's activity recognition as a second motion source. */
+    val onToggleActivityRecognition: (Boolean) -> Unit,
     val onToggleAutoSearch: (Boolean) -> Unit,
     val onNewPlaylist: (String) -> Unit,
     val onDeletePlaylist: (String) -> Unit,
@@ -356,7 +359,12 @@ private fun WatchCard(state: AppState, actions: ListsActions) {
                 Text(
                     if (state.watchStatus.running) {
                         val fix = state.watchStatus.location
-                        "${state.watchStatus.motion.label} · ${state.watchStatus.clock()}" +
+                        val source = if (state.watchStatus.motionSource == MotionSource.ACTIVITY_RECOGNITION) {
+                            " · ${state.watchStatus.motionSource.label}"
+                        } else {
+                            ""
+                        }
+                        "${state.watchStatus.motion.label}$source · ${state.watchStatus.clock()}" +
                             fix?.let { " · ${"%.4f, %.4f".format(it.latitude, it.longitude)}" }.orEmpty()
                     } else {
                         "Off · ${"%02d:%02d".format(nowMinute / 60, nowMinute % 60)} now"
@@ -369,6 +377,28 @@ private fun WatchCard(state: AppState, actions: ListsActions) {
         Spacer(Modifier.height(8.dp))
         Text("Uses a visible notification. Location stays on this device.",
             color = Palette.muted, style = MaterialTheme.typography.labelMedium)
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Google activity recognition", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Optional. Uses Google Play services when it is available for walking, " +
+                        "running, cycling, and driving; cycling counts as running. GPS speed " +
+                        "stays the fallback.",
+                    color = Palette.secondary, style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            Switch(
+                checked = state.activityRecognitionEnabled,
+                onCheckedChange = actions.onToggleActivityRecognition
+            )
+        }
+        Text(
+            "Off by default. When on, Play services processes motion sensor data on the device " +
+                "and Soundtrail receives only the activity type. Google's terms apply; " +
+                "coordinates never leave the device.",
+            color = Palette.muted, style = MaterialTheme.typography.labelMedium
+        )
         Spacer(Modifier.height(10.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {

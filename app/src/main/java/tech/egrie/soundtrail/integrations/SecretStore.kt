@@ -23,7 +23,11 @@ internal enum class SecretState {
 }
 
 /**
- * Secrets encrypted at rest with a non-exportable Android Keystore key; app backups are disabled.
+ * Secrets encrypted at rest with a non-exportable Android Keystore key.
+ *
+ * Android Auto Backup, the app's managed snapshots, and JSON exports all exclude this store. A
+ * Keystore key does not leave the device it was created on, so copied ciphertext would be
+ * unreadable anyway; excluding it keeps that from being a privacy claim with no upside.
  *
  * Two deliberate properties make stored logins survive app updates and restarts:
  *

@@ -26,6 +26,7 @@ import androidx.lifecycle.ViewModelProvider
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInStatusCodes
 import com.google.android.gms.common.api.ApiException
+import tech.egrie.soundtrail.automation.GoogleActivityMotion
 import tech.egrie.soundtrail.automation.LocationWatchService
 import tech.egrie.soundtrail.data.GeoPoint
 import tech.egrie.soundtrail.data.MusicPin
@@ -39,6 +40,7 @@ import tech.egrie.soundtrail.integrations.YouTubeSearch
 import tech.egrie.soundtrail.location.DeviceLocation
 import tech.egrie.soundtrail.ui.AssistantActions
 import tech.egrie.soundtrail.ui.ListsActions
+import tech.egrie.soundtrail.ui.ManagedBackupControls
 import tech.egrie.soundtrail.ui.MoodActions
 import tech.egrie.soundtrail.ui.Palette
 import tech.egrie.soundtrail.ui.PinDraft
@@ -114,6 +116,16 @@ class MainActivity : ComponentActivity() {
                 if (located) startWatch()
                 else model.notify("Location permission is needed to watch for triggers.")
             }
+            // Google's activity recognition is optional. The permission is asked for only when
+            // the listener turns it on, and refusing it leaves GPS speed in place.
+            val activityRecognitionPermission = rememberLauncherForActivityResult(
+                ActivityResultContracts.RequestPermission()
+            ) { granted ->
+                if (granted) model.setActivityRecognitionEnabled(true)
+                else model.notify(
+                    "Activity recognition was not allowed. Motion still comes from GPS speed."
+                )
+            }
             // Picking the user's own audio file for a playlist song (imported, plays offline).
             var importTarget by mutableStateOf<Pair<String, PlaylistItem>?>(null)
             val audioPicker = rememberLauncherForActivityResult(
@@ -136,6 +148,26 @@ class MainActivity : ComponentActivity() {
                         ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
                     }
                     if (needed.isEmpty()) startWatch() else watchPermissions.launch(needed.toTypedArray())
+                }
+            }
+            val toggleActivityRecognition: (Boolean) -> Unit = { enable ->
+                when {
+                    !enable -> model.setActivityRecognitionEnabled(false)
+                    // Checked only when the switch is touched, so a listener who never opts in
+                    // never causes a Play services lookup.
+                    !GoogleActivityMotion.available(this) ->
+                        model.notify(
+                            "Google Play services isn't available on this device, so activity " +
+                                "recognition can't be used. Motion still comes from GPS speed."
+                        )
+                    Build.VERSION.SDK_INT < 29 ||
+                        ContextCompat.checkSelfPermission(
+                            this, Manifest.permission.ACTIVITY_RECOGNITION
+                        ) == PackageManager.PERMISSION_GRANTED ->
+                        model.setActivityRecognitionEnabled(true)
+                    else -> activityRecognitionPermission.launch(
+                        Manifest.permission.ACTIVITY_RECOGNITION
+                    )
                 }
             }
             val onLocate: () -> Unit = {
@@ -213,6 +245,7 @@ class MainActivity : ComponentActivity() {
                     nowPlaying = model.player.state,
                     lists = ListsActions(
                         onToggleWatch = toggleWatch,
+                        onToggleActivityRecognition = toggleActivityRecognition,
                         onToggleAutoSearch = model::setAutoSearchYoutube,
                         onNewPlaylist = model::createPlaylist,
                         onDeletePlaylist = model::deletePlaylist,
@@ -266,6 +299,9 @@ class MainActivity : ComponentActivity() {
                         onImproveTags = { model.improveMoodMix() },
                         onSetTagLookup = model::setMoodTagLookup,
                         onSetAiEnabled = model::setMoodAiEnabled,
+                        onConfirmAiConsent = model::confirmMoodAiConsent,
+                        onCancelAiConsent = model::cancelMoodAiConsent,
+                        onForgetAiConsent = model::forgetMoodAiConsent,
                         onSetAiProvider = model::setMoodAiProvider,
                         onSetAiModel = model::setMoodAiModel,
                         onSetOllamaUrl = model::setMoodOllamaUrl,
@@ -326,6 +362,13 @@ class MainActivity : ComponentActivity() {
                             model.notify("No file picker is available on this device.")
                         }
                     },
+                    managedBackups = ManagedBackupControls(
+                        status = state.managedBackups,
+                        onBackupNow = model::backupLocalNow,
+                        onRestore = model::restoreManagedBackup,
+                        onToggleEnabled = model::setManagedBackupsEnabled,
+                        onDeleteAll = model::deleteManagedBackups
+                    ),
                     onCreateCloudSyncAccount = model::createCloudSyncAccount,
                     onSignInCloudSync = model::signInCloudSync,
                     onUnlockCloudSync = model::unlockCloudSync,

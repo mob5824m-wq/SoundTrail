@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ backup and device-transfer rules.
+
+  The same allowlist as backup_rules.xml: the listener's own pins, playlists, and automation
+  rules may go to their Google account or travel to a new phone. Credentials (Keystore
+  ciphertext in soundtrail_secrets, the cloud-sync session, Google auth status), server settings,
+  the mood settings and last mood description, the activity-recognition opt-in, audio files, and
+  Soundtrail's own managed snapshots never do. Auto Backup is best-effort and entirely controlled
+  by the phone's system settings; the app's managed snapshots on the Connect tab are the backup
+  that does not depend on it.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="sharedpref" path="soundtrail_pins.xml" />
+        <include domain="sharedpref" path="soundtrail_playlists.xml" />
+        <include domain="sharedpref" path="soundtrail_automations.xml" />
+
+        <exclude domain="sharedpref" path="soundtrail_secrets.xml" />
+        <exclude domain="sharedpref" path="soundtrail_mood.xml" />
+        <exclude domain="sharedpref" path="soundtrail_mood_consent.xml" />
+        <exclude domain="sharedpref" path="soundtrail_activity_recognition.xml" />
+        <exclude domain="sharedpref" path="soundtrail_cloud_sync.xml" />
+        <exclude domain="sharedpref" path="soundtrail_google_auth.xml" />
+        <exclude domain="sharedpref" path="soundtrail_settings.xml" />
+        <exclude domain="sharedpref" path="soundtrail_youtube.xml" />
+        <exclude domain="sharedpref" path="soundtrail_backups.xml" />
+        <exclude domain="file" path="audio" />
+        <exclude domain="file" path="managed-backups" />
+    </cloud-backup>
+
+    <device-transfer>
+        <include domain="sharedpref" path="soundtrail_pins.xml" />
+        <include domain="sharedpref" path="soundtrail_playlists.xml" />
+        <include domain="sharedpref" path="soundtrail_automations.xml" />
+
+        <exclude domain="sharedpref" path="soundtrail_secrets.xml" />
+        <exclude domain="sharedpref" path="soundtrail_mood.xml" />
+        <exclude domain="sharedpref" path="soundtrail_mood_consent.xml" />
+        <exclude domain="sharedpref" path="soundtrail_activity_recognition.xml" />
+        <exclude domain="sharedpref" path="soundtrail_cloud_sync.xml" />
+        <exclude domain="sharedpref" path="soundtrail_google_auth.xml" />
+        <exclude domain="sharedpref" path="soundtrail_settings.xml" />
+        <exclude domain="sharedpref" path="soundtrail_youtube.xml" />
+        <exclude domain="sharedpref" path="soundtrail_backups.xml" />
+        <exclude domain="file" path="audio" />
+        <exclude domain="file" path="managed-backups" />
+    </device-transfer>
+</data-extraction-rules>

@@ -5,6 +5,13 @@
     python3 run.py --setup      # only prepare the environment, do not start
     python3 run.py --test       # run the API test suite inside the environment
 
+Managed backups use the standard library only, so they work even before (or without) a venv:
+
+    python3 run.py backup       # write a verified snapshot now
+    python3 run.py list         # snapshots, newest first
+    python3 run.py verify       # check the newest snapshot
+    python3 run.py restore NAME --yes   # replace the database (stop the server first)
+
 Requires Python 3.10+ on the PATH (`py -3` on Windows). The sync API needs only the
 standard library; yt-dlp is needed only for the optional YouTube audio endpoint, and
 FFmpeg is needed by yt-dlp to assemble some audio streams.
@@ -87,6 +94,13 @@ def check_ffmpeg() -> None:
 
 
 def main(argv: list[str]) -> int:
+    # The backup tool is stdlib-only and deliberately usable before dependencies are installed.
+    if argv and argv[0] in {"backup", "list", "verify", "restore"}:
+        command = [sys.executable, str(SERVER_DIR / "backup.py"), *argv]
+        try:
+            return subprocess.call(command, cwd=SERVER_DIR)
+        except KeyboardInterrupt:
+            return 0
     ensure_environment()
     if "--setup" in argv:
         check_ffmpeg()

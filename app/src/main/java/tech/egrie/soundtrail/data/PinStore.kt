@@ -6,7 +6,10 @@ import org.json.JSONObject
 import tech.egrie.soundtrail.integrations.MusicLinkParser
 
 /** Private pin store; optional cloud sync exports only encrypted, user-authorized snapshots. */
-class PinStore(context: Context) {
+class PinStore(
+    context: Context,
+    private val onChanged: (() -> Unit)? = null
+) {
     private val prefs = context.getSharedPreferences("soundtrail_pins", Context.MODE_PRIVATE)
 
     fun all(): List<MusicPin> {
@@ -71,5 +74,6 @@ class PinStore(context: Context) {
             })
         }
         prefs.edit().putString("pins", array.toString()).apply()
+        onChanged?.invoke()
     }
 }

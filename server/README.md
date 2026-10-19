@@ -35,6 +35,44 @@ The server is plain Python. It runs on Linux, macOS, Windows, and BSD, on x86-64
 
 The SQLite database is created at `server/data/soundtrail.sqlite3`. Set `SOUNDTRAIL_DB` to store it elsewhere (for example on a dedicated disk).
 
+## Managed backups
+
+The service backs up its own database. A daemon thread takes a consistent copy through SQLite's
+online backup API at startup and then every 24 hours, verifies it with `PRAGMA integrity_check`,
+writes a SHA-256 sidecar, and deletes older snapshots beyond the retention count. Snapshot files
+are named `soundtrail-YYYYmmdd-HHMMSS-ffffff.sqlite3` and live in `<database folder>/backups` by
+default.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SOUNDTRAIL_BACKUP_DIR` | `<database folder>/backups` | Where snapshots and their `.sha256` sidecars are written. |
+| `SOUNDTRAIL_BACKUP_INTERVAL_SECONDS` | `86400` | Seconds between automatic snapshots. `0` turns the thread off (for example when an external backup tool owns the database). |
+| `SOUNDTRAIL_BACKUP_KEEP` | `7` | How many snapshots remain after a successful backup. |
+
+The same code works from the command line, with or without the virtual environment:
+
+```bash
+cd server
+python3 run.py backup                 # write and verify a snapshot now
+python3 run.py list                   # newest first, with sizes and checksum state
+python3 run.py verify                 # verify the newest snapshot
+python3 run.py verify soundtrail-20261019-120000-000000.sqlite3
+python3 run.py restore NAME --yes     # replace the live database (see below)
+```
+
+`restore` verifies the snapshot's checksum and integrity first, takes a safety snapshot of the
+current database, then replaces it. **Stop the service before restoring** and start it again
+afterwards. The command refuses to run without `--yes`, and a name that is not a bare snapshot
+file in the backup folder is rejected, so it cannot read or overwrite an arbitrary path.
+Pass the exact name that `list` printed.
+
+A snapshot is the whole database, not the decrypted library: sync payloads stay AES-256-GCM
+ciphertext. It still contains account email addresses, password hashes, session metadata, event
+metadata, and ciphertext sizes, exactly as the live database does. Treat the backup folder as
+sensitive (`0o700` is applied where the platform supports it), keep it on a volume only the
+service user can read, and copy snapshots off-host. Backups on the same disk do not survive a
+lost volume or a hosting account closure.
+
 ### Run as a background service
 
 Use your platform's service manager so the API restarts after reboots. Run it as a dedicated, unprivileged user.
@@ -66,15 +104,23 @@ Then run `sudo systemctl daemon-reload && sudo systemctl enable --now soundtrail
 
 ### Back up the database
 
-Back up the database, not a live copy. Stop the service, then archive the whole `data` folder (the database plus its WAL side-files):
+The service already writes and verifies its own snapshots — see [Managed backups](#managed-backups)
+above. Those copies are taken through SQLite's online backup API, so the service does not need to
+be stopped, and each one is checksummed and pruned.
+
+A whole-folder archive is still useful before an upgrade or when moving hosts. Stop the service
+and archive the database plus its WAL side-files:
 
 ```bash
 # Linux/macOS, from the server folder, with the service stopped
-mkdir -p backups && chmod 700 backups
-tar -czf backups/soundtrail-data.tar.gz -C . data
+mkdir -p /secure/offsite && chmod 700 /secure/offsite
+tar -czf /secure/offsite/soundtrail-data.tar.gz -C . data
 ```
 
-On Windows, stop the task and copy the `data` folder to a safe location. To restore, stop the service, keep a copy of the current folder, and replace the `data` folder (or the `SOUNDTRAIL_DB` location) with the backup contents. Test restoration, and keep an off-host copy.
+On Windows, stop the task and copy the `data` folder to a safe location. To restore an archive,
+stop the service, keep a copy of the current folder, and replace the `data` folder (or the
+`SOUNDTRAIL_DB` location) with the archived contents. Test restoration, and keep an off-host copy
+outside the server's own volume.
 
 The `/health` endpoint reports liveness only. Extraction needs outbound network access to YouTube and enough temporary disk space for up to two concurrent 250 MiB downloads plus working files.
 
@@ -106,6 +152,9 @@ Each account's cursor is independent and every sync read/write is scoped to that
 - `PORT` — listen port (default `8080`).
 - `SOUNDTRAIL_HOST` — listen address (default `127.0.0.1`; keep it on loopback behind a TLS proxy).
 - `SOUNDTRAIL_DB` — SQLite file (default `server/data/soundtrail.sqlite3`).
+- `SOUNDTRAIL_BACKUP_DIR` — snapshot folder (default `<database folder>/backups`).
+- `SOUNDTRAIL_BACKUP_INTERVAL_SECONDS` — seconds between automatic snapshots (default `86400`; `0` disables the background thread).
+- `SOUNDTRAIL_BACKUP_KEEP` — snapshots retained after a successful backup (default `7`).
 
 The API intentionally has no password-reset or key-recovery endpoint. If a user loses their 256-bit recovery key, resetting the account password cannot recover encrypted content. Account deletion removes remote encrypted data; it does not erase the user's local device library. If the database is lost, only a database backup can restore the encrypted event log and checkpoints.
 

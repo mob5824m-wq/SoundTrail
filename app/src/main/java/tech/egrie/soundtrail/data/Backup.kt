@@ -20,10 +20,9 @@ internal data class BackupContents(
  * One versioned JSON document holding every kind of local data Soundtrail keeps:
  * pins, playlists (with their songs), and automation rules.
  *
- * The point is that a reinstall or a new phone must not be a data-loss event — see the
- * README's "no export/import" gap this closes. Account logins are deliberately *not*
- * included: those tokens live in Android Keystore-encrypted storage and are re-entered
- * by connecting again. Imported audio files are also excluded; they belong to the device
+ * The point is that a reinstall or a new phone must not be a data-loss event. Account logins
+ * are deliberately *not* included: those tokens live in Android Keystore-encrypted storage and
+ * are re-entered by connecting again. Imported audio files are also excluded; they belong to the device
  * they were copied on, so a backup carries only the song entry (with its local-file name
  * kept as a hint for same-device restores).
  *

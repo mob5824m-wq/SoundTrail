@@ -8,6 +8,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -15,13 +17,19 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import tech.egrie.soundtrail.automation.ActivityRecognitionStore
 import tech.egrie.soundtrail.automation.AutomationRule
 import tech.egrie.soundtrail.automation.AutomationStore
+import tech.egrie.soundtrail.automation.GoogleActivityMotion
 import tech.egrie.soundtrail.automation.LocationWatchService
+import tech.egrie.soundtrail.data.BackupContents
 import tech.egrie.soundtrail.data.BackupException
 import tech.egrie.soundtrail.data.BackupFormat
 import tech.egrie.soundtrail.data.FileStore
 import tech.egrie.soundtrail.data.GeoPoint
+import tech.egrie.soundtrail.data.ManagedBackup
+import tech.egrie.soundtrail.data.ManagedBackupStore
+import tech.egrie.soundtrail.data.ManagedBackupStatus
 import tech.egrie.soundtrail.data.MusicPin
 import tech.egrie.soundtrail.data.PinStore
 import tech.egrie.soundtrail.data.Playlist
@@ -57,6 +65,9 @@ import tech.egrie.soundtrail.location.DeviceLocation
 import tech.egrie.soundtrail.mood.DEFAULT_OLLAMA_MODEL
 import tech.egrie.soundtrail.mood.MoodAiException
 import tech.egrie.soundtrail.mood.MoodAiOutcome
+import tech.egrie.soundtrail.mood.MoodAiConsent
+import tech.egrie.soundtrail.mood.MoodAiConsentPrompt
+import tech.egrie.soundtrail.mood.MoodAiDestination
 import tech.egrie.soundtrail.mood.MoodAiProvider
 import tech.egrie.soundtrail.mood.MoodAiService
 import tech.egrie.soundtrail.mood.MoodAiUrls
@@ -141,6 +152,10 @@ internal data class AppState(
     val offlineAudioBusy: Boolean = false,
     val audioStorageBytes: Long = 0L,
     val watchStatus: tech.egrie.soundtrail.automation.WatchStatus = tech.egrie.soundtrail.automation.WatchStatus(),
+    /** The optional Google activity-recognition opt-in. Nothing probes Play services at launch. */
+    val activityRecognitionEnabled: Boolean = false,
+    /** Automatic on-device snapshots: the switch, the files kept, and whether one is writing. */
+    val managedBackups: ManagedBackupStatus = ManagedBackupStatus(),
     val spotifyAppInstalled: Boolean = false,
     val soundcloudAppInstalled: Boolean = false,
     val youtubeAppInstalled: Boolean = false,
@@ -230,6 +245,16 @@ internal data class MoodUiState(
     val aiBusy: Boolean = false,
     /** A sentence from the last test, shown under the provider picker. */
     val aiNote: String? = null,
+    /**
+     * An external destination waiting for approval. While this is set, no mood request has been
+     * sent; the app-wide dialog in SoundtrailApp owns the answer.
+     */
+    val consentRequest: MoodAiConsentPrompt? = null,
+    /**
+     * When an external endpoint was last approved on this device, or null. Shown beside the
+     * provider picker with the way to withdraw it — an approval nobody can find is not consent.
+     */
+    val aiConsentAt: Long? = null,
     /** True when the selected provider has everything it needs right now. */
     val aiReady: Boolean = false,
     val aiKeySet: Boolean = false,
@@ -261,6 +286,9 @@ internal data class OfflineAudioItem(
 /** How many TheAudioDB lookups one mood refinement may make; keeps it quick and polite. */
 private const val MAX_MOOD_TAG_LOOKUPS = 12
 
+/** A burst of edits becomes one managed snapshot, not one per tap. */
+private const val MANAGED_BACKUP_DEBOUNCE_MS = 15_000L
+
 internal data class PinInput(
     val title: String,
     val artist: String,
@@ -271,9 +299,17 @@ internal data class PinInput(
 )
 
 internal class MainViewModel(application: Application) : AndroidViewModel(application) {
-    private val pins = PinStore(application)
-    private val playlists = PlaylistStore(application)
-    private val automations = AutomationStore(application)
+    /** The rolling snapshots; declared before the stores whose writes schedule them. */
+    private val localBackups = ManagedBackupStore(application)
+
+    // Every store write — a pin, a playlist edit, a sync merge, an import — schedules one
+    // debounced managed snapshot. Individual call sites do not have to remember to.
+    private val pins = PinStore(application) { scheduleManagedBackup() }
+    private val playlists = PlaylistStore(application) { scheduleManagedBackup() }
+    private val automations = AutomationStore(application) { scheduleManagedBackup() }
+
+    private var managedBackupJob: Job? = null
+    private val activityRecognition = ActivityRecognitionStore(application)
     private val files = FileStore(application)
     private val spotify = SpotifyService(application)
     private val soundcloud = SoundCloudService(application)
@@ -307,6 +343,18 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     /** The media ids of the mix that is playing, so the Mood tab's rows light up as it goes. */
     private var moodQueueKeys: List<String> = emptyList()
 
+    /** What the consent dialog was opened for, so confirming can finish that same action. */
+    private enum class MoodConsentAction { ENABLE, ANALYZE, TEST }
+
+    private data class PendingMoodConsent(
+        val action: MoodConsentAction,
+        val destination: MoodAiDestination,
+        val quickMoodId: String? = null,
+        val announce: Boolean = false
+    )
+
+    private var pendingMoodConsent: PendingMoodConsent? = null
+
     private val _state = MutableStateFlow(
         AppState(
             pins = pins.all(),
@@ -328,6 +376,8 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             youtubeOAuthClientId = youtubeData.oauthClientId,
             gmsSignInAvailable = apps.systemGmsInstalled,
             microGReInstalled = apps.microGReInstalled,
+            activityRecognitionEnabled = activityRecognition.enabled,
+            managedBackups = ManagedBackupStatus(enabled = localBackups.enabled),
             syncServer = cloudSync.serverUrl,
             syncEffectiveServer = cloudSync.effectiveServerUrl,
             syncUsingCustomServer = cloudSync.isUsingCustomServer,
@@ -348,6 +398,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 openAiModel = moodPrefs.openAiModel,
                 searchTarget = moodPrefs.searchTarget,
                 aiKeySet = moodPrefs.keySet(moodPrefs.aiProvider),
+                aiConsentAt = moodPrefs.consentAt(),
                 aiReady = moodAi.configured,
                 enrichEnabled = moodPrefs.tagLookupEnabled
             ),
@@ -368,6 +419,15 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     val speech = _speech.asSharedFlow()
 
     init {
+        // Read the snapshot list off the main thread. No snapshot is taken just for opening the
+        // app: a launch that changed nothing would only push a real earlier version out of the
+        // ten kept. Every store write schedules one, and "Back up now" writes on demand.
+        viewModelScope.launch {
+            val kept = withContext(Dispatchers.IO) {
+                runCatching { localBackups.list() }.getOrDefault(emptyList())
+            }
+            _state.update { it.copy(managedBackups = it.managedBackups.copy(backups = kept)) }
+        }
         refreshDeviceStatus()
         if (spotify.connected) loadProfile()
         if (soundcloud.connected) loadSoundcloudProfile()
@@ -867,11 +927,31 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
      */
     fun analyzeMood(quickMoodId: String? = null, announce: Boolean = false) {
         val mood = _state.value.mood
+        if (mood.consentRequest != null) {
+            // A second request arrived (a spoken one, say) while the destination prompt is open.
+            // Say where the answer is instead of quietly ignoring it.
+            notify("Answer the destination prompt first — nothing has been sent yet.")
+            return
+        }
         if (mood.analyzing) return
         val context = moodContext()
         val useModel = mood.aiEnabled && mood.aiProvider != MoodAiProvider.ON_DEVICE && mood.aiReady
         if (mood.aiEnabled && !mood.aiReady && mood.aiProvider != MoodAiProvider.ON_DEVICE) {
             notify(missingProviderSetting(mood.aiProvider))
+        }
+        if (useModel && quickMoodId == null) {
+            // A mood request leaving the phone is exactly what the destination prompt exists
+            // for. Nothing is written to the network until the listener names this endpoint.
+            // A quick pick never calls a model, so it does not ask.
+            val destination = MoodAiConsent.destination(
+                mood.aiProvider, mood.ollamaUrl, mood.openAiUrl
+            )
+            if (destination != null && !moodPrefs.hasConsent(destination)) {
+                requestMoodConsent(
+                    MoodConsentAction.ANALYZE, destination, quickMoodId, announce
+                )
+                return
+            }
         }
         _state.update { it.copy(mood = it.mood.copy(analyzing = true, error = null, savedPlaylistName = null)) }
         val target = mood.searchTarget
@@ -1091,18 +1171,155 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         )
     }
 
+    /**
+     * Turns the model reading on or off.
+     *
+     * Turning it on for an external provider is where the listener first opts in, so that is the
+     * first place the destination prompt appears — but only when the provider is actually ready
+     * to send. A half-configured card still turns on; the prompt follows at the first request,
+     * when there is a real endpoint to name. Nothing is sent before either question is answered.
+     */
     fun setMoodAiEnabled(enabled: Boolean) {
-        moodPrefs.aiEnabled = enabled
+        if (!enabled) {
+            // Turning the model off also answers any prompt that was waiting: there is nothing
+            // left to approve, and the on-device reading stays exactly where it was.
+            pendingMoodConsent = null
+            moodPrefs.aiEnabled = false
+            _state.update {
+                it.copy(mood = it.mood.copy(aiEnabled = false, aiNote = null, consentRequest = null))
+            }
+            notify("Model reading off. The on-device engine still reads your mood offline.")
+            return
+        }
+        if (pendingMoodConsent != null) return
         val mood = _state.value.mood
-        _state.update { it.copy(mood = it.mood.copy(aiEnabled = enabled, aiNote = null)) }
+        val destination = MoodAiConsent.destination(
+            mood.aiProvider, mood.ollamaUrl, mood.openAiUrl
+        )
+        if (mood.aiProvider != MoodAiProvider.ON_DEVICE && mood.aiReady &&
+            destination != null && !moodPrefs.hasConsent(destination)
+        ) {
+            requestMoodConsent(MoodConsentAction.ENABLE, destination)
+            return
+        }
+        enableMoodAiNow()
+    }
+
+    /** Completes the switch once the destination is either on-device or already approved. */
+    private fun enableMoodAiNow() {
+        moodPrefs.aiEnabled = true
+        val mood = _state.value.mood
+        _state.update { it.copy(mood = it.mood.copy(aiEnabled = true, aiNote = null)) }
         notify(
             when {
-                !enabled -> "Model reading off. The on-device engine still reads your mood offline."
                 mood.aiProvider == MoodAiProvider.ON_DEVICE ->
                     "Already on the on-device engine — nothing leaves the device."
-                mood.aiReady -> "${mood.aiProvider.short} reading on. Only your mood description leaves the device."
+                mood.aiReady -> "${mood.aiProvider.short} reading on. Your mood description and its context leave the device."
                 else -> missingProviderSetting(mood.aiProvider)
             }
+        )
+    }
+
+    /**
+     * Shows the destination question and parks the action that needed it. The prompt names the
+     * endpoint the request would actually be built from, not what was typed, so a pasted
+     * `…/api/chat` and a bare host are described the same way.
+     */
+    private fun requestMoodConsent(
+        action: MoodConsentAction,
+        destination: MoodAiDestination,
+        quickMoodId: String? = null,
+        announce: Boolean = false
+    ) {
+        pendingMoodConsent = PendingMoodConsent(action, destination, quickMoodId, announce)
+        _state.update {
+            it.copy(
+                mood = it.mood.copy(
+                    consentRequest = MoodAiConsentPrompt(
+                        providerLabel = destination.provider.label,
+                        endpoint = destination.endpoint
+                    )
+                )
+            )
+        }
+    }
+
+    /**
+     * The listener approved the endpoint on screen. The current setting is compared with the one
+     * they were shown first: if the provider or address moved while the dialog was open, the old
+     * approval is not silently reused for the new destination — the question is asked again.
+     */
+    fun confirmMoodAiConsent() {
+        val pending = pendingMoodConsent ?: return
+        pendingMoodConsent = null
+        _state.update { it.copy(mood = it.mood.copy(consentRequest = null)) }
+        val current = MoodAiConsent.destination(
+            moodPrefs.aiProvider, moodPrefs.ollamaUrl, moodPrefs.openAiUrl
+        )
+        if (current != pending.destination) {
+            notify("That provider or address changed while the prompt was open. Nothing was sent.")
+            when (pending.action) {
+                MoodConsentAction.ENABLE -> setMoodAiEnabled(true)
+                MoodConsentAction.ANALYZE -> analyzeMood(pending.quickMoodId, pending.announce)
+                MoodConsentAction.TEST -> testMoodAi()
+            }
+            return
+        }
+        moodPrefs.rememberConsent(pending.destination)
+        _state.update { it.copy(mood = it.mood.copy(aiConsentAt = moodPrefs.consentAt())) }
+        when (pending.action) {
+            MoodConsentAction.ENABLE -> enableMoodAiNow()
+            MoodConsentAction.ANALYZE -> analyzeMood(pending.quickMoodId, pending.announce)
+            MoodConsentAction.TEST -> testMoodAi()
+        }
+    }
+
+    /**
+     * The listener declined. Nothing is sent, and a reading that was waiting on the answer falls
+     * back to the on-device engine — the switch goes off rather than leaving a model selected
+     * that will keep asking before every request.
+     */
+    fun cancelMoodAiConsent() {
+        val pending = pendingMoodConsent
+        pendingMoodConsent = null
+        _state.update { it.copy(mood = it.mood.copy(consentRequest = null)) }
+        if (pending == null) return
+        val leaveModelOff = pending.action != MoodConsentAction.TEST
+        if (leaveModelOff) moodPrefs.aiEnabled = false
+        _state.update {
+            it.copy(
+                mood = it.mood.copy(
+                    aiEnabled = if (leaveModelOff) false else it.mood.aiEnabled,
+                    aiNote = if (leaveModelOff) null else it.mood.aiNote
+                )
+            )
+        }
+        notify(
+            when (pending.action) {
+                MoodConsentAction.TEST -> "Nothing was sent. The endpoint was not tested."
+                MoodConsentAction.ENABLE ->
+                    "Nothing was sent. The model reading stays off; the on-device engine is ready."
+                MoodConsentAction.ANALYZE ->
+                    "Nothing was sent. Mood readings stay on this device."
+            }
+        )
+    }
+
+    /**
+     * Withdraws the approval for the endpoint currently remembered. The next model request — a
+     * reading, a test, or switching the model on — asks again and names the destination, and in
+     * the meantime the on-device engine keeps reading. Nothing else is touched: the key, the
+     * address and the model stay as they are, so re-approving is one tap on the prompt.
+     */
+    fun forgetMoodAiConsent() {
+        pendingMoodConsent = null
+        moodPrefs.forgetConsent()
+        _state.update {
+            it.copy(mood = it.mood.copy(aiConsentAt = null, consentRequest = null))
+        }
+        notify(
+            "Endpoint approval forgotten. The next model request will ask again, naming the " +
+                "destination; readings stay on this device until then."
         )
     }
 
@@ -1433,11 +1650,30 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     /** Probes the selected provider and reports exactly what happened. */
     fun testMoodAi() {
         val mood = _state.value.mood
+        if (mood.consentRequest != null) {
+            notify("Answer the destination prompt first — nothing has been sent yet.")
+            return
+        }
         if (mood.aiBusy) return
         if (!moodAi.configured) {
             notify(missingProviderSetting(mood.aiProvider))
             return
         }
+        // A test asks the endpoint to read a short sample mood too — on Arena, that request is
+        // the one its usage page counts — so it leaves the device for the same destination and
+        // needs the same answer before it is sent.
+        val destination = MoodAiConsent.destination(
+            mood.aiProvider, mood.ollamaUrl, mood.openAiUrl
+        )
+        if (destination != null && !moodPrefs.hasConsent(destination)) {
+            requestMoodConsent(MoodConsentAction.TEST, destination)
+            return
+        }
+        runMoodAiTest()
+    }
+
+    /** The probe itself, once the destination may be used. */
+    private fun runMoodAiTest() {
         _state.update { it.copy(mood = it.mood.copy(aiBusy = true, aiNote = null)) }
         viewModelScope.launch {
             runCatching { moodAi.testConnection() }
@@ -2323,6 +2559,58 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         notify("Automation removed.")
     }
 
+    /**
+     * Turns the optional Google activity-recognition source on or off.
+     *
+     * The permission is requested by the activity, not here, and this method is only reached
+     * once it has been granted (or when the source is being switched off). Play services is also
+     * checked here, at the moment of opting in, so the app never probes it on launch and never
+     * depends on it: a device without Play services keeps the switch off and keeps using GPS
+     * speed, exactly as a listener who declines the permission does.
+     */
+    fun setActivityRecognitionEnabled(enabled: Boolean) {
+        // Availability is checked here, on the switch the listener actually touched — never at
+        // app startup. A phone without Play services therefore never loads that path at all, and
+        // the message says plainly why the switch did not stay on.
+        if (enabled && !GoogleActivityMotion.available(getApplication())) {
+            notify(
+                "Google Play services isn't available on this device, so activity recognition " +
+                    "can't be used. Motion still comes from GPS speed."
+            )
+            return
+        }
+        activityRecognition.enabled = enabled
+        if (!enabled) activityRecognition.clear()
+        _state.update { it.copy(activityRecognitionEnabled = enabled) }
+        LocationWatchService.refreshActivityRecognition(getApplication<Application>())
+        notify(
+            if (enabled) {
+                "Google activity recognition on. Motion comes from Play services, with GPS " +
+                    "speed as the fallback."
+            } else {
+                "Google activity recognition off. Motion comes from GPS speed only."
+            }
+        )
+    }
+
+    /**
+     * A change made in the last few seconds may still be waiting on the backup debounce. Take one
+     * snapshot before the view model goes away rather than losing it; the write happens on a
+     * short-lived daemon thread, because private storage is not something to touch on the main
+     * thread even while the app is closing.
+     */
+    override fun onCleared() {
+        if (managedBackupJob?.isActive == true && localBackups.enabled) {
+            val pinsNow = pins.all()
+            val playlistsNow = playlists.all()
+            val rulesNow = automations.all()
+            Thread({
+                runCatching { localBackups.write(pinsNow, playlistsNow, rulesNow) }
+            }, "soundtrail-backup-flush").apply { isDaemon = true }.start()
+        }
+        super.onCleared()
+    }
+
     private val watchRunning: Boolean get() = LocationWatchService.status.value.running
 
     // ----- Cloud sync: account auth plus client-side end-to-end encryption -----
@@ -2590,6 +2878,162 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         _state.update { it.copy(syncPendingChanges = cloudSync.pendingChangeCount()) }
     }
 
+    // ----- Managed backups: rolling snapshots the app keeps for itself -----
+
+    /**
+     * Writes a snapshot immediately, even when automatic snapshots are switched off — pressing
+     * the button is itself a request to keep this state.
+     */
+    fun backupLocalNow() {
+        if (_state.value.managedBackups.busy) return
+        managedBackupJob?.cancel()
+        _state.update { it.copy(managedBackups = it.managedBackups.copy(busy = true)) }
+        viewModelScope.launch {
+            val written = writeManagedBackup(evenWhenDisabled = true)
+            notify(
+                if (written == null) {
+                    "Couldn't write an on-device backup. Check that this device has free storage."
+                } else {
+                    "On-device backup saved — ${counted(written.pins, "pin")}, " +
+                        "${counted(written.playlists, "playlist")}, " +
+                        "${counted(written.automations, "automation")}."
+                }
+            )
+        }
+    }
+
+    /**
+     * Debounced after any store write. The existing job is cancelled, so a long series of edits
+     * ends with one snapshot a few seconds after the last one rather than a file per keystroke.
+     */
+    private fun scheduleManagedBackup() {
+        if (!localBackups.enabled) return
+        managedBackupJob?.cancel()
+        managedBackupJob = viewModelScope.launch {
+            delay(MANAGED_BACKUP_DEBOUNCE_MS)
+            writeManagedBackup()
+        }
+    }
+
+    private suspend fun writeManagedBackup(evenWhenDisabled: Boolean = false): ManagedBackup? {
+        var written: ManagedBackup? = null
+        val kept = withContext(Dispatchers.IO) {
+            runCatching {
+                written = localBackups.write(
+                    pins.all(), playlists.all(), automations.all(),
+                    evenWhenDisabled = evenWhenDisabled
+                )
+            }
+            // A listing that fails says nothing about what is on disk, so the screen keeps the
+            // list it already had rather than claiming every snapshot disappeared.
+            runCatching { localBackups.list() }.getOrNull()
+        }
+        _state.update {
+            it.copy(
+                managedBackups = it.managedBackups.copy(
+                    backups = kept ?: it.managedBackups.backups,
+                    busy = false
+                )
+            )
+        }
+        return written
+    }
+
+    /** Turns the automatic snapshots on or off; existing files are left alone. */
+    fun setManagedBackupsEnabled(enabled: Boolean) {
+        localBackups.enabled = enabled
+        _state.update { it.copy(managedBackups = it.managedBackups.copy(enabled = enabled)) }
+        if (enabled) {
+            scheduleManagedBackup()
+            notify("Automatic on-device backups on. The newest ${ManagedBackupStore.MAX_KEPT} snapshots are kept.")
+        } else {
+            managedBackupJob?.cancel()
+            notify("Automatic on-device backups off. Snapshots already here are kept.")
+        }
+    }
+
+    /**
+     * Restores one snapshot through the same additive merge as an imported file: anything
+     * missing comes back, and anything edited since is kept as it is.
+     */
+    fun restoreManagedBackup(fileName: String) {
+        if (_state.value.managedBackups.busy) return
+        _state.update { it.copy(managedBackups = it.managedBackups.copy(busy = true)) }
+        viewModelScope.launch {
+            try {
+                val brought = withContext(Dispatchers.IO) { localBackups.read(fileName) }
+                val result = mergeBackupContents(brought)
+                notify(
+                    if (result.total == 0) {
+                        "That snapshot had nothing new — everything in it is already on this device."
+                    } else {
+                        "Restored ${counted(result.pins, "pin")}, " +
+                            "${counted(result.playlists, "playlist")}, " +
+                            "${counted(result.songs, "song")}, and " +
+                            "${counted(result.automations, "automation")} from the on-device " +
+                            "backup. Items already here were kept."
+                    }
+                )
+            } catch (e: BackupException) {
+                notify(e.message ?: "Couldn't restore that on-device backup.")
+            } catch (e: Exception) {
+                notify("Couldn't restore that on-device backup.")
+            } finally {
+                _state.update {
+                    it.copy(managedBackups = it.managedBackups.copy(busy = false))
+                }
+            }
+        }
+    }
+
+    fun deleteManagedBackups() {
+        if (_state.value.managedBackups.busy) return
+        _state.update { it.copy(managedBackups = it.managedBackups.copy(busy = true)) }
+        viewModelScope.launch {
+            val (removed, left) = withContext(Dispatchers.IO) {
+                val gone = runCatching { localBackups.clear() }.getOrDefault(0)
+                gone to runCatching { localBackups.list() }.getOrDefault(emptyList())
+            }
+            _state.update {
+                it.copy(managedBackups = it.managedBackups.copy(backups = left, busy = false))
+            }
+            notify("Removed ${counted(removed, "on-device backup")}.")
+        }
+    }
+
+    private data class BackupMergeResult(
+        val pins: Int,
+        val playlists: Int,
+        val songs: Int,
+        val automations: Int
+    ) {
+        val total: Int get() = pins + playlists + songs + automations
+    }
+
+    /** The one merge path shared by the document picker and the managed snapshots. */
+    private fun mergeBackupContents(brought: BackupContents): BackupMergeResult {
+        val restored = brought.copy(
+            playlists = brought.playlists.map { playlist ->
+                playlist.copy(items = playlist.items.map { item ->
+                    item.copy(localFile = item.localFile?.takeIf(files::exists))
+                })
+            }
+        )
+        val addedPins = pins.merge(restored.pins)
+        val (addedPlaylists, addedSongs) = playlists.merge(restored.playlists)
+        val addedRules = automations.merge(restored.automations)
+        _state.update {
+            it.copy(
+                pins = pins.all(),
+                playlists = playlists.all(),
+                automations = automations.all()
+            )
+        }
+        refreshOfflineAudioState()
+        recordCloudSyncChanges()
+        return BackupMergeResult(addedPins, addedPlaylists, addedSongs, addedRules)
+    }
+
     // ----- Backup: export and import of everything local -----
 
     /**
@@ -2646,32 +3090,15 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 val text = withContext(Dispatchers.IO) { readText(uri) }
                     ?: throw BackupException("Couldn't read that file.")
                 val brought = withContext(Dispatchers.IO) { BackupFormat.parse(text) }
-                val restored = brought.copy(
-                    playlists = brought.playlists.map { playlist ->
-                        playlist.copy(items = playlist.items.map { item ->
-                            item.copy(localFile = item.localFile?.takeIf(files::exists))
-                        })
-                    }
-                )
-                val addedPins = pins.merge(restored.pins)
-                val (addedPlaylists, addedSongs) = playlists.merge(restored.playlists)
-                val addedRules = automations.merge(restored.automations)
-                _state.update {
-                    it.copy(
-                        pins = pins.all(),
-                        playlists = playlists.all(),
-                        automations = automations.all()
-                    )
-                }
-                refreshOfflineAudioState()
-                recordCloudSyncChanges()
-                val total = addedPins + addedPlaylists + addedSongs + addedRules
-                if (total == 0) {
+                val result = mergeBackupContents(brought)
+                if (result.total == 0) {
                     notify("Nothing new in that backup — everything it holds is already on this device.")
                 } else {
                     notify(
-                        "Imported ${counted(addedPins, "new pin")}, ${counted(addedPlaylists, "playlist")}, " +
-                            "${counted(addedSongs, "song")}, and ${counted(addedRules, "automation")}. " +
+                        "Imported ${counted(result.pins, "new pin")}, " +
+                            "${counted(result.playlists, "playlist")}, " +
+                            "${counted(result.songs, "song")}, and " +
+                            "${counted(result.automations, "automation")}. " +
                             "Items already on this device were kept."
                     )
                 }

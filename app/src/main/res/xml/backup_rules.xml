@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android Auto Backup (Android 11 and lower; see data_extraction_rules.xml for 12+).
+
+  Only the library the listener built is eligible: pins, playlists, and automation rules.
+  Everything else is outside the includes, so it is never copied to the listener's Google
+  account — most importantly the Keystore-encrypted token store, the cloud-sync session and
+  recovery-key state, the mood settings and last mood description, the activity-recognition
+  opt-in, and the audio files themselves. A backup restored on another device could not decrypt the tokens anyway, and
+  uploading ciphertext that cannot be opened would only be a privacy claim without a use.
+-->
+<full-backup-content>
+    <include domain="sharedpref" path="soundtrail_pins.xml" />
+    <include domain="sharedpref" path="soundtrail_playlists.xml" />
+    <include domain="sharedpref" path="soundtrail_automations.xml" />
+
+    <exclude domain="sharedpref" path="soundtrail_secrets.xml" />
+    <exclude domain="sharedpref" path="soundtrail_mood.xml" />
+    <exclude domain="sharedpref" path="soundtrail_activity_recognition.xml" />
+    <exclude domain="sharedpref" path="soundtrail_mood_consent.xml" />
+    <exclude domain="sharedpref" path="soundtrail_cloud_sync.xml" />
+    <exclude domain="sharedpref" path="soundtrail_google_auth.xml" />
+    <exclude domain="sharedpref" path="soundtrail_settings.xml" />
+    <exclude domain="sharedpref" path="soundtrail_youtube.xml" />
+    <exclude domain="sharedpref" path="soundtrail_backups.xml" />
+
+    <!-- Audio and the app's own snapshots are deliberately not duplicated into a cloud backup. -->
+    <exclude domain="file" path="audio" />
+    <exclude domain="file" path="managed-backups" />
+</full-backup-content>

@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -72,6 +73,8 @@ import tech.egrie.soundtrail.integrations.MusicLinkParser
 import tech.egrie.soundtrail.integrations.MusicProvider
 import tech.egrie.soundtrail.integrations.SongInfo
 import tech.egrie.soundtrail.integrations.TrackResult
+import tech.egrie.soundtrail.data.ManagedBackupStatus
+import tech.egrie.soundtrail.data.ManagedBackupStore
 import tech.egrie.soundtrail.integrations.SOUNDCLOUD_REDIRECT_URI
 import tech.egrie.soundtrail.integrations.SPOTIFY_REDIRECT_URI
 import java.text.SimpleDateFormat
@@ -486,6 +489,18 @@ private fun GoogleConnectionStatus(state: AppState, onConnectYouTubeOAuth: (Stri
     }
 }
 
+/**
+ * The managed-backup card's state and the four things it can do. Bundled so the Connect screen's
+ * already-long parameter list gains one argument rather than five.
+ */
+internal data class ManagedBackupControls(
+    val status: ManagedBackupStatus,
+    val onBackupNow: () -> Unit,
+    val onRestore: (String) -> Unit,
+    val onToggleEnabled: (Boolean) -> Unit,
+    val onDeleteAll: () -> Unit
+)
+
 @Composable
 internal fun ConnectionsScreen(
     state: AppState,
@@ -499,6 +514,7 @@ internal fun ConnectionsScreen(
     onOpenYouTubeSetup: () -> Unit,
     onImportYouTubePlaylists: () -> Unit, onSetYouTubeAutoImport: (Boolean) -> Unit,
     backupBusy: Boolean, onExportBackup: () -> Unit, onImportBackup: () -> Unit,
+    managedBackups: ManagedBackupControls,
     syncBusy: Boolean,
     onCreateCloudSyncAccount: (String, String, String) -> Unit,
     onSignInCloudSync: (String, String, String) -> Unit,
@@ -528,6 +544,8 @@ internal fun ConnectionsScreen(
     var jellyfinPassword by rememberSaveable { mutableStateOf("") }
     var youtubeOAuthId by rememberSaveable(state.youtubeOAuthClientId) { mutableStateOf(state.youtubeOAuthClientId) }
     var expandedService by rememberSaveable { mutableStateOf<String?>(null) }
+    var showManagedRestore by rememberSaveable { mutableStateOf(false) }
+    var confirmDeleteManaged by rememberSaveable { mutableStateOf(false) }
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)
     ) {
@@ -1138,6 +1156,77 @@ internal fun ConnectionsScreen(
                 containerColor = Palette.elevated
             )
         }
+        if (showManagedRestore) {
+            AlertDialog(
+                onDismissRequest = { showManagedRestore = false },
+                title = { Text("Restore an on-device backup?") },
+                text = {
+                    Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+                        Text(
+                            "Restoring merges the snapshot into what is here now: missing items " +
+                                "come back, and anything edited since is kept.",
+                            color = Palette.secondary,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        managedBackups.status.backups.forEach { backup ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        formatSyncTime(backup.createdAt),
+                                        style = MaterialTheme.typography.titleMedium
+                                    )
+                                    Text(
+                                        "${backup.pins} pins · ${backup.playlists} playlists · " +
+                                            "${backup.automations} automations · " +
+                                            "${backup.sizeBytes / 1024} KiB",
+                                        color = Palette.muted,
+                                        style = MaterialTheme.typography.labelMedium
+                                    )
+                                }
+                                TextButton(
+                                    onClick = {
+                                        showManagedRestore = false
+                                        managedBackups.onRestore(backup.fileName)
+                                    },
+                                    enabled = !managedBackups.status.busy
+                                ) { Text("Restore") }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showManagedRestore = false }) { Text("Close") }
+                },
+                containerColor = Palette.elevated
+            )
+        }
+        if (confirmDeleteManaged) {
+            AlertDialog(
+                onDismissRequest = { confirmDeleteManaged = false },
+                title = { Text("Delete on-device backups?") },
+                text = {
+                    Text(
+                        "Removes all ${managedBackups.status.backups.size} managed snapshot" +
+                            "${if (managedBackups.status.backups.size == 1) "" else "s"}. " +
+                            "Pins, playlists, and automations already here are not affected.",
+                        color = Palette.secondary
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            confirmDeleteManaged = false
+                            managedBackups.onDeleteAll()
+                        }
+                    ) { Text("Delete all", color = Palette.coral) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { confirmDeleteManaged = false }) { Text("Cancel") }
+                },
+                containerColor = Palette.elevated
+            )
+        }
         Spacer(Modifier.height(13.dp))
         SurfaceCard(Modifier.fillMaxWidth()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1160,7 +1249,59 @@ internal fun ConnectionsScreen(
                 "one back on this or another device. The file goes only where you send it; " +
                 "Soundtrail uploads nothing.",
                 color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
-            Spacer(Modifier.height(13.dp))
+
+            Spacer(Modifier.height(14.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Managed on this device", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        managedBackups.status.latest?.let { latest ->
+                            "Last ${formatSyncTime(latest.createdAt)} · " +
+                                "${managedBackups.status.backups.size} kept"
+                        } ?: "No snapshot yet",
+                        color = Palette.secondary, style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                if (managedBackups.status.busy) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                } else {
+                    Switch(
+                        checked = managedBackups.status.enabled,
+                        onCheckedChange = managedBackups.onToggleEnabled
+                    )
+                }
+            }
+            Text(
+                "Soundtrail writes a snapshot automatically after a change and keeps the newest " +
+                    "${ManagedBackupStore.MAX_KEPT} in private app storage. Nothing is uploaded. " +
+                    "Android's own system backup may separately copy pins, playlists, and " +
+                    "automations to your Google account; tokens, mood text, and audio are never " +
+                    "included.",
+                color = Palette.muted, style = MaterialTheme.typography.labelMedium
+            )
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                TextButton(
+                    onClick = managedBackups.onBackupNow,
+                    enabled = !managedBackups.status.busy
+                ) { Text("Back up now") }
+                TextButton(
+                    onClick = { showManagedRestore = true },
+                    enabled = managedBackups.status.backups.isNotEmpty() &&
+                        !managedBackups.status.busy
+                ) { Text("Restore…") }
+                TextButton(
+                    onClick = { confirmDeleteManaged = true },
+                    enabled = managedBackups.status.backups.isNotEmpty() &&
+                        !managedBackups.status.busy
+                ) { Text("Delete…", color = Palette.coral) }
+            }
+
+            Spacer(Modifier.height(6.dp))
+            Text("A file you choose", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(6.dp))
             PrimaryButton(if (backupBusy) "Working…" else "Export backup",
                 onExportBackup, Modifier.fillMaxWidth(), enabled = !backupBusy)
             Spacer(Modifier.height(10.dp))

@@ -28,6 +28,7 @@ import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -52,6 +53,7 @@ import androidx.compose.ui.unit.dp
 import tech.egrie.soundtrail.AppState
 import tech.egrie.soundtrail.MoodUiState
 import tech.egrie.soundtrail.assistant.AssistantHit
+import tech.egrie.soundtrail.mood.MoodAiConsentPrompt
 import tech.egrie.soundtrail.mood.MoodAiProvider
 import tech.egrie.soundtrail.mood.MoodAiUrls
 import tech.egrie.soundtrail.mood.MoodEngine
@@ -73,6 +75,11 @@ internal data class MoodActions(
     val onImproveTags: () -> Unit,
     val onSetTagLookup: (Boolean) -> Unit,
     val onSetAiEnabled: (Boolean) -> Unit,
+    /** Answers the prompt shown before a mood request leaves the device. */
+    val onConfirmAiConsent: () -> Unit,
+    val onCancelAiConsent: () -> Unit,
+    /** Withdraws the remembered endpoint approval so the next request asks again. */
+    val onForgetAiConsent: () -> Unit,
     /** Switch between the on-device engine, Ollama, and a hosted model. */
     val onSetAiProvider: (MoodAiProvider) -> Unit,
     val onSetAiModel: (String) -> Unit,
@@ -276,6 +283,19 @@ private fun MoodReadingCard(mood: MoodUiState, actions: MoodActions, onNotice: (
         }
         Spacer(Modifier.height(8.dp))
         Text(provider.blurb, color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
+
+        // Consent that cannot be found is not consent. When an endpoint is approved, say so and
+        // give the one action that takes it back; the next request then asks again.
+        if (mood.aiConsentAt != null) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "An endpoint is approved for model requests on this device.",
+                color = Palette.muted, style = MaterialTheme.typography.labelMedium
+            )
+            TextButton(onClick = actions.onForgetAiConsent) {
+                Text("Ask again before sending", color = Palette.lilac)
+            }
+        }
 
         when (provider) {
             MoodAiProvider.ON_DEVICE -> {
@@ -938,3 +958,59 @@ private fun MoodPill(text: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 private fun percent(value: Double): String = "${(value.coerceIn(0.0, 1.0) * 100).toInt()}%"
+
+/**
+ * The one question the app asks before a mood reading is sent to an external model.
+ *
+ * It names the provider and the endpoint the request will actually reach, not the address as
+ * typed, and it says plainly what travels and whose terms apply. It is shown the first time an
+ * external model is switched on and again whenever the provider or endpoint changes. Cancel
+ * sends nothing and leaves the on-device engine in place.
+ */
+@Composable
+internal fun MoodAiConsentDialog(
+    request: MoodAiConsentPrompt,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Send mood data to this endpoint?") },
+        text = {
+            Column {
+                Text(
+                    "Provider: ${request.providerLabel}",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    "Endpoint: ${request.endpoint}",
+                    color = Palette.primary,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "This request includes your mood description and the context listed in " +
+                        "the Privacy Policy. The provider's retention, training, and billing " +
+                        "practices apply.",
+                    color = Palette.secondary,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "Cancel keeps the on-device engine: your words are read here and nothing " +
+                        "is sent.",
+                    color = Palette.muted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("Use this endpoint") }
+        },
+        dismissButton = {
+            TextButton(onClick = onCancel) { Text("Cancel") }
+        },
+        containerColor = Palette.elevated
+    )
+}

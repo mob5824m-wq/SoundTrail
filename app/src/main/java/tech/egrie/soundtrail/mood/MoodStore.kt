@@ -8,11 +8,34 @@ import tech.egrie.soundtrail.integrations.SecretStore
 /**
  * Local storage for the mood layer: the listener's settings, the last thing they typed, and a
  * bounded cache of learned track tags. Any model credential is kept in [SecretStore], which is
- * Android-Keystore encrypted; nothing else in this file is sensitive and none of it is synced or
- * backed up.
+ * Android-Keystore encrypted and excluded from every backup. These preferences are never synced
+ * and are not part of a JSON export; the app's own backup rules also exclude this file from
+ * Android Auto Backup, because it holds the last mood description and the model settings. The
+ * consent record lives in a separate file that is excluded too.
  */
 internal class MoodStore(context: Context) {
     private val prefs = context.getSharedPreferences("soundtrail_mood", Context.MODE_PRIVATE)
+
+    /**
+     * The approval to send mood readings to one external endpoint lives in its own preferences
+     * file so Android Auto Backup can exclude it: a restored library should ask again on the new
+     * device, and a privacy decision made here is not Google's to keep for the listener.
+     */
+    private val consentPrefs =
+        context.getSharedPreferences("soundtrail_mood_consent", Context.MODE_PRIVATE)
+
+    /** The consent rules live in [MoodConsentRecord]; this is only the place they are kept. */
+    private val consent = MoodConsentRecord(
+        object : MoodConsentStorage {
+            override fun read(key: String): String? = consentPrefs.getString(key, null)
+
+            override fun write(key: String, value: String?) {
+                val editor = consentPrefs.edit()
+                if (value == null) editor.remove(key) else editor.putString(key, value)
+                editor.apply()
+            }
+        }
+    )
     private val secrets = SecretStore(context)
 
     var aiEnabled: Boolean
@@ -94,6 +117,25 @@ internal class MoodStore(context: Context) {
     }
 
     fun keySet(provider: MoodAiProvider): Boolean = key(provider) != null
+
+    // ----- Consent to send a reading off the device -----
+
+    /**
+     * True when the listener has approved this exact provider **and** endpoint. Switching a
+     * provider or editing an address makes the stored record stop matching without any separate
+     * invalidation step: the next request asks again, naming the new destination.
+     */
+    fun hasConsent(destination: MoodAiDestination): Boolean = consent.isApproved(destination)
+
+    /** Remembers the destination the listener just approved, and when they approved it. */
+    fun rememberConsent(destination: MoodAiDestination) {
+        consent.remember(destination, System.currentTimeMillis())
+    }
+
+    /** When the approval in force was given, or null when there is none. */
+    fun consentAt(): Long? = consent.approvedAt()
+
+    fun forgetConsent() = consent.forget()
 
     fun saveKey(provider: MoodAiProvider, value: String) {
         val name = keyName(provider) ?: return

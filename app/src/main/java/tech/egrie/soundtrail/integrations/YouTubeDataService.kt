@@ -1,17 +1,7 @@
 package tech.egrie.soundtrail.integrations
 
-import android.accounts.Account
-import android.accounts.AccountManager
 import android.content.Context
-import android.content.pm.PackageManager
 import android.net.Uri
-import com.google.android.gms.auth.GoogleAuthException
-import com.google.android.gms.auth.GoogleAuthUtil
-import com.google.android.gms.auth.UserRecoverableAuthException
-import com.google.android.gms.auth.api.signin.GoogleSignIn
-import com.google.android.gms.auth.api.signin.GoogleSignInOptions
-import com.google.android.gms.common.api.Scope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -20,15 +10,12 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
-import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.io.IOException
 import java.net.URLDecoder
 import java.net.URLEncoder
 
 private const val YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
 private const val YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3"
-private const val GOOGLE_ACCOUNT_TYPE = "com.google"
 
 /**
  * Browser OAuth redirect for the Desktop-client sign-in. Google's documented custom-scheme
@@ -41,14 +28,6 @@ private const val GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 private const val GOOGLE_OAUTH_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 
 open class YouTubeDataException(message: String) : Exception(message)
-
-/**
- * Google approval for the read-only scope is missing for this account. The caller should run the
- * interactive Google Sign-In flow, which shows the consent screen, and then connect again.
- */
-class YouTubeConsentRequiredException : YouTubeDataException(
-    "Approve the YouTube read-only permission for this Google account, then connect again."
-)
 
 /** The Data API rejected the current access token. The OAuth path refreshes once before surfacing this. */
 internal class YouTubeAuthExpiredException(message: String) : YouTubeDataException(message)
@@ -76,12 +55,9 @@ internal data class YouTubeImportedPlaylist(
 )
 
 /**
- * Read-only YouTube Data API access with two mutually exclusive sign-in methods. The
- * Google-account method uses the accounts microG (or Google Play services) registers under the
- * `com.google` type and requests its OAuth token from GmsCore when needed, keeping only the
- * account name and type. The browser-OAuth method uses the user's own Desktop client with PKCE
- * and keeps Keystore-encrypted access and refresh tokens, needing no Google services at all —
- * that is the path that works alongside MicroG RE, which only serves patched apps.
+ * Read-only YouTube Data API access through the browser-OAuth method: the user's own Desktop
+ * client with PKCE, and Keystore-encrypted access and refresh tokens. It needs no Google services,
+ * no Google account on the device, and no proprietary SDK, so it works on any phone with a browser.
  */
 internal class YouTubeDataService(context: Context) {
     private val appContext = context.applicationContext
@@ -103,11 +79,8 @@ internal class YouTubeDataService(context: Context) {
 
     val accountName: String? get() = secrets.get("youtube_data_account")?.takeIf(String::isNotBlank)
 
-    /** Either sign-in method counts; the two are mutually exclusive and the newest wins. */
-    val connected: Boolean get() = gmsConnected || oauthConnected
-
-    private val gmsConnected: Boolean
-        get() = accountName != null && secrets.get("youtube_data_account_name") != null
+    /** Connected means a readable browser-OAuth grant that Google has not rejected. */
+    val connected: Boolean get() = oauthConnected
 
     /**
      * A saved browser-OAuth connection counts as connected as long as its tokens are readable
@@ -151,14 +124,8 @@ internal class YouTubeDataService(context: Context) {
         val now = System.currentTimeMillis()
         val token = readOAuthToken()
         val tokenState = secrets.state("youtube_oauth_token")
-        val gms = gmsConnected
-        val method = when {
-            gms -> "Google account"
-            tokenState != SecretState.ABSENT -> "Client ID (browser)"
-            else -> null
-        }
+        val method = if (tokenState != SecretState.ABSENT) "Client ID (browser)" else null
         val state = when {
-            gms -> if (unreachable) GoogleAuthState.OFFLINE else GoogleAuthState.CONNECTED
             tokenState == SecretState.UNREADABLE -> GoogleAuthState.UNREADABLE
             tokenState == SecretState.ABSENT -> GoogleAuthState.NOT_CONNECTED
             needsReconnect -> GoogleAuthState.NEEDS_RECONNECT
@@ -171,8 +138,7 @@ internal class YouTubeDataService(context: Context) {
             GoogleAuthState.CONNECTED -> buildString {
                 append(accountName ?: "Saved on this device")
                 GoogleAuthPolicy.describeAge(now, verified)?.let { append(" \u00b7 last verified $it") }
-                if (gms) append(" \u00b7 access token requested on demand, never stored")
-                else if (token != null && token.refreshCount > 0) {
+                if (token != null && token.refreshCount > 0) {
                     append(" \u00b7 renewed by itself ${token.refreshCount}\u00d7")
                 }
             }
@@ -234,41 +200,9 @@ internal class YouTubeDataService(context: Context) {
         throw YouTubeDataException(message)
     }
 
-    /** Connects a microG/Google account chosen by the user or found on the device. */
-    suspend fun connect(account: Account, label: String?): String {
-        // Avoid showing a previous Google account if the user switched accounts.
-        cachedLibrary = null
-        // This Google-account connection replaces any browser-OAuth connection.
-        secrets.remove("youtube_oauth_pending")
-        secrets.remove("youtube_oauth_token")
-        secrets.remove("youtube_data_account")
-        secrets.remove("youtube_data_account_name")
-        val token = accessToken(account)
-        // Verify that the user's consent and YouTube Data API configuration work before saving.
-        apiGet(
-            "playlists",
-            listOf("part" to "snippet", "mine" to "true", "maxResults" to "1"),
-            token
-        )
-        val name = label?.takeIf(String::isNotBlank)
-            ?: account.name.takeIf(String::isNotBlank)
-            ?: "YouTube account"
-        // The label and the account name are what make an update a no-op for this sign-in method:
-        // microG/Play services keeps the grant itself, so nothing here has to be re-authorised.
-        secrets.putAll(
-            mapOf(
-                "youtube_data_account_name" to account.name,
-                "youtube_data_account_type" to account.type,
-                "youtube_data_account" to name
-            )
-        )
-        recordVerified()
-        return name
-    }
-
     /**
-     * Clears both sign-in methods and asks Google services to revoke the Google-account grant.
-     * Returns the previous browser-OAuth access token, if any, so the caller can revoke it too.
+     * Clears the YouTube connection on this device. Returns the previous browser-OAuth access
+     * token, if any, so the caller can ask Google to revoke it too.
      */
     fun disconnect(): String? {
         cachedLibrary = null
@@ -276,6 +210,7 @@ internal class YouTubeDataService(context: Context) {
         val oauthAccess = readOAuthToken()?.access
         secrets.remove("youtube_oauth_token")
         secrets.remove("youtube_data_account")
+        // Older builds kept a Google-account record; clear any leftover copy too.
         secrets.remove("youtube_data_account_name")
         secrets.remove("youtube_data_account_type")
         statusPrefs.edit()
@@ -285,7 +220,6 @@ internal class YouTubeDataService(context: Context) {
             .remove(KEY_FAILED_AT)
             .remove(KEY_TESTING_EXPIRY)
             .commit()
-        runCatching { GoogleSignIn.getClient(appContext, signInOptions()).revokeAccess() }
         return oauthAccess
     }
 
@@ -378,9 +312,6 @@ internal class YouTubeDataService(context: Context) {
             token.access
         )
         saveOAuthToken(token)
-        // This browser connection replaces any Google-account connection.
-        secrets.remove("youtube_data_account_name")
-        secrets.remove("youtube_data_account_type")
         cachedLibrary = null
         val label = channelLabel(token.access)
         secrets.put("youtube_data_account", label)
@@ -564,15 +495,12 @@ internal class YouTubeDataService(context: Context) {
      * [MAX_IMPORT_ITEMS_PER_PLAYLIST] items per list to bound bandwidth and token use.
      */
     suspend fun importPlaylists(): List<YouTubeImportedPlaylist> {
-        requireConnected("Connect a Google account to import your YouTube playlists.")
+        requireConnected("Connect your YouTube account to import your playlists.")
 
-        // Only one method is ever connected; the browser-OAuth token refreshes itself.
-        val useOAuth = oauthConnected
         try {
-            return importWithToken(if (useOAuth) oauthAccessToken() else accessToken())
+            return importWithToken(oauthAccessToken())
         } catch (e: YouTubeAuthExpiredException) {
             // A long import can outlive its access token. Refresh once, never loop.
-            if (!useOAuth) throw e
             return importWithToken(oauthAccessToken(forceRefresh = true))
         }
     }
@@ -600,13 +528,10 @@ internal class YouTubeDataService(context: Context) {
         if (query.isBlank()) return emptyList()
         requireConnected("Connect your YouTube account to search your playlists.")
 
-        // Only one method is ever connected; the browser-OAuth token refreshes itself.
-        val useOAuth = oauthConnected
         try {
-            return searchWithToken(query, if (useOAuth) oauthAccessToken() else accessToken())
+            return searchWithToken(query, oauthAccessToken())
         } catch (e: YouTubeAuthExpiredException) {
             // A token can be revoked before its reported expiry. Refresh once, never loop.
-            if (!useOAuth) throw e
             return searchWithToken(query, oauthAccessToken(forceRefresh = true))
         }
     }
@@ -626,7 +551,7 @@ internal class YouTubeDataService(context: Context) {
         limit: Int = MAX_CATALOGUE_RESULTS
     ): List<TrackResult> {
         if (query.isBlank()) return emptyList()
-        requireConnected("Connect your Google account to search YouTube.")
+        requireConnected("Connect your YouTube account to search YouTube.")
         val bounded = limit.coerceIn(1, 50)
         val parameters = listOf(
             "part" to "snippet",
@@ -636,12 +561,9 @@ internal class YouTubeDataService(context: Context) {
             "maxResults" to bounded.toString(),
             "q" to query
         )
-        val useOAuth = oauthConnected
         try {
-            val token = if (useOAuth) oauthAccessToken() else accessToken()
-            return YouTubeApiParser.catalogueTracks(apiGet("search", parameters, token), bounded)
+            return YouTubeApiParser.catalogueTracks(apiGet("search", parameters, oauthAccessToken()), bounded)
         } catch (e: YouTubeAuthExpiredException) {
-            if (!useOAuth) throw e
             return YouTubeApiParser.catalogueTracks(
                 apiGet("search", parameters, oauthAccessToken(forceRefresh = true)),
                 bounded
@@ -753,30 +675,6 @@ internal class YouTubeDataService(context: Context) {
         }
     }
 
-    private suspend fun accessToken(account: Account? = null): String = withContext(Dispatchers.IO) {
-        val selectedAccount = account ?: storedAccount()
-            ?: throw YouTubeDataException("Your Google account is no longer connected. Connect again.")
-        try {
-            GoogleAuthUtil.getToken(appContext, selectedAccount, "oauth2:$YOUTUBE_READONLY_SCOPE")
-                .takeIf(String::isNotBlank)
-                ?: throw YouTubeDataException("Google services returned an empty YouTube token.")
-        } catch (e: UserRecoverableAuthException) {
-            throw YouTubeConsentRequiredException()
-        } catch (e: GoogleAuthException) {
-            throw YouTubeDataException(
-                "Google services could not authorize YouTube read-only access. Check the microG/Google account setup."
-            )
-        } catch (e: IOException) {
-            throw YouTubeDataException("Could not reach Google services. Check your connection and try again.")
-        }
-    }
-
-    private fun storedAccount(): Account? {
-        val name = secrets.get("youtube_data_account_name")?.takeIf(String::isNotBlank) ?: return null
-        val type = secrets.get("youtube_data_account_type")?.takeIf(String::isNotBlank) ?: GOOGLE_ACCOUNT_TYPE
-        return Account(name, type)
-    }
-
     private suspend fun apiGet(
         resource: String,
         parameters: List<Pair<String, String>>,
@@ -822,24 +720,6 @@ internal class YouTubeDataService(context: Context) {
         /** How many songs one catalogue search may answer with. */
         internal const val MAX_CATALOGUE_RESULTS = 12
         private const val LIBRARY_CACHE_MS = 120_000L
-
-        /**
-         * Google-type accounts registered with the device's account manager (microG's account
-         * store when microG is the Google services provider). Requires the GET_ACCOUNTS permission.
-         */
-        fun deviceGoogleAccounts(context: Context): List<Account> {
-            if (context.checkSelfPermission(android.Manifest.permission.GET_ACCOUNTS) !=
-                PackageManager.PERMISSION_GRANTED
-            ) return emptyList()
-            return AccountManager.get(context).getAccountsByType(GOOGLE_ACCOUNT_TYPE).toList()
-        }
-
-        fun signInOptions(): GoogleSignInOptions = GoogleSignInOptions.Builder(
-            GoogleSignInOptions.DEFAULT_SIGN_IN
-        )
-            .requestEmail()
-            .requestScopes(Scope(YOUTUBE_READONLY_SCOPE))
-            .build()
     }
 }
 

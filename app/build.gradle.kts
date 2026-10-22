@@ -77,12 +77,9 @@ dependencies {
     // is deliberate: Soundtrail already plays through its own resolver and MediaPlayer, so the
     // app needs a browse tree and a session bridge, not a player framework.
     implementation("androidx.media:media:1.7.0")
-    // Google Sign-In APIs are used for the user's explicit, read-only YouTube OAuth consent.
-    implementation("com.google.android.gms:play-services-auth:21.3.0")
-    // Optional activity recognition (Transition API). Off by default: motion is inferred from
-    // GPS speed unless the listener switches Google activity recognition on, and that path is
-    // guarded at runtime so a phone without Play services keeps working.
-    implementation("com.google.android.gms:play-services-location:21.3.0")
+    // F-Droid builds use only free software: Google Play services (Sign-In, Location/Activity
+    // Recognition) is deliberately not a dependency. The YouTube connection uses the browser
+    // OAuth flow with the listener's own Desktop client ID, and motion comes from GPS speed.
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")

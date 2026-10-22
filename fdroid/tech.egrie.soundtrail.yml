@@ -1,0 +1,45 @@
+# Draft F-Droid build recipe for Soundtrail.
+#
+# F-Droid does not read this file from the app repository. Submit it to the fdroiddata
+# repository (https://gitlab.com/fdroid/fdroiddata) as metadata/tech.egrie.soundtrail.yml.
+# See fdroid/README.md for the submission steps.
+#
+# The first build F-Droid can accept is the first release after the Google Play services
+# removal (v1.0.16, versionCode 17). Earlier tags still depend on proprietary Google
+# libraries and must not be built.
+
+# Check these against config/categories.yml in fdroiddata at submission time: F-Droid has
+# been expanding its category list.
+Categories:
+  - Multimedia
+  - Navigation
+License: MIT
+AuthorName: egrie-tech
+AutoName: Soundtrail
+SourceCode: https://github.com/mob5824m-wq/SoundTrail
+IssueTracker: https://github.com/mob5824m-wq/SoundTrail/issues
+Changelog: https://github.com/mob5824m-wq/SoundTrail/releases
+
+RepoType: git
+Repo: https://github.com/mob5824m-wq/SoundTrail.git
+
+Builds:
+  - versionName: 1.0.16
+    versionCode: 17
+    commit: v1.0.16
+    subdir: app
+    gradle:
+      - yes
+
+AutoUpdateMode: Version
+UpdateCheckMode: Tags
+CurrentVersion: 1.0.16
+CurrentVersionCode: 17
+
+# Declared rather than hidden. NonFreeNet: optional connections to third-party online services
+# (YouTube, Spotify, SoundCloud, and any AI provider the listener chooses). NonFreeAdd: the app
+# hands links to proprietary apps (Spotify, SoundCloud, YouTube Music). None of these is bundled
+# as a proprietary library in the APK, and the app works without them.
+AntiFeatures:
+  - NonFreeNet
+  - NonFreeAdd

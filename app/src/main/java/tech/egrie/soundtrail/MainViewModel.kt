@@ -1,9 +1,7 @@
 package tech.egrie.soundtrail
 
-import android.accounts.Account
 import android.app.Application
 import android.net.Uri
-import com.google.android.gms.auth.api.signin.GoogleSignInAccount
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
@@ -17,10 +15,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import tech.egrie.soundtrail.automation.ActivityRecognitionStore
 import tech.egrie.soundtrail.automation.AutomationRule
 import tech.egrie.soundtrail.automation.AutomationStore
-import tech.egrie.soundtrail.automation.GoogleActivityMotion
 import tech.egrie.soundtrail.automation.LocationWatchService
 import tech.egrie.soundtrail.data.BackupContents
 import tech.egrie.soundtrail.data.BackupException
@@ -56,7 +52,6 @@ import tech.egrie.soundtrail.assistant.toQueueEntry
 import tech.egrie.soundtrail.integrations.TrackResult
 import tech.egrie.soundtrail.integrations.GoogleAuthHealth
 import tech.egrie.soundtrail.integrations.GoogleAuthState
-import tech.egrie.soundtrail.integrations.YouTubeConsentRequiredException
 import tech.egrie.soundtrail.integrations.YouTubeDataService
 import tech.egrie.soundtrail.integrations.YouTubeImportedPlaylist
 import tech.egrie.soundtrail.integrations.YouTubeReconnectRequiredException
@@ -117,7 +112,6 @@ internal data class AppState(
     val connecting: Boolean = false,
     val connectingSoundcloud: Boolean = false,
     val connectingJellyfin: Boolean = false,
-    val connectingYouTubeData: Boolean = false,
     val connectingYouTubeOAuth: Boolean = false,
     val searchProvider: SearchProvider = SearchProvider.SPOTIFY,
     val searching: Boolean = false,
@@ -152,16 +146,11 @@ internal data class AppState(
     val offlineAudioBusy: Boolean = false,
     val audioStorageBytes: Long = 0L,
     val watchStatus: tech.egrie.soundtrail.automation.WatchStatus = tech.egrie.soundtrail.automation.WatchStatus(),
-    /** The optional Google activity-recognition opt-in. Nothing probes Play services at launch. */
-    val activityRecognitionEnabled: Boolean = false,
     /** Automatic on-device snapshots: the switch, the files kept, and whether one is writing. */
     val managedBackups: ManagedBackupStatus = ManagedBackupStatus(),
     val spotifyAppInstalled: Boolean = false,
     val soundcloudAppInstalled: Boolean = false,
     val youtubeAppInstalled: Boolean = false,
-    val servicesLabel: String = "Checking services…",
-    val gmsSignInAvailable: Boolean = false,
-    val microGReInstalled: Boolean = false,
     /** The mood reader: what the listener typed, what it meant, and the mix it produced. */
     val mood: MoodUiState = MoodUiState(),
     /** The Ask tab: what was said or typed, and the answer to it. */
@@ -309,7 +298,6 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     private val automations = AutomationStore(application) { scheduleManagedBackup() }
 
     private var managedBackupJob: Job? = null
-    private val activityRecognition = ActivityRecognitionStore(application)
     private val files = FileStore(application)
     private val spotify = SpotifyService(application)
     private val soundcloud = SoundCloudService(application)
@@ -374,9 +362,6 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             youtubeDataConnected = youtubeData.connected,
             youtubeDataAccount = youtubeData.accountName,
             youtubeOAuthClientId = youtubeData.oauthClientId,
-            gmsSignInAvailable = apps.systemGmsInstalled,
-            microGReInstalled = apps.microGReInstalled,
-            activityRecognitionEnabled = activityRecognition.enabled,
             managedBackups = ManagedBackupStatus(enabled = localBackups.enabled),
             syncServer = cloudSync.serverUrl,
             syncEffectiveServer = cloudSync.effectiveServerUrl,
@@ -493,9 +478,6 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 spotifyAppInstalled = apps.spotifyInstalled,
                 soundcloudAppInstalled = apps.soundcloudInstalled,
                 youtubeAppInstalled = apps.youtubeMusicPackage != null,
-                servicesLabel = apps.servicesLabel,
-                gmsSignInAvailable = apps.systemGmsInstalled,
-                microGReInstalled = apps.microGReInstalled,
                 spotifyConnected = spotify.connected,
                 soundcloudConnected = soundcloud.connected,
                 jellyfinConnected = jellyfin.connected,
@@ -1850,70 +1832,6 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     /** The server's own web interface, for opening in a browser. */
     fun jellyfinServerUrl(): String = jellyfin.serverUrl
 
-    /** Connects a Google account that the user finished signing in to in the Google sign-in screen. */
-    fun connectYouTubeData(account: GoogleSignInAccount) {
-        val googleAccount = account.account
-        if (googleAccount == null) {
-            notify("Google Sign-In did not return an account. Try again.")
-            return
-        }
-        runYouTubeConnect(onConsentNeeded = null) {
-            youtubeData.connect(googleAccount, account.email ?: account.displayName)
-        }
-    }
-
-    /**
-     * Connects the microG (or device) Google account without a picker. If Google still needs the
-     * read-only consent, [onConsentNeeded] runs so the caller can open the interactive sign-in.
-     */
-    fun connectMicroGAccount(account: Account, onConsentNeeded: () -> Unit) {
-        runYouTubeConnect(onConsentNeeded) {
-            youtubeData.connect(account, null)
-        }
-    }
-
-    private fun runYouTubeConnect(
-        onConsentNeeded: (() -> Unit)?,
-        connect: suspend () -> String
-    ) {
-        if (_state.value.connectingYouTubeData) return
-        _state.update { it.copy(connectingYouTubeData = true, youtubeDataConnected = false) }
-        viewModelScope.launch {
-            try {
-                val accountName = connect()
-                _state.update {
-                    it.copy(
-                        youtubeDataConnected = true,
-                        youtubeDataAccount = accountName,
-                        youtubeAutoImportEnabled = youtubePrefs.getBoolean("auto_import", true),
-                        youtubeLastImportedAt = youtubePrefs.getLong("last_imported_at", 0L)
-                    )
-                }
-                notify("YouTube read-only access connected. Playlists will import automatically if that option is on.")
-                maybeAutoImportYouTube()
-            } catch (e: YouTubeConsentRequiredException) {
-                _state.update { it.copy(youtubeDataConnected = false, youtubeDataAccount = null) }
-                if (onConsentNeeded != null) {
-                    onConsentNeeded()
-                } else {
-                    notify(e.message ?: "Approve the YouTube read-only permission, then connect again.")
-                }
-            } catch (e: Exception) {
-                _state.update { it.copy(youtubeDataConnected = false, youtubeDataAccount = null) }
-                notify(e.message ?: "Could not connect your YouTube account.")
-            } finally {
-                _state.update {
-                    it.copy(
-                        connectingYouTubeData = false,
-                        youtubeDataConnected = youtubeData.connected,
-                        youtubeDataAccount = youtubeData.accountName,
-                        youtubeAuth = youtubeData.authHealth()
-                    )
-                }
-            }
-        }
-    }
-
     /**
      * Starts the browser OAuth flow with the user's own Desktop client ID (no GMS needed).
      * A blank [clientId] means "reconnect with the Client ID this device already remembers",
@@ -2557,40 +2475,6 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         _state.update { it.copy(automations = updated) }
         recordCloudSyncChanges()
         notify("Automation removed.")
-    }
-
-    /**
-     * Turns the optional Google activity-recognition source on or off.
-     *
-     * The permission is requested by the activity, not here, and this method is only reached
-     * once it has been granted (or when the source is being switched off). Play services is also
-     * checked here, at the moment of opting in, so the app never probes it on launch and never
-     * depends on it: a device without Play services keeps the switch off and keeps using GPS
-     * speed, exactly as a listener who declines the permission does.
-     */
-    fun setActivityRecognitionEnabled(enabled: Boolean) {
-        // Availability is checked here, on the switch the listener actually touched — never at
-        // app startup. A phone without Play services therefore never loads that path at all, and
-        // the message says plainly why the switch did not stay on.
-        if (enabled && !GoogleActivityMotion.available(getApplication())) {
-            notify(
-                "Google Play services isn't available on this device, so activity recognition " +
-                    "can't be used. Motion still comes from GPS speed."
-            )
-            return
-        }
-        activityRecognition.enabled = enabled
-        if (!enabled) activityRecognition.clear()
-        _state.update { it.copy(activityRecognitionEnabled = enabled) }
-        LocationWatchService.refreshActivityRecognition(getApplication<Application>())
-        notify(
-            if (enabled) {
-                "Google activity recognition on. Motion comes from Play services, with GPS " +
-                    "speed as the fallback."
-            } else {
-                "Google activity recognition off. Motion comes from GPS speed only."
-            }
-        )
     }
 
     /**

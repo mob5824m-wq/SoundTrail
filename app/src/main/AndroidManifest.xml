@@ -4,20 +4,12 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <!-- Optional, opt-in Google activity recognition. Requested only when the switch on the
-         Lists tab is turned on; GPS speed remains the default and the fallback. -->
-    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
-    <uses-permission
-        android:name="com.google.android.gms.permission.ACTIVITY_RECOGNITION"
-        android:maxSdkVersion="28" />
     <!-- Only for the opt-in automation watch: a visible foreground service, never hidden tracking. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <!-- Background Jellyfin streaming: the playback notification's foreground service type. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Lists the device's microG/Google account so Connect Google can use it without a picker. -->
-    <uses-permission android:name="android.permission.GET_ACCOUNTS" />
     <!-- Voice: asked for at the moment the microphone button is pressed, never at launch, and
          only while a listen is running. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
@@ -32,9 +24,6 @@
         <package android:name="com.google.android.apps.youtube.music" />
         <package android:name="app.revanced.android.apps.youtube.music" />
         <package android:name="app.revanced.android.youtube.music" />
-        <package android:name="app.revanced.android.gms" />
-        <package android:name="com.mgoogle.android.gms" />
-        <package android:name="com.google.android.gms" />
         <!-- Android 11+ hides speech engines as well; without these the voice features would
              find no recognizer and no text-to-speech on a phone that has both. -->
         <intent>
@@ -108,12 +97,6 @@
             android:name=".automation.LocationWatchService"
             android:exported="false"
             android:foregroundServiceType="location" />
-
-        <!-- Activity-transition callbacks from Google Play services. Explicit, unexported:
-             only the system service can deliver them. -->
-        <receiver
-            android:name=".automation.ActivityTransitionReceiver"
-            android:exported="false" />
 
         <!-- Jellyfin streaming continues outside the app under a MediaStyle notification. -->
         <service

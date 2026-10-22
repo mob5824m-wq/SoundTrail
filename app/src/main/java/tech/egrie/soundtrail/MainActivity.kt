@@ -1,7 +1,6 @@
 package tech.egrie.soundtrail
 
 import android.Manifest
-import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -23,10 +22,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.toArgb
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModelProvider
-import com.google.android.gms.auth.api.signin.GoogleSignIn
-import com.google.android.gms.auth.api.signin.GoogleSignInStatusCodes
-import com.google.android.gms.common.api.ApiException
-import tech.egrie.soundtrail.automation.GoogleActivityMotion
 import tech.egrie.soundtrail.automation.LocationWatchService
 import tech.egrie.soundtrail.data.GeoPoint
 import tech.egrie.soundtrail.data.MusicPin
@@ -35,7 +30,6 @@ import tech.egrie.soundtrail.integrations.DeviceApps
 import tech.egrie.soundtrail.integrations.MusicLink
 import tech.egrie.soundtrail.integrations.MusicLinkParser
 import tech.egrie.soundtrail.integrations.MusicProvider
-import tech.egrie.soundtrail.integrations.YouTubeDataService
 import tech.egrie.soundtrail.integrations.YouTubeSearch
 import tech.egrie.soundtrail.location.DeviceLocation
 import tech.egrie.soundtrail.ui.AssistantActions
@@ -57,37 +51,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var apps: DeviceApps
     private var incomingDraft by mutableStateOf<PinDraft?>(null)
     private var listsOpenSignal by mutableStateOf(0)
-
-    private val accountsPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        // Without account access Soundtrail cannot see microG's account, so use the sign-in screen.
-        if (granted) continueYouTubeConnect() else launchGoogleSignIn()
-    }
-
-    private val youtubeSignInLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        val data = result.data
-        if (data == null) {
-            if (result.resultCode == Activity.RESULT_OK) model.notify("Google services returned no sign-in result.")
-            return@registerForActivityResult
-        }
-        try {
-            val account = GoogleSignIn.getSignedInAccountFromIntent(data)
-                .getResult(ApiException::class.java)
-            model.connectYouTubeData(account)
-        } catch (e: ApiException) {
-            if (e.statusCode != GoogleSignInStatusCodes.SIGN_IN_CANCELLED) {
-                model.notify(
-                    "Google sign-in failed (${e.statusCode}). Check the Android OAuth setup and " +
-                        "that Google Play services or compatible microG is available."
-                )
-            }
-        } catch (e: Exception) {
-            model.notify(e.message ?: "Could not finish Google sign-in.")
-        }
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -116,16 +79,6 @@ class MainActivity : ComponentActivity() {
                 if (located) startWatch()
                 else model.notify("Location permission is needed to watch for triggers.")
             }
-            // Google's activity recognition is optional. The permission is asked for only when
-            // the listener turns it on, and refusing it leaves GPS speed in place.
-            val activityRecognitionPermission = rememberLauncherForActivityResult(
-                ActivityResultContracts.RequestPermission()
-            ) { granted ->
-                if (granted) model.setActivityRecognitionEnabled(true)
-                else model.notify(
-                    "Activity recognition was not allowed. Motion still comes from GPS speed."
-                )
-            }
             // Picking the user's own audio file for a playlist song (imported, plays offline).
             var importTarget by mutableStateOf<Pair<String, PlaylistItem>?>(null)
             val audioPicker = rememberLauncherForActivityResult(
@@ -148,26 +101,6 @@ class MainActivity : ComponentActivity() {
                         ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
                     }
                     if (needed.isEmpty()) startWatch() else watchPermissions.launch(needed.toTypedArray())
-                }
-            }
-            val toggleActivityRecognition: (Boolean) -> Unit = { enable ->
-                when {
-                    !enable -> model.setActivityRecognitionEnabled(false)
-                    // Checked only when the switch is touched, so a listener who never opts in
-                    // never causes a Play services lookup.
-                    !GoogleActivityMotion.available(this) ->
-                        model.notify(
-                            "Google Play services isn't available on this device, so activity " +
-                                "recognition can't be used. Motion still comes from GPS speed."
-                        )
-                    Build.VERSION.SDK_INT < 29 ||
-                        ContextCompat.checkSelfPermission(
-                            this, Manifest.permission.ACTIVITY_RECOGNITION
-                        ) == PackageManager.PERMISSION_GRANTED ->
-                        model.setActivityRecognitionEnabled(true)
-                    else -> activityRecognitionPermission.launch(
-                        Manifest.permission.ACTIVITY_RECOGNITION
-                    )
                 }
             }
             val onLocate: () -> Unit = {
@@ -245,7 +178,6 @@ class MainActivity : ComponentActivity() {
                     nowPlaying = model.player.state,
                     lists = ListsActions(
                         onToggleWatch = toggleWatch,
-                        onToggleActivityRecognition = toggleActivityRecognition,
                         onToggleAutoSearch = model::setAutoSearchYoutube,
                         onNewPlaylist = model::createPlaylist,
                         onDeletePlaylist = model::deletePlaylist,
@@ -334,7 +266,6 @@ class MainActivity : ComponentActivity() {
                     onConnectJellyfin = model::connectJellyfin,
                     onDisconnectJellyfin = model::disconnectJellyfin,
                     onOpenJellyfin = { if (!apps.openWeb(model.jellyfinServerUrl())) model.notify("No browser found.") },
-                    onConnectYouTubeData = ::connectYouTubeData,
                     onConnectYouTubeOAuth = ::connectYouTubeOAuth,
                     onDisconnectYouTubeData = model::disconnectYouTubeData,
                     onOpenYouTubeSetup = {
@@ -530,44 +461,8 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Connect Google using the microG account. With exactly one Google-type account on the device
-     * it is used directly, with no picker. With none, or several, the Google Sign-In screen
-     * (served by microG or Google Play services) lets the user choose or add an account.
-     */
-    private fun connectYouTubeData() {
-        if (model.state.value.connectingYouTubeData) return
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.GET_ACCOUNTS) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            accountsPermissionLauncher.launch(Manifest.permission.GET_ACCOUNTS)
-            return
-        }
-        continueYouTubeConnect()
-    }
-
-    private fun continueYouTubeConnect() {
-        val accounts = YouTubeDataService.deviceGoogleAccounts(this)
-        if (accounts.size == 1) {
-            model.connectMicroGAccount(accounts.single()) { launchGoogleSignIn() }
-        } else {
-            launchGoogleSignIn()
-        }
-    }
-
-    private fun launchGoogleSignIn() {
-        try {
-            val client = GoogleSignIn.getClient(this, YouTubeDataService.signInOptions())
-            youtubeSignInLauncher.launch(client.signInIntent)
-        } catch (e: Exception) {
-            model.notify(
-                "Could not start Google sign-in. Install or configure microG or Google Play services."
-            )
-        }
-    }
-
-    /**
-     * Browser-based YouTube OAuth with the user's own Desktop client ID. Unlike Google Sign-In
-     * above, this needs no Play services, standard microG, or MicroG RE account on the device.
+     * Browser-based YouTube OAuth with the user's own Desktop client ID. It needs no Google
+     * services, account, or SDK on the device: only a browser.
      */
     private fun connectYouTubeOAuth(id: String) {
         try {

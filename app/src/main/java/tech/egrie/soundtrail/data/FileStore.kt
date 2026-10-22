@@ -9,7 +9,7 @@ import java.util.UUID
 
 /**
  * Audio attached from the user's device or downloaded through an authenticated Jellyfin
- * account or a rights-attested YouTube audio request. Files are kept in private app storage
+ * account. Files are kept in private app storage
  * and shared read-only through FileProvider when played.
  */
 internal data class StoredAudioFile(val name: String, val sizeBytes: Long)

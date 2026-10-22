@@ -36,10 +36,9 @@ F-Droid shows on its site lives in `fastlane/metadata/android/en-US/` in this re
 - **Anti-features.** The recipe declares `NonFreeNet` (optional Spotify, SoundCloud, YouTube, and
   AI-provider connections) and `NonFreeAdd` (links that open Spotify, SoundCloud, and YouTube Music
   apps). Both are informational, but reviewers may ask for more.
-- **Optional YouTube audio extraction.** The README describes an optional audio-only extraction
-  action that uses the configured sync server and requires the listener to confirm rights to the
-  content. F-Droid's inclusion policy is strict about tools that enable copyright infringement.
-  Expect questions about it. If it is a problem, the feature needs to go before submission.
+- **YouTube audio extraction (removed).** The app no longer downloads or extracts YouTube audio,
+  and the sync server no longer has a YouTube endpoint. That code moved to a separate repository,
+  so nothing in this tree can request copyrighted audio from YouTube.
 - **Patched YouTube Music apps.** The app lists Morphe and ReVanced package names so it can hand
   links to them. Reviewers may ask about this.
 - **Committed debug keystore.** `keystore/soundtrail-debug.p12` uses the public Android debug

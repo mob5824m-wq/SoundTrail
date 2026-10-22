@@ -12,7 +12,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import tech.egrie.soundtrail.automation.AutomationStore
 import tech.egrie.soundtrail.auto.AutoTree
 import tech.egrie.soundtrail.data.FileStore
@@ -28,7 +27,6 @@ import tech.egrie.soundtrail.integrations.MusicProvider
 import tech.egrie.soundtrail.integrations.SoundCloudService
 import tech.egrie.soundtrail.integrations.SpotifyService
 import tech.egrie.soundtrail.sync.CloudSyncService
-import java.io.File
 
 /**
  * The one place playback is decided, for every surface the app has.
@@ -90,9 +88,6 @@ internal class PlaybackHub private constructor(context: Context) : SessionTransp
     /** The entry whose end has already been acted on, so one completion advances once. */
     private var advancedPast: String? = null
 
-    /** The last YouTube audio pulled for in-app playback, kept only until the next one. */
-    private var lastYouTubeCopy: File? = null
-
     /** Told when the library changes, so an open car list can refresh. */
     private var libraryWatcher: (() -> Unit)? = null
 
@@ -109,7 +104,7 @@ internal class PlaybackHub private constructor(context: Context) : SessionTransp
                 if (current == null || state.itemId != current.mediaId) return@collect
                 if (advancedPast == current.mediaId) return@collect
                 advancedPast = current.mediaId
-                if (queue.hasNext()) startAt(queue.index + 1) else discardYouTubeCopy()
+                if (queue.hasNext()) startAt(queue.index + 1)
             }
         }
     }
@@ -151,11 +146,7 @@ internal class PlaybackHub private constructor(context: Context) : SessionTransp
         queue.clear()
         publishQueue()
         player.stop()
-        discardYouTubeCopy()
     }
-
-    /** Drops the temporary YouTube audio file kept for in-app playback, if any. */
-    fun clearYouTubeCache() = discardYouTubeCopy()
 
     // ----- What the car, the lockscreen and the headset ask for -----
 
@@ -291,7 +282,7 @@ internal class PlaybackHub private constructor(context: Context) : SessionTransp
             MusicProvider.JELLYFIN -> startJellyfin(link, entry)
             MusicProvider.SPOTIFY -> startSpotify(link, entry)
             MusicProvider.SOUNDCLOUD -> startSoundcloud(link, entry)
-            MusicProvider.YOUTUBE, MusicProvider.YOUTUBE_MUSIC -> startYouTube(link, entry)
+            MusicProvider.YOUTUBE, MusicProvider.YOUTUBE_MUSIC -> startYouTube(entry)
         }
     }
 
@@ -336,37 +327,11 @@ internal class PlaybackHub private constructor(context: Context) : SessionTransp
     }
 
     /**
-     * YouTube audio is prepared by the user's own sync server, so this path needs the server
-     * connected before it can start. The result is a private temporary file that plays through
-     * the same player as everything else, and is dropped as soon as another song starts.
+     * Soundtrail does not extract or store YouTube audio, so a YouTube link cannot play in-app.
+     * Offline files the user owns still play normally.
      */
-    private suspend fun startYouTube(link: MusicLink, entry: QueueEntry): Boolean {
-        val videoId = MusicLinkParser.youtubeVideoId(link.url)
-            ?: return fail("That YouTube link is not a playable video.")
-        if (!cloudSync.connected) {
-            return fail("Connect your sync server to play ${entry.title} in-app, or download it for offline playback first.")
-        }
-        player.setBuffering(entry.title, entry.artist, entry.mediaId, link.provider)
-        discardYouTubeCopy()
-        val staging = withContext(Dispatchers.IO) { files.newDownloadTemp() }
-        return try {
-            cloudSync.downloadYouTubeAudio(videoId, staging, userConfirmedRights = true) { _, _, _ -> }
-            if (!staging.isFile || staging.length() == 0L) {
-                withContext(Dispatchers.IO) { files.discardDownloadTemp(staging) }
-                fail("Couldn't prepare YouTube audio for ${entry.title}.")
-            } else {
-                lastYouTubeCopy = staging
-                player.playLocalFile(entry.title, entry.artist, entry.mediaId, staging, link.provider)
-                true
-            }
-        } catch (e: CancellationException) {
-            withContext(Dispatchers.IO) { files.discardDownloadTemp(staging) }
-            throw e
-        } catch (e: Exception) {
-            withContext(Dispatchers.IO) { files.discardDownloadTemp(staging) }
-            fail(e.message ?: "YouTube playback failed for ${entry.title}.")
-        }
-    }
+    private fun startYouTube(entry: QueueEntry): Boolean =
+        fail("Soundtrail can't play ${entry.title} in-app. Open it in YouTube Music, or attach an audio file you own.")
 
     /** Starts the first thing in the library; what pressing play in the car does with nothing chosen. */
     private fun playFirstFromLibrary() {
@@ -393,9 +358,4 @@ internal class PlaybackHub private constructor(context: Context) : SessionTransp
         _messages.tryEmit(text)
     }
 
-    private fun discardYouTubeCopy() {
-        val copy = lastYouTubeCopy ?: return
-        lastYouTubeCopy = null
-        scope.launch(Dispatchers.IO) { files.discardDownloadTemp(copy) }
-    }
 }

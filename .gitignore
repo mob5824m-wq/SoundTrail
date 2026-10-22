@@ -15,10 +15,12 @@ local.properties
 # local and CI, shares that one key so an APK installs as an update over the last one.
 # It holds the standard public debug credentials (androiddebugkey / android).
 
-# Python tooling
+# Python / self-hosted server
 __pycache__/
 *.py[cod]
 .venv/
+# Local sync database (default location when SOUNDTRAIL_DB is unset)
+server/data/
 *.sqlite3
 *.sqlite3-*
 

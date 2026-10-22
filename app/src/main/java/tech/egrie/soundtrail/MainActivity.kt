@@ -192,8 +192,7 @@ class MainActivity : ComponentActivity() {
                             playPlaylistItem(item)
                         },
                         onGetSong = { item ->
-                            // This external action shares a link only; the separate YouTube offline
-                            // action uses the self-hosted audio endpoint after rights confirmation.
+                            // This external action shares a link only.
                             val link = item.url?.let(MusicLinkParser::parse)
                             val target = if (link != null && link.provider == MusicProvider.JELLYFIN) {
                                 model.jellyfinWebUrl(link) ?: link.url
@@ -203,7 +202,6 @@ class MainActivity : ComponentActivity() {
                             if (!apps.shareUrl(target)) model.notify("Nothing can receive this link.")
                         },
                         onDownloadJellyfin = model::downloadJellyfinOffline,
-                        onDownloadYouTube = model::downloadYouTubeOffline,
                         onRemoveOfflineAudio = model::removeOfflineAudio,
                         onRemoveOfflineFile = model::removeStoredOfflineAudio,
                         onClearAllOfflineAudio = model::clearAllOfflineAudio,

@@ -84,7 +84,6 @@ import tech.egrie.soundtrail.playback.QueueEntry
 import tech.egrie.soundtrail.playback.toQueueEntry
 import tech.egrie.soundtrail.sync.CloudSyncException
 import tech.egrie.soundtrail.sync.CloudSyncService
-import tech.egrie.soundtrail.sync.YouTubeAudioStage
 import java.util.UUID
 
 /** Which connected catalog the Search tab queries. */
@@ -138,7 +137,6 @@ internal data class AppState(
     val syncError: String? = null,
     val syncRecoveryKey: String? = null,
     val jellyfinDownloads: Map<String, JellyfinDownloadProgress> = emptyMap(),
-    val youtubeDownloads: Map<String, YouTubeDownloadProgress> = emptyMap(),
     val youtubeImporting: Boolean = false,
     val youtubeAutoImportEnabled: Boolean = true,
     val youtubeLastImportedAt: Long = 0L,
@@ -258,12 +256,6 @@ internal data class MoodUiState(
 )
 
 internal data class JellyfinDownloadProgress(val receivedBytes: Long, val totalBytes: Long)
-
-internal data class YouTubeDownloadProgress(
-    val stage: YouTubeAudioStage,
-    val receivedBytes: Long,
-    val totalBytes: Long
-)
 
 internal data class OfflineAudioItem(
     val fileName: String,
@@ -716,8 +708,6 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
 
     /** Ends playback and clears the queue behind every surface: bar, notification and car. */
     fun stopPlayback() = hub.stopPlayback()
-
-    fun clearYouTubePlaybackCache() = hub.clearYouTubeCache()
 
     // ----- Ask: talking to the app, and the answer coming back -----
 
@@ -2141,7 +2131,6 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
 
     /**
      * Adds a song to a playlist. All music now plays directly in-app, so no external search URL is returned.
-     * YouTube offline audio remains a separate, rights-confirmed action through the self-hosted API.
      */
     fun addToPlaylist(playlistId: String, rawTitle: String, rawArtist: String, rawUrl: String) {
         if (rejectMutationWhileSyncing()) return
@@ -2250,66 +2239,6 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         }
     }
 
-    /** Requests audio-only extraction for a YouTube item after the UI's explicit rights confirmation. */
-    fun downloadYouTubeOffline(playlistId: String, itemId: String) {
-        if (rejectMutationWhileSyncing()) return
-        val key = "$playlistId:$itemId"
-        if (_state.value.youtubeDownloads.containsKey(key)) return
-        if (!cloudSync.connected) {
-            notify("Sign in to your sync server to use its YouTube audio extractor.")
-            return
-        }
-        val item = playlists.find(playlistId)?.items?.firstOrNull { it.id == itemId }
-        if (item == null) {
-            notify("That playlist song no longer exists.")
-            return
-        }
-        if (item.localFile?.let(files::exists) == true) {
-            notify("That song is already available offline on this device.")
-            return
-        }
-        val videoId = item.url?.let(MusicLinkParser::youtubeVideoId)
-        if (videoId == null) {
-            notify("Audio extraction is available for supported YouTube video links only.")
-            return
-        }
-        _state.update {
-            it.copy(youtubeDownloads = it.youtubeDownloads + (key to YouTubeDownloadProgress(YouTubeAudioStage.PREPARING, 0L, 0L)))
-        }
-        viewModelScope.launch {
-            var temp: java.io.File? = null
-            var downloadedName: String? = null
-            var attached = false
-            try {
-                val staging = withContext(Dispatchers.IO) { files.newDownloadTemp() }
-                temp = staging
-                val info = cloudSync.downloadYouTubeAudio(videoId, staging, userConfirmedRights = true) { stage, received, total ->
-                    _state.update {
-                        it.copy(youtubeDownloads = it.youtubeDownloads +
-                            (key to YouTubeDownloadProgress(stage, received, total)))
-                    }
-                }
-                downloadedName = withContext(Dispatchers.IO) {
-                    files.finishDownload(staging, info.contentType, info.filename)
-                } ?: throw IllegalStateException("Couldn't save that audio file to this device.")
-                val latest = playlists.find(playlistId)?.items?.firstOrNull { it.id == itemId }
-                if (latest == null) throw IllegalStateException("That playlist song was removed during the extraction.")
-                attached = playlists.replaceItem(playlistId, itemId, latest.copy(localFile = downloadedName))
-                if (!attached) throw IllegalStateException("Couldn't attach the extracted audio to its song.")
-                refreshOfflineAudioState()
-                val mebibytes = info.bytes / (1024L * 1024L)
-                notify("${item.title} extracted as audio for offline playback (${mebibytes} MiB).")
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                notify(e.message ?: "YouTube audio extraction failed.")
-            } finally {
-                temp?.let(files::discardDownloadTemp)
-                if (!attached) downloadedName?.let(files::delete)
-                _state.update { it.copy(youtubeDownloads = it.youtubeDownloads - key) }
-            }
-        }
-    }
-
     /** Attaches a user-picked audio file (their own download/import) to a playlist song. */
     fun attachLocalAudio(uri: Uri, playlistId: String, itemId: String) {
         if (rejectOfflineAudioManagement()) return
@@ -2352,9 +2281,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             notify("That song has no offline copy to remove.")
             return
         }
-        if ("$playlistId:$itemId" in _state.value.jellyfinDownloads ||
-            "$playlistId:$itemId" in _state.value.youtubeDownloads
-        ) {
+        if ("$playlistId:$itemId" in _state.value.jellyfinDownloads) {
             notify("Wait for the download to finish before removing its offline copy.")
             return
         }
@@ -2434,7 +2361,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         when {
             current.syncBusy || current.backupBusy -> notify("Wait for the current sync or backup to finish.")
             current.offlineAudioBusy -> notify("Offline audio is already being managed.")
-            current.jellyfinDownloads.isNotEmpty() || current.youtubeDownloads.isNotEmpty() ->
+            current.jellyfinDownloads.isNotEmpty() ->
                 notify("Wait for audio downloads to finish before managing offline storage.")
             else -> return false
         }
@@ -2609,7 +2536,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     private fun runCloudSync(showMessages: Boolean) {
         if (_state.value.syncBusy) return
         if (_state.value.backupBusy || _state.value.offlineAudioBusy ||
-            _state.value.jellyfinDownloads.isNotEmpty() || _state.value.youtubeDownloads.isNotEmpty()
+            _state.value.jellyfinDownloads.isNotEmpty()
         ) {
             if (showMessages) notify("Wait for the current backup or audio download to finish before syncing.")
             return
@@ -2926,7 +2853,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
      */
     fun exportBackup(uri: Uri) {
         if (_state.value.syncBusy || _state.value.backupBusy || _state.value.offlineAudioBusy ||
-            _state.value.jellyfinDownloads.isNotEmpty() || _state.value.youtubeDownloads.isNotEmpty()
+            _state.value.jellyfinDownloads.isNotEmpty()
         ) {
             notify("Wait for the current sync, backup, or audio operation to finish.")
             return
@@ -2966,7 +2893,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
      */
     fun importBackup(uri: Uri) {
         if (rejectMutationWhileSyncing() || _state.value.backupBusy ||
-            _state.value.jellyfinDownloads.isNotEmpty() || _state.value.youtubeDownloads.isNotEmpty()
+            _state.value.jellyfinDownloads.isNotEmpty()
         ) return
         _state.update { it.copy(backupBusy = true) }
         viewModelScope.launch {

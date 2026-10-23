@@ -2,10 +2,6 @@ package tech.egrie.soundtrail.sync
 
 import android.content.Context
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import tech.egrie.soundtrail.automation.AutomationStore
@@ -14,8 +10,6 @@ import tech.egrie.soundtrail.data.PinStore
 import tech.egrie.soundtrail.data.PlaylistStore
 import tech.egrie.soundtrail.integrations.SecretStore
 import tech.egrie.soundtrail.integrations.httpRequest
-import java.io.File
-import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
 import java.util.UUID
@@ -34,14 +28,6 @@ internal data class CloudSyncResult(
 private data class CloudPullResult(
     val downloaded: Int,
     val retainedEvents: Int
-)
-
-internal enum class YouTubeAudioStage { PREPARING, TRANSFERRING }
-
-internal data class YouTubeAudioDownloadInfo(
-    val contentType: String?,
-    val filename: String?,
-    val bytes: Long
 )
 
 /**
@@ -210,102 +196,6 @@ internal class CloudSyncService(
             compactionWarning = compactionWarning
         )
     }
-
-    /**
-     * Requests an audio-only public YouTube extraction from the configured sync server (the
-     * public default or a self-hosted server). The app sends no provider token or session
-     * cookie; the user must explicitly confirm rights.
-     */
-    suspend fun downloadYouTubeAudio(
-        videoId: String,
-        target: File,
-        userConfirmedRights: Boolean,
-        onProgress: (stage: YouTubeAudioStage, received: Long, total: Long) -> Unit = { _, _, _ -> }
-    ): YouTubeAudioDownloadInfo = withContext(Dispatchers.IO) {
-        if (!userConfirmedRights) throw CloudSyncException("Confirm you own or have permission to download this audio.")
-        if (!videoId.matches(Regex("[A-Za-z0-9_-]{11}"))) throw CloudSyncException("That YouTube video link is not valid.")
-        if (!connected) throw CloudSyncException("Connect your sync server before extracting YouTube audio.")
-        val token = secrets.get(TOKEN_KEY).orEmpty()
-        val baseServer = effectiveServerUrl.trimEnd('/')
-        val connection = (URL(baseServer + "/v1/youtube/audio").openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            instanceFollowRedirects = false
-            connectTimeout = 15_000
-            readTimeout = 600_000
-            doOutput = true
-            setRequestProperty("Accept", "audio/*, application/json;q=0.8")
-            setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-            setRequestProperty("Cache-Control", "no-store")
-            setRequestProperty("Authorization", "Bearer $token")
-        }
-        try {
-            val request = JSONObject().put("videoId", videoId).put("authorized", true).toString().toByteArray(Charsets.UTF_8)
-            connection.setFixedLengthStreamingMode(request.size)
-            connection.outputStream.use { it.write(request) }
-            onProgress(YouTubeAudioStage.PREPARING, 0L, 0L)
-            val code = connection.responseCode
-            if (code !in 200..299) {
-                val message = readErrorBody(connection)
-                val detail = runCatching { JSONObject(message).optString("error") }.getOrNull().orEmpty()
-                if (code == 401) throw CloudSyncException("Sign in to your sync server before downloading YouTube audio.")
-                throw CloudSyncException(detail.ifBlank { "The sync server audio extractor returned HTTP $code." })
-            }
-            val mediaType = connection.contentType?.substringBefore(';')?.trim()?.lowercase()
-            if (mediaType == null || !mediaType.startsWith("audio/")) {
-                throw CloudSyncException("The sync server returned something other than an audio file.")
-            }
-            val total = connection.contentLengthLong
-            if (total > MAX_YOUTUBE_AUDIO_BYTES) {
-                throw CloudSyncException("That track is larger than the 250 MiB offline-download limit.")
-            }
-            onProgress(YouTubeAudioStage.TRANSFERRING, 0L, total)
-            target.parentFile?.mkdirs()
-            var received = 0L
-            connection.inputStream.use { input ->
-                target.outputStream().use { output ->
-                    val buffer = ByteArray(32 * 1024)
-                    while (true) {
-                        currentCoroutineContext().ensureActive()
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        received += count
-                        if (received > MAX_YOUTUBE_AUDIO_BYTES) {
-                            throw CloudSyncException("That track is larger than the 250 MiB offline-download limit.")
-                        }
-                        output.write(buffer, 0, count)
-                        onProgress(YouTubeAudioStage.TRANSFERRING, received, total)
-                    }
-                }
-            }
-            if (received == 0L) throw CloudSyncException("The extractor returned an empty audio file.")
-            val extension = when (mediaType) {
-                "audio/mp4", "audio/m4a" -> "m4a"
-                "audio/webm" -> "webm"
-                "audio/mpeg", "audio/mp3" -> "mp3"
-                "audio/ogg", "audio/opus" -> "ogg"
-                "audio/aac" -> "aac"
-                "audio/flac", "audio/x-flac" -> "flac"
-                else -> "audio"
-            }
-            YouTubeAudioDownloadInfo(mediaType, "youtube-audio.$extension", received)
-        } finally {
-            connection.disconnect()
-        }
-    }
-
-    private fun readErrorBody(connection: HttpURLConnection): String = runCatching {
-        val stream = connection.errorStream ?: return@runCatching ""
-        stream.bufferedReader().use { reader ->
-            val result = StringBuilder()
-            val buffer = CharArray(1_024)
-            while (result.length < MAX_ERROR_BODY_CHARS) {
-                val count = reader.read(buffer, 0, minOf(buffer.size, MAX_ERROR_BODY_CHARS - result.length))
-                if (count < 0) break
-                result.append(buffer, 0, count)
-            }
-            result.toString()
-        }
-    }.getOrDefault("")
 
     /** Revokes this session best-effort and removes credentials/key, but keeps local data. */
     suspend fun disconnect() {
@@ -590,8 +480,6 @@ internal class CloudSyncService(
         private const val MAX_SYNC_PAGES = 5_000
         private const val MAX_PAGE_ENVELOPE_CHARS = 32L * 1024L * 1024L
         private const val COMPACT_AFTER_EVENTS = 1_000
-        private const val MAX_ERROR_BODY_CHARS = 4_000
-        private const val MAX_YOUTUBE_AUDIO_BYTES = 250L * 1024L * 1024L
         private const val KEY_CHECK_ID = "account-key-check-v1"
         private const val KEY_CHECK_MARKER = "soundtrail-e2e-sync-v1"
     }

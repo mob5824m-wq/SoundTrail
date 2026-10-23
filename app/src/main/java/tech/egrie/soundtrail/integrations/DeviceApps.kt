@@ -28,25 +28,6 @@ class DeviceApps(private val context: Context) {
     ).firstOrNull(::installed)
 
     /**
-     * True Google Sign-In support: Google Play Services or standard microG under the system
-     * package name. MicroG RE does not serve unpatched third-party apps, so it is reported
-     * separately and the Connect tab offers the browser Client ID sign-in instead.
-     */
-    val systemGmsInstalled: Boolean get() = installed("com.google.android.gms")
-
-    /** MicroG RE / ReVanced GmsCore: authenticates Morphe/ReVanced patched apps only. */
-    val microGReInstalled: Boolean get() =
-        installed("app.revanced.android.gms") || installed("com.mgoogle.android.gms")
-
-    /** A standard com.google.android.gms installation may be Google Play Services OR microG. */
-    val servicesLabel: String get() = when {
-        systemGmsInstalled && microGReInstalled -> "Google services + MicroG RE detected"
-        microGReInstalled -> "MicroG RE detected"
-        systemGmsInstalled -> "Google services available (may be microG)"
-        else -> "No Google services detected"
-    }
-
-    /**
      * Legacy external playback — no longer used for primary music playback since all music
      * now plays directly in Soundtrail. Kept for optional "open in external app" actions.
      */
@@ -68,7 +49,7 @@ class DeviceApps(private val context: Context) {
      * Opens the YouTube Music app (including Morphe/ReVanced patched installs), or the website
      * when no music app is installed.
      *
-     * This never involves Google sign-in: handing a link to an app the listener is already
+     * This never involves a Google sign-in: handing a link to an app the listener is already
      * signed in to is not an API call of Soundtrail's. Only the optional playlist import/search
      * below needs the read-only connection, so opening the music app keeps working across app
      * updates, reinstalls, and revoked grants.

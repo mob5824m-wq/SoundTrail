@@ -22,7 +22,6 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
-      # The API test suite uses only the standard library and deliberately does not
-      # install the optional yt-dlp extraction dependencies.
+      # The server and its API test suite use only the Python standard library.
       - name: Run server API tests
         run: python -m unittest discover -s server -v

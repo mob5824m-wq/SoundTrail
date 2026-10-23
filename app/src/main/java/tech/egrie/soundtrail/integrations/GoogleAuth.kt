@@ -26,7 +26,7 @@ internal data class GoogleAuthHealth(
     val state: GoogleAuthState,
     /** The channel or account label shown to the listener, e.g. a YouTube channel name. */
     val account: String? = null,
-    /** "Google account" or "Client ID (browser)". */
+    /** Always "Client ID (browser)" when connected. */
     val method: String? = null,
     /** When the current grant was first saved. */
     val issuedAt: Long? = null,

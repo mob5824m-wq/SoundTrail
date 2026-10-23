@@ -33,8 +33,6 @@ class LocationWatchService : Service() {
     companion object {
         const val ACTION_START = "app.soundtrail.watch.START"
         const val ACTION_STOP = "app.soundtrail.watch.STOP"
-        /** Re-reads the optional activity-recognition setting while the watch is already up. */
-        const val ACTION_REFRESH_ACTIVITY = "app.soundtrail.watch.REFRESH_ACTIVITY"
         const val EXTRA_OPEN_LISTS = "open_lists"
         const val EXTRA_PLAY_PLAYLIST = "play_playlist"
         private const val CHANNEL_ID = "soundtrail_automation"
@@ -55,27 +53,12 @@ class LocationWatchService : Service() {
             _status.value = WatchStatus()
         }
 
-        /**
-         * Applies a changed opt-in immediately when the watch is running. When it is not, the
-         * preference is simply read the next time the watch starts; no service is woken up.
-         */
-        fun refreshActivityRecognition(context: Context) {
-            if (!_status.value.running) return
-            runCatching {
-                context.startService(
-                    Intent(context, LocationWatchService::class.java)
-                        .setAction(ACTION_REFRESH_ACTIVITY)
-                )
-            }
-        }
     }
 
     private lateinit var rules: AutomationStore
     private lateinit var playlists: PlaylistStore
-    private lateinit var activityStore: ActivityRecognitionStore
     private val handler = Handler(Looper.getMainLooper())
     private var lastFix: Location? = null
-    private var activityRecognitionRegistered = false
 
     private val tick = object : Runnable {
         override fun run() {
@@ -103,7 +86,6 @@ class LocationWatchService : Service() {
         super.onCreate()
         rules = AutomationStore(this)
         playlists = PlaylistStore(this)
-        activityStore = ActivityRecognitionStore(this)
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "Playlist automations", NotificationManager.IMPORTANCE_DEFAULT)
@@ -116,13 +98,8 @@ class LocationWatchService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        if (intent?.action == ACTION_REFRESH_ACTIVITY) {
-            syncActivityRecognition()
-            return START_STICKY
-        }
         startInForeground()
         registerUpdates()
-        syncActivityRecognition()
         handler.removeCallbacks(tick)
         handler.post(tick)
         return START_STICKY
@@ -131,10 +108,6 @@ class LocationWatchService : Service() {
     override fun onDestroy() {
         handler.removeCallbacks(tick)
         unregisterUpdates()
-        if (activityRecognitionRegistered) {
-            GoogleActivityMotion.cancel(this)
-            activityRecognitionRegistered = false
-        }
         _status.value = WatchStatus()
         super.onDestroy()
     }
@@ -172,43 +145,15 @@ class LocationWatchService : Service() {
         runCatching { getSystemService(LocationManager::class.java).removeUpdates(listener) }
     }
 
-    /**
-     * Registers or unregisters Google's activity source to match the opt-in. Failure is not
-     * fatal: [evaluate] keeps classifying GPS speed exactly as it always did.
-     */
-    private fun syncActivityRecognition() {
-        val wanted = activityStore.enabled && GoogleActivityMotion.permissionGranted(this)
-        when {
-            wanted && !activityRecognitionRegistered ->
-                activityRecognitionRegistered = GoogleActivityMotion.request(this)
-            !wanted && activityRecognitionRegistered -> {
-                GoogleActivityMotion.cancel(this)
-                activityRecognitionRegistered = false
-            }
-        }
-        if (!activityStore.enabled) activityStore.clear()
-    }
-
     private fun evaluate() {
         val now = System.currentTimeMillis()
         val minuteOfDay = LocalTime.now().get(java.time.temporal.ChronoField.MINUTE_OF_DAY)
         val fix = lastFix
-        val gpsMotion = MotionClassifier.classify(fix?.speed ?: Float.NaN)
-        val recognized = if (activityStore.enabled) activityStore.last() else null
-        val recognizedAge = recognized?.let { now - it.second } ?: Long.MAX_VALUE
-        val motion = ActivityMotion.choose(gpsMotion, recognized?.first, recognizedAge)
-        val source = if (recognized != null && motion == recognized.first &&
-            recognizedAge in 0..ActivityMotion.FRESH_MS
-        ) {
-            MotionSource.ACTIVITY_RECOGNITION
-        } else {
-            MotionSource.GPS
-        }
+        val motion = MotionClassifier.classify(fix?.speed ?: Float.NaN)
         val point = fix?.let { GeoPoint(it.latitude, it.longitude) }?.takeIf(GeoPoint::isValid)
         _status.value = WatchStatus(
             running = true,
             motion = motion,
-            motionSource = source,
             location = point,
             minuteOfDay = minuteOfDay,
             updatedAt = now

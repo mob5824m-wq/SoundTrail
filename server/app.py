@@ -35,11 +35,9 @@ MAX_BODY_BYTES = 16 * 1024 * 1024
 MAX_EVENT_BYTES = 1024 * 1024
 MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
 MAX_ACCOUNT_SYNC_BYTES = 64 * 1024 * 1024
-MAX_YOUTUBE_AUDIO_BYTES = 250 * 1024 * 1024
 MAX_BATCH_EVENTS = 100
 MAX_PAGE_SIZE = 500
 COMPACT_AFTER_EVENTS = 1_000
-YOUTUBE_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 SESSION_SECONDS = 30 * 24 * 60 * 60
 PASSWORD_MIN_LENGTH = 10
 PASSWORD_MAX_LENGTH = 128
@@ -49,10 +47,6 @@ BASE64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 class QuotaExceededError(ValueError):
     """The account has reached its configured encrypted-storage allowance."""
-
-
-class YouTubeExtractionError(Exception):
-    """A public, audio-only extraction request could not be completed."""
 
 
 class RateLimiter:
@@ -457,66 +451,8 @@ def compact_history(db_path: str, account_id: str, raw_snapshot: Any) -> dict[st
     return {"compacted": True, "snapshotThrough": through, "prunedEvents": int(pruned)}
 
 
-def extract_youtube_audio(video_id: str, output_dir: Path) -> tuple[Path, str]:
-    """Fetch a public audio-only stream, without cookies, Google tokens, or DRM handling."""
-    if not YOUTUBE_VIDEO_ID_RE.fullmatch(video_id):
-        raise ValueError("Enter a single YouTube video id.")
-    try:
-        import yt_dlp  # Installed only in the self-hosted server image.
-    except ImportError as exc:
-        raise YouTubeExtractionError("YouTube audio extraction is not installed on this server.") from exc
-
-    def check_download_size(status: dict[str, Any]) -> None:
-        if status.get("status") == "downloading" and int(status.get("downloaded_bytes") or 0) > MAX_YOUTUBE_AUDIO_BYTES:
-            raise QuotaExceededError("That audio exceeds the 250 MiB offline-download limit.")
-
-    options = {
-        "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
-        "outtmpl": str(output_dir / "youtube-audio.%(ext)s"),
-        "noplaylist": True,
-        "max_filesize": MAX_YOUTUBE_AUDIO_BYTES,
-        "progress_hooks": [check_download_size],
-        "socket_timeout": 30,
-        "retries": 1,
-        "fragment_retries": 1,
-        "quiet": True,
-        "no_warnings": True,
-        "no_color": True,
-        "cachedir": False,
-        "overwrites": True,
-    }
-    try:
-        with yt_dlp.YoutubeDL(options) as downloader:
-            downloader.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=True)
-    except QuotaExceededError:
-        raise
-    except Exception as exc:
-        # Avoid returning extractor diagnostics, headers, or upstream URLs to the client/logs.
-        raise YouTubeExtractionError(
-            "YouTube did not provide a downloadable public audio stream. Login, cookies, and restricted videos are not supported."
-        ) from exc
-
-    candidates = [
-        path for path in output_dir.glob("youtube-audio.*")
-        if path.is_file() and path.suffix.lower() in {".m4a", ".webm", ".mp3", ".opus", ".ogg", ".aac", ".flac"}
-    ]
-    if len(candidates) != 1:
-        raise YouTubeExtractionError("The server did not receive one complete audio-only file.")
-    result = candidates[0]
-    if result.stat().st_size <= 0:
-        raise YouTubeExtractionError("YouTube returned an empty audio file.")
-    if result.stat().st_size > MAX_YOUTUBE_AUDIO_BYTES:
-        raise QuotaExceededError("That audio exceeds the 250 MiB offline-download limit.")
-    content_type = {
-        ".m4a": "audio/mp4", ".webm": "audio/webm", ".mp3": "audio/mpeg",
-        ".opus": "audio/ogg", ".ogg": "audio/ogg", ".aac": "audio/aac", ".flac": "audio/flac",
-    }[result.suffix.lower()]
-    return result, content_type
-
-
 def make_handler(db_path: str):
     limiter = RateLimiter()
-    youtube_slots = threading.BoundedSemaphore(2)
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "SoundtrailSync/1"
@@ -577,72 +513,6 @@ def make_handler(db_path: str):
                 pass
             return peer
 
-        def _post_youtube_audio(self) -> None:
-            auth = self._bearer()
-            if not auth:
-                self._send(401, {"error": "Sign in to the self-hosted server first."})
-                return
-            client_ip = self._rate_limit_ip()
-            if (
-                not limiter.allow("youtube-ip", client_ip, limit=30, window_seconds=60)
-                or not limiter.allow("youtube-account", auth[0], limit=20, window_seconds=60)
-            ):
-                self._send(429, {"error": "Too many audio extraction requests. Try again shortly."}, {"Retry-After": "60"})
-                return
-            try:
-                body = self._body()
-                if body.get("authorized") is not True:
-                    self._send(403, {"error": "Confirm you own or have permission to download this audio."})
-                    return
-                video_id = body.get("videoId")
-                if not isinstance(video_id, str) or not YOUTUBE_VIDEO_ID_RE.fullmatch(video_id):
-                    self._send(400, {"error": "Enter a single YouTube video id."})
-                    return
-            except OverflowError as exc:
-                self._send(413, {"error": str(exc)})
-                return
-            except ValueError as exc:
-                self._send(400, {"error": str(exc)})
-                return
-
-            if not youtube_slots.acquire(blocking=False):
-                self._send(503, {"error": "The audio extractor is busy. Try again shortly."}, {"Retry-After": "30"})
-                return
-            headers_sent = False
-            try:
-                # A per-request temporary directory is removed whether the stream completes or fails.
-                with tempfile.TemporaryDirectory(prefix="soundtrail-youtube-") as directory:
-                    path, content_type = extract_youtube_audio(video_id, Path(directory))
-                    self.send_response(200)
-                    self.send_header("Content-Type", content_type)
-                    self.send_header("Content-Length", str(path.stat().st_size))
-                    self.send_header("Content-Disposition", f'attachment; filename="youtube-audio{path.suffix.lower()}"')
-                    self.send_header("Cache-Control", "no-store")
-                    self.send_header("X-Content-Type-Options", "nosniff")
-                    self.end_headers()
-                    headers_sent = True
-                    with path.open("rb") as audio:
-                        while True:
-                            chunk = audio.read(64 * 1024)
-                            if not chunk:
-                                break
-                            self.wfile.write(chunk)
-                    self.wfile.flush()
-            except QuotaExceededError as exc:
-                if not headers_sent:
-                    self._send(413, {"error": str(exc)})
-            except YouTubeExtractionError as exc:
-                if not headers_sent:
-                    self._send(422, {"error": str(exc)})
-            except OSError as exc:
-                if headers_sent:
-                    print("YouTube audio response ended early: client disconnected")
-                else:
-                    print(f"YouTube audio request failed: {type(exc).__name__}")
-                    self._send(502, {"error": "The audio source could not be reached."})
-            finally:
-                youtube_slots.release()
-
         def do_GET(self) -> None:
             parsed = urlsplit(self.path)
             if parsed.path == "/health":
@@ -669,9 +539,6 @@ def make_handler(db_path: str):
 
         def do_POST(self) -> None:
             parsed = urlsplit(self.path)
-            if parsed.path == "/v1/youtube/audio":
-                self._post_youtube_audio()
-                return
             peer = self._rate_limit_ip()
             limiter_config = {
                 "/v1/accounts": ("account-create", 5, 3600),

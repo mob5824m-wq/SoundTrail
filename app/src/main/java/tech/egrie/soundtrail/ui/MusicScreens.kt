@@ -433,8 +433,8 @@ private fun LookupRow(song: SongInfo, onPin: () -> Unit) {
  *
  * Nothing here can sign the listener out. Tokens are written durably to Android-Keystore
  * encrypted storage that app updates do not touch, they are never deleted because of a failed
- * refresh or a network outage, and the Desktop Client ID (and, on a Play-services/microG device,
- * the account itself) stays put — so even the one case Google genuinely invalidates — a revoke,
+ * refresh or a network outage, and the Desktop Client ID stays put — so even the one case Google
+ * genuinely invalidates — a revoke,
  * a password change, or its own 7-day Testing-mode expiry — costs one tap, not a re-setup.
  */
 @Composable
@@ -510,7 +510,7 @@ internal fun ConnectionsScreen(
     onOpenDashboard: () -> Unit, onOpenMicroG: () -> Unit, onOpenMicroGRe: () -> Unit, onOpenSoundcloudApps: () -> Unit,
     onConnectJellyfin: (String, String, String) -> Unit, onDisconnectJellyfin: () -> Unit,
     onOpenJellyfin: () -> Unit,
-    onConnectYouTubeData: () -> Unit, onConnectYouTubeOAuth: (String) -> Unit, onDisconnectYouTubeData: () -> Unit,
+    onConnectYouTubeOAuth: (String) -> Unit, onDisconnectYouTubeData: () -> Unit,
     onOpenYouTubeSetup: () -> Unit,
     onImportYouTubePlaylists: () -> Unit, onSetYouTubeAutoImport: (Boolean) -> Unit,
     backupBusy: Boolean, onExportBackup: () -> Unit, onImportBackup: () -> Unit,
@@ -873,40 +873,16 @@ internal fun ConnectionsScreen(
                         Text("Disconnect and request revocation", color = Palette.coral)
                     }
                 } else {
-                    val connectingAny = state.connectingYouTubeData || state.connectingYouTubeOAuth
-                    if (state.gmsSignInAvailable) {
-                        Text("Optional read-only playlist search. Connect uses the single Google (microG) account on " +
-                            "this device, or opens the Google sign-in screen if there is none or several. Device support " +
-                            "depends on Google services and OAuth setup; no private microG data is read.",
-                            color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
-                        Spacer(Modifier.height(10.dp))
-                        PrimaryButton(
-                            if (state.connectingYouTubeData) "Connecting…" else "Connect Google account",
-                            onConnectYouTubeData, Modifier.fillMaxWidth(),
-                            enabled = !connectingAny
-                        )
-                        Spacer(Modifier.height(14.dp))
-                    }
+                    val connectingAny = state.connectingYouTubeOAuth
                     Text(
-                        "Or sign in with a Client ID — no Google services needed",
+                        "Sign in with your own Client ID",
                         style = MaterialTheme.typography.titleMedium
                     )
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        when {
-                            state.microGReInstalled ->
-                                "MicroG RE is installed. It only provides Google sign-in to Morphe/ReVanced patched " +
-                                    "apps, so Soundtrail cannot use its accounts. Sign in below with your own Desktop " +
-                                    "OAuth Client ID instead: Google opens in your browser, and the tokens stay " +
-                                    "encrypted on this device."
-                            !state.gmsSignInAvailable ->
-                                "No Google Play services or standard microG was found, so the Google-account button " +
-                                    "is hidden. Use your own Desktop OAuth Client ID instead: Google opens in your " +
-                                    "browser, and the tokens stay encrypted on this device."
-                            else ->
-                                "Handy with MicroG RE or without a device Google account. Use your own Desktop OAuth " +
-                                    "Client ID: Google opens in your browser, and the tokens stay encrypted on this device."
-                        },
+                        "Optional read-only playlist search and import. Uses your own Desktop OAuth Client ID: " +
+                            "Google opens in your browser, and the tokens stay encrypted on this device. " +
+                            "No Google services or Google account are needed on the phone.",
                         color = Palette.secondary, style = MaterialTheme.typography.bodyMedium
                     )
                     Spacer(Modifier.height(10.dp))
@@ -928,9 +904,7 @@ internal fun ConnectionsScreen(
                     }
                 }
                 Spacer(Modifier.height(7.dp))
-                Text(state.servicesLabel, color = Palette.lilac, style = MaterialTheme.typography.bodyMedium)
-                Spacer(Modifier.height(7.dp))
-                Text("All music now plays directly in Soundtrail. Google sign-in powers playlist search AND playlist import; YouTube audio plays in-app via your self-hosted server or offline files.",
+                Text("Jellyfin and audio you own play in-app. The YouTube sign-in powers playlist search AND playlist import; YouTube songs open in the YouTube Music app.",
                     color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(15.dp))
                 PrimaryButton("Open YouTube Music", onOpenYoutube, Modifier.fillMaxWidth())
@@ -941,9 +915,7 @@ internal fun ConnectionsScreen(
                     color = Palette.muted, style = MaterialTheme.typography.labelMedium
                 )
                 TextButton(onClick = onOpenMicroG) { Text("Learn about microG  ↗", color = Palette.lilac) }
-                if (state.microGReInstalled || !state.gmsSignInAvailable) {
-                    TextButton(onClick = onOpenMicroGRe) { Text("MicroG RE (Morphe/ReVanced)  ↗", color = Palette.lilac) }
-                }
+                TextButton(onClick = onOpenMicroGRe) { Text("MicroG RE (Morphe/ReVanced)  ↗", color = Palette.lilac) }
             }
         }
         Spacer(Modifier.height(13.dp))

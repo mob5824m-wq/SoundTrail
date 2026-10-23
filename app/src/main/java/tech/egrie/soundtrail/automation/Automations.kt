@@ -6,17 +6,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.abs
 
-/** The app's motion vocabulary. GPS speed is the default source; see [MotionSource]. */
+/** The app's motion vocabulary, read from GPS speed by [MotionClassifier]. */
 enum class MotionKind(val label: String) { STATIONARY("Stationary"), WALKING("Walking"), RUNNING("Running"), DRIVING("Driving") }
-
-/**
- * Where a motion reading came from. Google's activity recognition is optional and off by
- * default; when it is not in use, every reading is [GPS].
- */
-enum class MotionSource(val label: String) {
-    GPS("GPS speed"),
-    ACTIVITY_RECOGNITION("Google activity recognition")
-}
 
 /** Pure speed-based classification. Speeds are m/s; NaN/negative counts as stationary. */
 object MotionClassifier {
@@ -194,8 +185,6 @@ class AutomationStore(
 data class WatchStatus(
     val running: Boolean = false,
     val motion: MotionKind = MotionKind.STATIONARY,
-    /** Which source produced [motion], so the UI can say so honestly. */
-    val motionSource: MotionSource = MotionSource.GPS,
     val location: GeoPoint? = null,
     val minuteOfDay: Int = 0,
     val updatedAt: Long = 0L

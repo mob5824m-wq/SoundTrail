@@ -38,7 +38,7 @@ internal data class NowPlaying(
 
 /**
  * Unified in-app player: Jellyfin, local files, remote URLs (Spotify previews, SoundCloud streams,
- * YouTube audio via server, etc.) all play inside Soundtrail without handing off to another app.
+ * etc.) all play inside Soundtrail without handing off to another app.
  *
  * Previously this was Jellyfin-only; it now handles any source while keeping the same foreground
  * service, audio-focus, and notification behavior. The name JellyfinPlayer is retained for
@@ -236,8 +236,8 @@ internal class JellyfinPlayer private constructor(context: Context) {
                 MusicProvider.JELLYFIN -> "Couldn't stream this song. It may have been moved on the server."
                 MusicProvider.SPOTIFY -> "No Spotify preview available for this track. Spotify full playback requires their app, but previews play here when available."
                 MusicProvider.SOUNDCLOUD -> "Couldn't stream this SoundCloud track. It may be private or removed."
-                MusicProvider.YOUTUBE_MUSIC -> "Couldn't play this YouTube Music track. Connect your sync server for in-app audio or use an offline copy."
-                MusicProvider.YOUTUBE -> "Couldn't play this YouTube track. Connect your sync server for in-app audio or use an offline copy."
+                MusicProvider.YOUTUBE_MUSIC -> "Couldn't play this YouTube Music track. Open it in YouTube Music, or use an offline copy."
+                MusicProvider.YOUTUBE -> "Couldn't play this YouTube track. Open it in YouTube Music, or use an offline copy."
             }
             fail(msg)
             return

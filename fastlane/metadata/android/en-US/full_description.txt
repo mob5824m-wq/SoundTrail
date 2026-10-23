@@ -1,0 +1,19 @@
+Soundtrail saves songs as private, location-based pins on an in-app map, and it turns how you feel into a mix from your own library.
+
+Features:
+* Pins: save a song to a place and see it on the map. Map tiles load only for the area on screen.
+* Playlists and automations: a playlist can start near a saved spot, while you walk, run or drive, or within a time window. The opt-in watch shows a notification, and nothing plays without a tap.
+* Mood mixes on your device: describe how you feel, or tap a quick pick. A small, explainable engine scores the songs in your own pins and playlists. Optional model providers are off by default, and you approve each destination before any request is sent.
+* Jellyfin: sign in to your own server to search and play its music, and download tracks your account is allowed to get.
+* Your own audio: attach audio files you own or are allowed to use. They are copied into private app storage and play offline.
+* Song lookup: TheAudioDB finds exact artist, album and genre details with no account.
+* Backups: automatic on-device snapshots (the newest 10 are kept), plus JSON export and import.
+* Optional end-to-end encrypted cloud sync, using the public server or your own self-hosted one.
+* Android Auto: browse your pins and playlists and play them in the car.
+* Optional YouTube playlist search and import, using your own Google Cloud Desktop OAuth client ID.
+
+Privacy: pins, coordinates, playlists and automations stay on the device unless you turn on cloud sync. With sync on, they are encrypted before upload. The app has no ads, analytics or tracking libraries, and it contains no Google Play services code.
+
+Music services: Spotify, SoundCloud and YouTube are optional third-party services. Soundtrail links to them and connects to them only when you choose to. Spotify and SoundCloud playback stays in their own apps.
+
+Requires Android 8.0 or newer.

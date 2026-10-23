@@ -62,12 +62,10 @@ import tech.egrie.soundtrail.AppState
 import tech.egrie.soundtrail.OfflineAudioItem
 import tech.egrie.soundtrail.automation.AutomationRule
 import tech.egrie.soundtrail.automation.MotionKind
-import tech.egrie.soundtrail.automation.MotionSource
 import tech.egrie.soundtrail.data.Playlist
 import tech.egrie.soundtrail.data.PlaylistItem
 import tech.egrie.soundtrail.integrations.MusicLinkParser
 import tech.egrie.soundtrail.integrations.MusicProvider
-import tech.egrie.soundtrail.sync.YouTubeAudioStage
 import java.time.LocalTime
 import java.util.Locale
 import java.util.UUID
@@ -75,8 +73,6 @@ import java.util.UUID
 /** Everything the Lists tab can ask the app to do. */
 data class ListsActions(
     val onToggleWatch: (Boolean) -> Unit,
-    /** Opt in or out of Google's activity recognition as a second motion source. */
-    val onToggleActivityRecognition: (Boolean) -> Unit,
     val onToggleAutoSearch: (Boolean) -> Unit,
     val onNewPlaylist: (String) -> Unit,
     val onDeletePlaylist: (String) -> Unit,
@@ -86,7 +82,6 @@ data class ListsActions(
     val onSearchSong: (PlaylistItem) -> Unit,
     val onGetSong: (PlaylistItem) -> Unit,
     val onDownloadJellyfin: (playlistId: String, itemId: String) -> Unit,
-    val onDownloadYouTube: (playlistId: String, itemId: String) -> Unit,
     val onRemoveOfflineAudio: (playlistId: String, itemId: String) -> Unit,
     val onRemoveOfflineFile: (fileName: String) -> Unit,
     val onClearAllOfflineAudio: () -> Unit,
@@ -216,7 +211,7 @@ internal fun ListsScreen(state: AppState, actions: ListsActions, onNotice: (Stri
                 }
             }
             Spacer(Modifier.height(13.dp))
-            Text("Triggers cool down for 15 minutes; location stays on-device. Jellyfin downloads follow server permissions. YouTube offline extraction is rights-confirmed, audio-only, and runs through your self-hosted server.",
+            Text("Triggers cool down for 15 minutes; location stays on-device. Jellyfin downloads follow server permissions.",
                 color = Palette.muted, style = MaterialTheme.typography.labelMedium)
             Spacer(Modifier.height(27.dp))
         }
@@ -268,7 +263,7 @@ private fun OfflineAudioManagerDialog(
     onRequestClearAll: () -> Unit
 ) {
     val blocked = state.offlineAudioBusy || state.syncBusy || state.backupBusy ||
-        state.jellyfinDownloads.isNotEmpty() || state.youtubeDownloads.isNotEmpty()
+        state.jellyfinDownloads.isNotEmpty()
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Offline audio") },
@@ -359,12 +354,7 @@ private fun WatchCard(state: AppState, actions: ListsActions) {
                 Text(
                     if (state.watchStatus.running) {
                         val fix = state.watchStatus.location
-                        val source = if (state.watchStatus.motionSource == MotionSource.ACTIVITY_RECOGNITION) {
-                            " · ${state.watchStatus.motionSource.label}"
-                        } else {
-                            ""
-                        }
-                        "${state.watchStatus.motion.label}$source · ${state.watchStatus.clock()}" +
+                        "${state.watchStatus.motion.label} · ${state.watchStatus.clock()}" +
                             fix?.let { " · ${"%.4f, %.4f".format(it.latitude, it.longitude)}" }.orEmpty()
                     } else {
                         "Off · ${"%02d:%02d".format(nowMinute / 60, nowMinute % 60)} now"
@@ -380,35 +370,13 @@ private fun WatchCard(state: AppState, actions: ListsActions) {
         Spacer(Modifier.height(10.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("Google activity recognition", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "Optional. Uses Google Play services when it is available for walking, " +
-                        "running, cycling, and driving; cycling counts as running. GPS speed " +
-                        "stays the fallback.",
-                    color = Palette.secondary, style = MaterialTheme.typography.bodyMedium
-                )
-            }
-            Switch(
-                checked = state.activityRecognitionEnabled,
-                onCheckedChange = actions.onToggleActivityRecognition
-            )
-        }
-        Text(
-            "Off by default. When on, Play services processes motion sensor data on the device " +
-                "and Soundtrail receives only the activity type. Google's terms apply; " +
-                "coordinates never leave the device.",
-            color = Palette.muted, style = MaterialTheme.typography.labelMedium
-        )
-        Spacer(Modifier.height(10.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
                 Text("Search YouTube Music when adding songs", style = MaterialTheme.typography.titleMedium)
                 Text("Adds a YouTube link for in-app playback; all audio plays inside Soundtrail.",
                     color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
             }
             Switch(checked = state.autoSearchYoutube, onCheckedChange = actions.onToggleAutoSearch)
         }
-        Text("All music now plays directly in Soundtrail — including local files, Jellyfin, Spotify previews, SoundCloud, and YouTube via your self-hosted server.",
+        Text("Local files, Jellyfin, Spotify previews, and SoundCloud play directly in Soundtrail. YouTube songs open in the YouTube Music app.",
             color = Palette.muted, style = MaterialTheme.typography.labelMedium)
     }
 }
@@ -421,7 +389,6 @@ private fun PlaylistDetailCard(
     var title by rememberSaveable(playlist.id) { mutableStateOf("") }
     var artist by rememberSaveable(playlist.id) { mutableStateOf("") }
     var url by rememberSaveable(playlist.id) { mutableStateOf("") }
-    var pendingYouTubeDownloadId by rememberSaveable(playlist.id) { mutableStateOf<String?>(null) }
     SurfaceCard(Modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(playlist.name, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
@@ -437,9 +404,7 @@ private fun PlaylistDetailCard(
         playlist.items.forEach { item ->
             val provider = item.url?.let(MusicLinkParser::parse)?.provider
             val isJellyfinItem = provider == MusicProvider.JELLYFIN
-            val isYouTubeItem = provider == MusicProvider.YOUTUBE_MUSIC || provider == MusicProvider.YOUTUBE
             val download = state.jellyfinDownloads["${playlist.id}:${item.id}"]
-            val youtubeDownload = state.youtubeDownloads["${playlist.id}:${item.id}"]
             Row(
                 Modifier.fillMaxWidth().padding(vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -453,13 +418,6 @@ private fun PlaylistDetailCard(
                             download != null -> {
                                 val percent = if (download.totalBytes > 0L) " · ${(download.receivedBytes * 100L / download.totalBytes).coerceIn(0L, 100L)}%" else ""
                                 "Downloading from Jellyfin${percent}"
-                            }
-                            youtubeDownload != null -> when (youtubeDownload.stage) {
-                                YouTubeAudioStage.PREPARING -> "Preparing audio on your self-hosted server…"
-                                YouTubeAudioStage.TRANSFERRING -> {
-                                    val percent = if (youtubeDownload.totalBytes > 0L) " · ${(youtubeDownload.receivedBytes * 100L / youtubeDownload.totalBytes).coerceIn(0L, 100L)}%" else ""
-                                    "Downloading audio to this device${percent}"
-                                }
                             }
                             else -> item.artist.ifBlank { item.provider?.label ?: "Link not set" }
                         },
@@ -495,29 +453,6 @@ private fun PlaylistDetailCard(
                                     if (state.jellyfinConnected) "Download ${item.title} from Jellyfin for offline playback"
                                     else "Connect Jellyfin to download ${item.title}",
                                     tint = if (state.jellyfinConnected) Palette.primary else Palette.muted
-                                )
-                            }
-                        }
-                    }
-                    isYouTubeItem -> {
-                        IconButton(
-                            onClick = {
-                                if (state.syncConnected) pendingYouTubeDownloadId = item.id
-                                else onNotice("Sign in to your self-hosted server to use its YouTube audio extractor.")
-                            },
-                            enabled = youtubeDownload == null,
-                            modifier = Modifier.size(38.dp)
-                        ) {
-                            if (youtubeDownload != null) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = Palette.youtube
-                                )
-                            } else {
-                                Icon(
-                                    Icons.Rounded.Download,
-                                    if (state.syncConnected) "Extract permitted YouTube audio for offline playback"
-                                    else "Sign in to your self-hosted server to extract audio",
-                                    tint = if (state.syncConnected) Palette.youtube else Palette.muted
                                 )
                             }
                         }
@@ -564,32 +499,8 @@ private fun PlaylistDetailCard(
             title = ""; artist = ""; url = ""
         }, Modifier.fillMaxWidth(), enabled = title.isNotBlank())
         Spacer(Modifier.height(8.dp))
-        Text("All songs play directly in Soundtrail. Jellyfin uses your server's authenticated stream; YouTube can be extracted for offline playback via your self-hosted server. ♪ attaches audio you already own for in-app playback.",
+        Text("All songs play directly in Soundtrail. Jellyfin uses your server's authenticated stream. YouTube songs open in an external app; ♪ attaches audio you already own for in-app playback.",
             color = Palette.muted, style = MaterialTheme.typography.labelMedium)
-    }
-    pendingYouTubeDownloadId?.let { videoItemId ->
-        val selected = playlist.items.firstOrNull { it.id == videoItemId }
-        AlertDialog(
-            onDismissRequest = { pendingYouTubeDownloadId = null },
-            title = { Text("Extract audio for offline playback?") },
-            text = {
-                Text(
-                    "Only continue if you own this content or have explicit permission to download it. " +
-                        "Your self-hosted server will process the public video ID and temporary audio. " +
-                        "This unofficial audio-only extractor uses no YouTube login or cookies and cannot access restricted videos."
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    if (selected != null) actions.onDownloadYouTube(playlist.id, videoItemId)
-                    pendingYouTubeDownloadId = null
-                }) { Text("I have rights — download audio", color = Palette.youtube) }
-            },
-            dismissButton = {
-                TextButton(onClick = { pendingYouTubeDownloadId = null }) { Text("Cancel") }
-            },
-            containerColor = Palette.elevated
-        )
     }
 }
 

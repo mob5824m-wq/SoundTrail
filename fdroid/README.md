@@ -50,6 +50,18 @@ The scanner result is the same check `fdroid build` runs before compiling. Its o
 actions on this tree are the standard deletion of `gradlew`, `gradlew.bat` and
 `gradle/wrapper/gradle-wrapper.jar`, which F-Droid replaces with its own.
 
+Neither of those proves the app *builds*, and that is the part F-Droid cannot forgive: its
+buildserver runs `gradlew assembleRelease` on the tag. Building that variant in CI found a
+blocker that nothing else in this repository had ever exercised, because CI had only ever
+built debug. `assembleRelease` depends on `:app:lintVitalRelease`, and that task failed with
+33 fatal `FullBackupContent` errors — `backup_rules.xml` and `data_extraction_rules.xml`
+opened with `<include>`, which makes them allowlists, so every `<exclude>` for a path
+outside the allowlist was redundant and lint treats a redundant exclude as fatal. The
+release variant did not build at all. Those excludes are removed now (behaviour is
+unchanged: an allowlist already leaves everything unlisted out, and each exclusion is
+recorded as a comment), and CI builds the release variant and asserts the resulting
+`app-release-unsigned.apk` carries no signature.
+
 Reproduce both locally:
 
 ```sh

@@ -119,10 +119,6 @@ internal fun PrimaryButton(text: String, onClick: () -> Unit, modifier: Modifier
 @Composable
 internal fun ProviderArtwork(provider: MusicProvider, modifier: Modifier = Modifier) {
     val gradient = when (provider) {
-        MusicProvider.SPOTIFY -> listOf(Palette.primaryDark, Color(0xFF5A6740))
-        MusicProvider.YOUTUBE -> listOf(Color(0xFF4A2E2E), Color(0xFFB04040))
-        MusicProvider.YOUTUBE_MUSIC -> listOf(Color(0xFF49313D), Color(0xFF9B5960))
-        MusicProvider.SOUNDCLOUD -> listOf(Color(0xFF4A2E1A), Color(0xFF9C4A1F))
         MusicProvider.JELLYFIN -> listOf(Color(0xFF2E2440), Color(0xFF7A4E9B))
     }
     Box(
@@ -137,10 +133,6 @@ internal fun ProviderArtwork(provider: MusicProvider, modifier: Modifier = Modif
 @Composable
 internal fun ProviderPill(provider: MusicProvider) {
     val color = when (provider) {
-        MusicProvider.SPOTIFY -> Palette.spotify
-        MusicProvider.YOUTUBE -> Palette.youtube
-        MusicProvider.YOUTUBE_MUSIC -> Palette.youtube
-        MusicProvider.SOUNDCLOUD -> Palette.soundcloud
         MusicProvider.JELLYFIN -> Palette.jellyfin
     }
     Box(
@@ -199,12 +191,11 @@ internal fun PinCard(
 }
 
 /**
- * One search result.
+ * One search result from the listener's own Jellyfin server.
  *
- * Tapping the row pins the song — that is what the app is for. When the provider can play the
- * whole track in its own app ([onPlay]), the row also carries a play button: Spotify is the case
- * this exists for, where opening the song in Spotify plays it in full rather than as Soundtrail's
- * 30-second preview.
+ * Tapping the row pins the song — that is what the app is for. [onPlay] starts it straight away,
+ * which the Search tab wires up so a result can be heard before it is pinned; every row plays
+ * here, because every row comes from a server the listener signed in to.
  */
 @Composable
 internal fun TrackRow(track: TrackResult, onPin: () -> Unit, onPlay: (() -> Unit)? = null) {
@@ -257,12 +248,11 @@ internal fun NowPlayingBar(nowPlaying: NowPlaying, onToggle: () -> Unit, onStop:
     } else {
         0f
     }
+    // A song with no provider is one the listener attached themselves, so it gets the app's own
+    // accent rather than a server's colour.
     val providerColor = when (nowPlaying.provider) {
-        tech.egrie.soundtrail.integrations.MusicProvider.SPOTIFY -> Palette.spotify
-        tech.egrie.soundtrail.integrations.MusicProvider.SOUNDCLOUD -> Palette.soundcloud
-        tech.egrie.soundtrail.integrations.MusicProvider.YOUTUBE_MUSIC -> Palette.youtube
-        tech.egrie.soundtrail.integrations.MusicProvider.YOUTUBE -> Palette.youtube
         tech.egrie.soundtrail.integrations.MusicProvider.JELLYFIN -> Palette.jellyfin
+        null -> Palette.lilac
     }
     Column(
         Modifier.fillMaxWidth().background(Palette.surface)

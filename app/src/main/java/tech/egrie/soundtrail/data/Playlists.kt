@@ -39,73 +39,6 @@ internal data class PlaylistMerge(
  * songs whose ids they do not already carry (so a re-import is a no-op), and nothing that
  * exists locally is ever overwritten. Kept free of Android types so it is unit-testable.
  */
-/**
- * The one list likes live in.
- *
- * An import brings the account's liked videos, and listeners who also keep their own "Liked" list
- * end up with two lists holding the same kind of thing — one named by them, one named by the
- * import. This is the name the app converges on, and the names it recognises as "this is that
- * list" so an import lands in the list that already exists instead of making a second one. What
- * is *in* a liked list is left alone: a row keeps the provider it really came from.
- */
-internal object LikedSongs {
-    /** What the list is called once the app has touched it. */
-    const val NAME = "Liked songs"
-
-    private val names = setOf(
-        "liked", "liked songs", "liked music", "liked videos", "songs liked", "my likes",
-        "youtube liked", "youtube liked videos", "youtube music liked", "youtube music likes",
-        "youtube music liked songs", "favorites", "favourites"
-    )
-
-    /** True when a playlist name means "the likes list" rather than some other list. */
-    fun isLikedName(name: String): Boolean = name.trim().lowercase() in names
-
-    /**
-     * True when a name came from an import rather than from the listener. A name the listener
-     * chose is theirs to keep; one the app made is the app's to converge.
-     */
-    fun isImportedName(name: String): Boolean {
-        val lower = name.trim().lowercase()
-        return lower == "liked videos" || lower.startsWith("youtube liked") ||
-            lower.startsWith("youtube music liked")
-    }
-}
-
-/**
- * Folds every app-created likes list into the listener's own, so there is one list holding
- * likes rather than one per import. Nothing is dropped: a song that is already in the target
- * under the same link is not added twice, and [PlaylistItem]s that have an offline copy keep it,
- * because the item is moved rather than copied.
- *
- * Returns the new list of playlists and how many songs moved.
- */
-internal fun consolidateLikes(lists: List<Playlist>, targetId: String): Pair<List<Playlist>, Int> {
-    val target = lists.firstOrNull { it.id == targetId } ?: return lists to 0
-    val sources = lists.filter {
-        it.id != targetId && it.id.startsWith("yt-pl:") && LikedSongs.isLikedName(it.name)
-    }
-    if (sources.isEmpty()) return lists to 0
-
-    val seenLinks = target.items.mapNotNullTo(HashSet()) { it.url }
-    val seenIds = target.items.mapTo(HashSet()) { it.id }
-    val moved = mutableListOf<PlaylistItem>()
-    sources.forEach { source ->
-        source.items.forEach { item ->
-            val link = item.url
-            if (item.id in seenIds || (link != null && link in seenLinks)) return@forEach
-            moved += item
-            seenIds += item.id
-            if (link != null) seenLinks += link
-        }
-    }
-
-    val kept = lists
-        .filterNot { list -> sources.any { it.id == list.id } }
-        .map { if (it.id == targetId) it.copy(items = it.items + moved) else it }
-    return kept to moved.size
-}
-
 internal fun mergePlaylists(existing: List<Playlist>, incoming: List<Playlist>): PlaylistMerge {
     var lists = existing
     var addedPlaylists = 0
@@ -150,16 +83,23 @@ class PlaylistStore(
                     items = (0 until items.length()).mapNotNull { itemIndex ->
                         runCatching {
                             val item = items.getJSONObject(itemIndex)
-                            val url = item.optString("url").takeIf { it.isNotBlank() && it != "null" }
+                            val storedUrl = item.optString("url").takeIf { it.isNotBlank() && it != "null" }
+                            val localFile = item.optString("localFile")
+                                .takeIf { it.isNotBlank() && it != "null" }
+                            // A link from a service this version no longer supports is not a
+                            // source. The song survives on its own attached audio file; without
+                            // one there is nothing left that could ever play, so the row goes.
+                            val dead = MusicLinkParser.isUnplayable(storedUrl)
+                            if (dead && localFile == null) return@runCatching null
+                            val link = if (dead) null else storedUrl?.let(MusicLinkParser::parse)
                             PlaylistItem(
                                 id = item.getString("id"),
                                 title = item.getString("title"),
                                 artist = item.optString("artist"),
-                                url = url,
-                                provider = url?.let { MusicLinkParser.parse(it)?.provider },
+                                url = link?.url,
+                                provider = link?.provider,
                                 createdAt = item.getLong("createdAt"),
-                                localFile = item.optString("localFile")
-                                    .takeIf { it.isNotBlank() && it != "null" }
+                                localFile = localFile
                             )
                         }.getOrNull()
                     },

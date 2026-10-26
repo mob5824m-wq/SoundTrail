@@ -86,8 +86,8 @@ class SyncProtocolTest {
     @Test fun `playlist metadata and songs become separate sync entities without audio files`() {
         val pin = MusicPin(
             "p1", "Night Swim", "The Marías", "Beach", "note",
-            "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT",
-            MusicProvider.SPOTIFY, GeoPoint(43.6, -79.4), 100L
+            "jellyfin:item:4cOdK2wGLETKBW3PvgPWqT",
+            MusicProvider.JELLYFIN, GeoPoint(43.6, -79.4), 100L
         )
         val playlist = Playlist("list-1", "Walk", listOf(
             PlaylistItem("song-1", "Ribs", "Lorde", null, null, 2L, localFile = "secret-device-file.mp3"),
@@ -109,8 +109,8 @@ class SyncProtocolTest {
     @Test fun `restoration rejects a record whose id differs from its encrypted payload id`() {
         val pin = MusicPin(
             "pin-1", "Night Swim", "The Marías", "Beach", "note",
-            "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT",
-            MusicProvider.SPOTIFY, GeoPoint(43.6, -79.4), 100L
+            "jellyfin:item:4cOdK2wGLETKBW3PvgPWqT",
+            MusicProvider.JELLYFIN, GeoPoint(43.6, -79.4), 100L
         )
         val record = SyncPayloads.snapshot(listOf(pin), emptyList(), emptyList()).single()
         val mismatched = record.copy(entityId = "pin-2")

@@ -17,7 +17,7 @@ internal data class MoodFindRequest(
 /**
  * What a spoken request means, once the command words are off it.
  *
- * A dictation is a sentence: "hey soundtrail, can you play Sunsets by the XX on YouTube Music".
+ * A dictation is a sentence: "hey soundtrail, can you play Sunsets by the XX on Jellyfin".
  * [query] is what is left for a search, [title] and [artist] are filled in when the listener
  * named both, [provider] when they said where to look, and [mood] is true when they described a
  * feeling instead of a song.
@@ -71,12 +71,15 @@ internal object AssistantParser {
         "give me ", "get me ", "show me "
     )
 
-    /** Where the listener said to look, longest phrase first so "youtube music" wins. */
+    /**
+     * Where the listener said to look.
+     *
+     * One entry, because one catalogue is left. The phrases this list used to carry for the
+     * removed streaming services map to nothing now: a listener who still says "on Spotify" gets
+     * their own library and their own server searched, which is the honest answer, rather than a
+     * row that cannot play.
+     */
     private val providerHints = listOf(
-        "youtube music" to MusicProvider.YOUTUBE_MUSIC,
-        "youtube" to MusicProvider.YOUTUBE,
-        "spotify" to MusicProvider.SPOTIFY,
-        "soundcloud" to MusicProvider.SOUNDCLOUD,
         "jellyfin" to MusicProvider.JELLYFIN
     )
 
@@ -99,12 +102,12 @@ internal object AssistantParser {
     )
 
     /**
-     * "on Spotify" in such a request: the service to look on. It may sit right after the lead —
-     * the commonest shape by far, "find music on YouTube that fits …" — or at the end, so the
+     * "on Jellyfin" in such a request: the place to look. It may sit right after the lead —
+     * the commonest shape by far, "find music on Jellyfin that fits …" — or at the end, so the
      * pattern is anchored on either a space or the start of what is left.
      */
     private val findMusicProvider = Regex(
-        "(?:^|\\s+)on\\s+(youtube music|youtube|spotify|soundcloud|jellyfin)\\b",
+        "(?:^|\\s+)on\\s+(jellyfin)\\b",
         RegexOption.IGNORE_CASE
     )
 
@@ -129,9 +132,9 @@ internal object AssistantParser {
     private val songWords = listOf("the song ", "the track ", "the tune ")
     private val bareSongWords = listOf("song ", "track ", "tune ")
 
-    /** "on YouTube Music", "on Spotify" at the end of a request, and the space before it. */
+    /** "on Jellyfin" at the end of a request, and the space before it. */
     private val onProviderSuffix = Regex(
-        "\\s+on\\s+(youtube music|youtube|spotify|soundcloud|jellyfin)\\s*$",
+        "\\s+on\\s+(jellyfin)\\s*$",
         RegexOption.IGNORE_CASE
     )
 
@@ -143,7 +146,7 @@ internal object AssistantParser {
         val said = normalise(spoken)
         if (said.isEmpty()) return null
 
-        // "on YouTube Music" only says where to look; the song is what is left.
+        // "on Jellyfin" only says where to look; the song is what is left.
         var body = said
         val provider = onProviderSuffix.find(body)?.let { match ->
             body = body.removeRange(match.range).trim()
@@ -179,7 +182,7 @@ internal object AssistantParser {
      * recogniser inserts as pauses removed, runs of space collapsed.
      */
     /**
-     * The feeling inside a "find music on Spotify that fits …" request, or null when the
+     * The feeling inside a "find music on Jellyfin that fits …" request, or null when the
      * sentence is something else entirely.
      *
      * Only a sentence that is actually about a feeling is claimed: there has to be a joining

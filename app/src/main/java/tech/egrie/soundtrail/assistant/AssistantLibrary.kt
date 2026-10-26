@@ -7,9 +7,10 @@ import tech.egrie.soundtrail.data.Playlist
  * One row of an answer: something that can be played, plus where it came from.
  *
  * A hit is either one of the listener's own stored songs ([itemId] — a pin or a playlist item,
- * so an offline copy plays exactly as it would from the lists) or a song a search turned up
- * ([url] — the link the player resolves). [musicUrl] is the same song in the YouTube Music app,
- * which is the way to hear a catalogue hit in full without the phone's own extraction.
+ * so an offline copy plays exactly as it would from the lists) or a song a search turned up on
+ * their Jellyfin server ([url] — the link the player resolves). There is no third case: the
+ * streaming-service rows this used to carry, and the "open it in that service's app instead"
+ * link that went with them, were removed along with those services.
  */
 internal data class AssistantHit(
     val title: String,
@@ -21,15 +22,8 @@ internal data class AssistantHit(
     val itemId: String? = null,
     /** The song's link, when the hit came from a search. */
     val url: String? = null,
-    /** The same song in the YouTube Music app, when there is such a link. */
-    val musicUrl: String? = null,
     /** The name of the attached offline copy, when the stored song has one. */
-    val localFile: String? = null,
-    /**
-     * A stream the search already resolved — Spotify's 30-second preview, a SoundCloud stream —
-     * so playing this row does not have to ask the service for it a second time.
-     */
-    val streamUrl: String? = null
+    val localFile: String? = null
 ) {
     /** True when the player has something to work with. */
     val playable: Boolean

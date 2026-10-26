@@ -70,7 +70,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
 import tech.egrie.soundtrail.AppState
 import tech.egrie.soundtrail.PinInput
-import tech.egrie.soundtrail.SearchProvider
 import tech.egrie.soundtrail.data.GeoPoint
 import tech.egrie.soundtrail.data.MusicPin
 import tech.egrie.soundtrail.integrations.TrackResult
@@ -120,20 +119,10 @@ internal fun SoundtrailApp(
     assistant: AssistantActions,
     onLocate: () -> Unit,
     onSearch: (String) -> Unit,
-    onSelectSearchProvider: (SearchProvider) -> Unit,
     onLookup: (String, String) -> Unit,
-    onConnect: (String) -> Unit,
-    onDisconnect: () -> Unit,
-    onConnectSoundcloud: (String, String) -> Unit,
-    onDisconnectSoundcloud: () -> Unit,
     onConnectJellyfin: (String, String, String) -> Unit,
     onDisconnectJellyfin: () -> Unit,
     onOpenJellyfin: () -> Unit,
-    onConnectYouTubeOAuth: (String) -> Unit,
-    onDisconnectYouTubeData: () -> Unit,
-    onOpenYouTubeSetup: () -> Unit,
-    onImportYouTubePlaylists: () -> Unit,
-    onSetYouTubeAutoImport: (Boolean) -> Unit,
     backupBusy: Boolean,
     onExportBackup: () -> Unit,
     onImportBackup: () -> Unit,
@@ -153,17 +142,8 @@ internal fun SoundtrailApp(
     onPlay: (MusicPin) -> Unit,
     onMap: (GeoPoint) -> Unit,
     onDelete: (String) -> Unit,
-    onOpenSpotify: () -> Unit,
-    onOpenYoutube: () -> Unit,
-    onSearchYoutubeMusic: (String) -> Unit,
-    /** Hands a search result to the app that owns it — Spotify, for a full track instead of a preview. */
+    /** Starts a search result in the app's one player; every result is a song on the listener's server. */
     onPlayTrack: (TrackResult) -> Unit,
-    onOpenYoutubeLibrary: () -> Unit,
-    onOpenSoundcloud: () -> Unit,
-    onOpenDashboard: () -> Unit,
-    onOpenMicroG: () -> Unit,
-    onOpenMicroGRe: () -> Unit,
-    onOpenSoundcloudApps: () -> Unit,
     onSavePin: (PinInput) -> Boolean,
     onNotice: (String) -> Unit
 ) {
@@ -243,22 +223,17 @@ internal fun SoundtrailApp(
                     state, onNewPin = { draft = PinDraft() }, onLocate = onLocate,
                     onSeePins = { tab = Tab.PINS },
                     onPlay = onPlay, onMap = onMap, onDelete = { pendingDelete = it },
-                    onOpenMood = { tab = Tab.MOOD },
-                    onOpenYoutube = onOpenYoutube
+                    onOpenMood = { tab = Tab.MOOD }
                 )
                 Tab.SEARCH -> MusicSearchScreen(
-                    state, onSearch, onSelectProvider = onSelectSearchProvider,
+                    state, onSearch,
                     onConnect = { tab = Tab.CONNECT },
                     onSelectTrack = { draft = PinDraft(title = it.title, artist = it.artist, url = it.url) },
                     onPlayTrack = onPlayTrack,
-                    onAddLink = { draft = PinDraft(url = it) },
                     onLookup = onLookup,
-                    onSelectLookup = {
-                        draft = PinDraft(title = it.title, artist = it.artist, url = it.url.orEmpty())
-                    },
-                    onSearchYoutubeMusic = onSearchYoutubeMusic,
-                    onOpenYoutubeLibrary = onOpenYoutubeLibrary,
-                    onNotice = onNotice
+                    // TheAudioDB answers with words only, so a match starts a pin with the title
+                    // and artist filled in; the song itself is then chosen from the server.
+                    onSelectLookup = { draft = PinDraft(title = it.title, artist = it.artist) }
                 )
                 Tab.PINS -> PinsScreen(
                     state, onNewPin = { draft = PinDraft() }, onLocate = onLocate,
@@ -277,12 +252,8 @@ internal fun SoundtrailApp(
                 Tab.MOOD -> MoodScreen(state, mood, onNotice)
                 Tab.LISTS -> ListsScreen(state, lists, onNotice)
                 Tab.CONNECT -> ConnectionsScreen(
-                    state, onConnect, onDisconnect, onConnectSoundcloud, onDisconnectSoundcloud,
-                    onOpenSpotify, onOpenYoutube, onOpenSoundcloud,
-                    onOpenDashboard, onOpenMicroG, onOpenMicroGRe, onOpenSoundcloudApps,
+                    state,
                     onConnectJellyfin, onDisconnectJellyfin, onOpenJellyfin,
-                    onConnectYouTubeOAuth, onDisconnectYouTubeData, onOpenYouTubeSetup,
-                    onImportYouTubePlaylists, onSetYouTubeAutoImport,
                     backupBusy, onExportBackup, onImportBackup,
                     managedBackups,
                     state.syncBusy, onCreateCloudSyncAccount, onSignInCloudSync,
@@ -350,8 +321,7 @@ private fun HomeScreen(
     onPlay: (MusicPin) -> Unit,
     onMap: (GeoPoint) -> Unit,
     onDelete: (MusicPin) -> Unit,
-    onOpenMood: () -> Unit,
-    onOpenYoutube: () -> Unit
+    onOpenMood: () -> Unit
 ) {
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState())
@@ -362,7 +332,7 @@ private fun HomeScreen(
         Spacer(Modifier.height(20.dp))
         HomeHero(onNewPin)
         Spacer(Modifier.height(14.dp))
-        MoodBanner(state, onOpenMood, onOpenYoutube)
+        MoodBanner(state, onOpenMood)
         Spacer(Modifier.height(14.dp))
         LocationBanner(state.location, state.locating, onLocate)
         Spacer(Modifier.height(20.dp))
@@ -434,16 +404,14 @@ private fun HomeHero(onNewPin: () -> Unit) {
 }
 
 /**
- * The two things a listener asks for most often, one tap from the home screen: "match my mood",
- * and "open YouTube Music".
+ * One tap from the home screen to the thing a listener asks for most often: "match my mood".
  *
- * The YouTube Music button is deliberately independent of the optional Google connection. Playing
- * music in the app you are already signed in to, or letting a browser open music.youtube.com, is
- * not an API call — so it keeps working across app updates, reinstalls, and revoked grants, with
- * no sign-in prompt ever.
+ * This card used to carry a second button that handed the moment to another app's music player.
+ * That hand-off is gone with the services it belonged to; everything this app plays, it plays
+ * itself, from the listener's own server or their own audio file.
  */
 @Composable
-private fun MoodBanner(state: AppState, onOpenMood: () -> Unit, onOpenYoutube: () -> Unit) {
+private fun MoodBanner(state: AppState, onOpenMood: () -> Unit) {
     SurfaceCard(Modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(42.dp).background(Palette.primary.copy(alpha = .15f), CircleShape),
@@ -469,17 +437,6 @@ private fun MoodBanner(state: AppState, onOpenMood: () -> Unit, onOpenYoutube: (
                 Text(if (state.mood.profile == null) "Open" else "See mix", color = Palette.primary)
             }
         }
-        Spacer(Modifier.height(10.dp))
-        PrimaryButton("Open YouTube Music  \u2197", onOpenYoutube, Modifier.fillMaxWidth())
-        Text(
-            if (state.youtubeAppInstalled) {
-                "Opens the app on this device. No Google sign-in is involved — the read-only " +
-                    "connection on the Connect tab is only for playlist import and search."
-            } else {
-                "Opens music.youtube.com in a browser. No Google sign-in is involved."
-            },
-            color = Palette.muted, style = MaterialTheme.typography.labelMedium
-        )
     }
 }
 
@@ -605,7 +562,7 @@ private fun PinsScreen(
                             Spacer(Modifier.height(10.dp))
                             Text("Your collection starts here", style = MaterialTheme.typography.titleLarge)
                             Spacer(Modifier.height(6.dp))
-                            Text("Save a Spotify, SoundCloud, or YouTube Music song at your current location — or enter a place yourself.",
+                            Text("Save a song from your Jellyfin server at your current location — or enter a place yourself.",
                                 color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
                         }
                     }

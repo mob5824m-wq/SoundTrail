@@ -16,16 +16,16 @@
     <uses-feature android:name="android.hardware.location" android:required="false" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
 
-    <!-- Android 11+ limits package visibility. These are only used for app-status checks and handoff. -->
+    <!--
+      Android 11+ limits package visibility, and it hides speech engines as well: without these
+      the voice features would find no recognizer and no text-to-speech on a phone that has both.
+
+      No music app is queried any more. Spotify, SoundCloud and YouTube Music — including the
+      Morphe and ReVanced package names this list used to carry — were removed along with the
+      services they belonged to, so nothing in this app asks the package manager about another
+      app's music player, and no link is handed off to one.
+    -->
     <queries>
-        <package android:name="com.spotify.music" />
-        <package android:name="com.soundcloud.android" />
-        <package android:name="app.morphe.android.apps.youtube.music" />
-        <package android:name="com.google.android.apps.youtube.music" />
-        <package android:name="app.revanced.android.apps.youtube.music" />
-        <package android:name="app.revanced.android.youtube.music" />
-        <!-- Android 11+ hides speech engines as well; without these the voice features would
-             find no recognizer and no text-to-speech on a phone that has both. -->
         <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>
@@ -55,36 +55,12 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Register this EXACT URI in the Spotify Developer Dashboard. -->
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="app.soundtrail" android:host="spotify-auth" />
-            </intent-filter>
-            <!-- Register this EXACT URI in your SoundCloud API app settings. -->
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="app.soundtrail" android:host="soundcloud-auth" />
-            </intent-filter>
-            <!-- Browser-based YouTube OAuth (Desktop client): works with MicroG RE or no Google
-                 services. Google's documented custom-scheme form is scheme:/path; the equivalent
-                 scheme://host form is accepted too. Each form needs its own filter because a
-                 filter that declares a host never matches a host-less URI. -->
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="app.soundtrail" android:path="/youtube-auth" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="app.soundtrail" android:host="youtube-auth" />
-            </intent-filter>
+            <!--
+              No app.soundtrail:// OAuth redirect filters any more. Spotify, SoundCloud and the
+              browser-based YouTube flow each needed one to catch their authorization response;
+              those services are gone, so the only deep link this activity accepts is a shared
+              piece of text, below.
+            -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />

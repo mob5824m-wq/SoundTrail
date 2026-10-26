@@ -353,7 +353,7 @@ internal data class MoodProfile(
     /** The model name when an AI model produced the reading. */
     val modelLabel: String? = null
 ) {
-    /** Tags plus search terms, for handing the mood to YouTube Music or another app. */
+    /** Tags plus search terms, for showing what the reading was built from. */
     val query: String
         get() = (searchTerms + tags).joinToString(" ").take(120)
 

@@ -24,8 +24,6 @@ import tech.egrie.soundtrail.integrations.JellyfinService
 import tech.egrie.soundtrail.integrations.MusicLink
 import tech.egrie.soundtrail.integrations.MusicLinkParser
 import tech.egrie.soundtrail.integrations.MusicProvider
-import tech.egrie.soundtrail.integrations.SoundCloudService
-import tech.egrie.soundtrail.integrations.SpotifyService
 import tech.egrie.soundtrail.sync.CloudSyncService
 
 /**
@@ -65,8 +63,6 @@ internal class PlaybackHub private constructor(context: Context) : SessionTransp
     private val pins = PinStore(appContext)
     private val playlists = PlaylistStore(appContext)
     private val jellyfin = JellyfinService(appContext)
-    private val spotify = SpotifyService(appContext)
-    private val soundcloud = SoundCloudService(appContext)
     private val cloudSync = CloudSyncService(appContext, pins, playlists, AutomationStore(appContext), files)
 
     /** The app's single player, kept public so screens can render it directly. */
@@ -232,8 +228,8 @@ internal class PlaybackHub private constructor(context: Context) : SessionTransp
 
     /**
      * Walks [index] and its neighbours until something actually starts. An entry that cannot
-     * play — a song with no link, a Jellyfin server that is not connected, a Spotify track
-     * with no preview — reports why and the queue moves on.
+     * play — a song with no link, or a Jellyfin server that is not connected — reports why and
+     * the queue moves on.
      */
     private fun startAt(index: Int) {
         val token = ++startToken
@@ -258,32 +254,16 @@ internal class PlaybackHub private constructor(context: Context) : SessionTransp
                     artist = entry.artist,
                     itemId = entry.mediaId,
                     file = file,
-                    provider = entry.provider ?: MusicProvider.YOUTUBE
+                    provider = entry.provider ?: MusicProvider.JELLYFIN
                 )
                 return true
             }
         }
-        // A preview URL a search already resolved needs no second lookup.
-        entry.streamUrl?.takeIf(String::isNotBlank)?.let { stream ->
-            player.playRemoteUrl(
-                title = entry.title,
-                artist = entry.artist,
-                itemId = entry.mediaId,
-                url = stream,
-                provider = entry.provider ?: MusicProvider.YOUTUBE
-            )
-            return true
-        }
         val link = entry.url?.let(MusicLinkParser::parse)
         if (link == null) {
-            return fail("${entry.title} has no playable link. Add a supported link or attach audio you own.")
+            return fail("${entry.title} has no playable link. Add a song from your Jellyfin server, or attach audio you own.")
         }
-        return when (link.provider) {
-            MusicProvider.JELLYFIN -> startJellyfin(link, entry)
-            MusicProvider.SPOTIFY -> startSpotify(link, entry)
-            MusicProvider.SOUNDCLOUD -> startSoundcloud(link, entry)
-            MusicProvider.YOUTUBE, MusicProvider.YOUTUBE_MUSIC -> startYouTube(entry)
-        }
+        return startJellyfin(link, entry)
     }
 
     private fun startJellyfin(link: MusicLink, entry: QueueEntry): Boolean {
@@ -299,39 +279,6 @@ internal class PlaybackHub private constructor(context: Context) : SessionTransp
         )
         return true
     }
-
-    private suspend fun startSpotify(link: MusicLink, entry: QueueEntry): Boolean {
-        player.setBuffering(entry.title, entry.artist, entry.mediaId, MusicProvider.SPOTIFY)
-        val preview = try {
-            spotify.resolvePlayableUrl(link)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            null
-        } ?: return fail("No Spotify preview is available for ${entry.title}. Full playback needs Spotify's own app.")
-        player.playRemoteUrl(entry.title, entry.artist, entry.mediaId, preview, MusicProvider.SPOTIFY)
-        return true
-    }
-
-    private suspend fun startSoundcloud(link: MusicLink, entry: QueueEntry): Boolean {
-        player.setBuffering(entry.title, entry.artist, entry.mediaId, MusicProvider.SOUNDCLOUD)
-        val stream = try {
-            soundcloud.resolvePlayableUrl(link)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            null
-        } ?: return fail("Couldn't get a SoundCloud stream for ${entry.title}. It may be private or need reconnecting.")
-        player.playRemoteUrl(entry.title, entry.artist, entry.mediaId, stream, MusicProvider.SOUNDCLOUD)
-        return true
-    }
-
-    /**
-     * Soundtrail does not extract or store YouTube audio, so a YouTube link cannot play in-app.
-     * Offline files the user owns still play normally.
-     */
-    private fun startYouTube(entry: QueueEntry): Boolean =
-        fail("Soundtrail can't play ${entry.title} in-app. Open it in YouTube Music, or attach an audio file you own.")
 
     /** Starts the first thing in the library; what pressing play in the car does with nothing chosen. */
     private fun playFirstFromLibrary() {

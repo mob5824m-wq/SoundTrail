@@ -185,14 +185,14 @@ class OllamaClientTest {
         val prompt = MoodAiPrompts.full(
             "tired but I want something warm for the drive home",
             MoodContext(hourOfDay = 17, energyHint = 0.55, motion = "Driving"),
-            MoodSearchTarget.YOUTUBE
+            MoodSearchTarget.JELLYFIN
         )
         assertTrue(prompt.contains("tired but I want something warm for the drive home"))
-        // The request it is asked to answer, naming the service the listener picked.
+        // The request it is asked to answer, naming the place the listener picked.
         assertTrue(prompt.startsWith("You are the music finder inside a music app"))
         assertTrue(
             prompt.contains(
-                "find music on YouTube that fits: \"tired but I want something warm for the drive home\""
+                "find music on your Jellyfin server that fits: \"tired but I want something warm for the drive home\""
             )
         )
         assertTrue(prompt.contains("JSON only"))
@@ -223,7 +223,7 @@ class OllamaClientTest {
         val prompt = MoodAiPrompts.full(
             "something happy",
             MoodContext(),
-            MoodSearchTarget.SOUNDCLOUD
+            MoodSearchTarget.JELLYFIN
         )
         assertFalse(prompt.contains("Local time"))
         assertFalse(prompt.contains("They are "))

@@ -66,38 +66,26 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.PaddingValues
 import tech.egrie.soundtrail.AppState
-import tech.egrie.soundtrail.SearchProvider
 import tech.egrie.soundtrail.sync.CloudSyncService
-import tech.egrie.soundtrail.integrations.GoogleAuthState
-import tech.egrie.soundtrail.integrations.MusicLinkParser
-import tech.egrie.soundtrail.integrations.MusicProvider
 import tech.egrie.soundtrail.integrations.SongInfo
 import tech.egrie.soundtrail.integrations.TrackResult
 import tech.egrie.soundtrail.data.ManagedBackupStatus
 import tech.egrie.soundtrail.data.ManagedBackupStore
-import tech.egrie.soundtrail.integrations.SOUNDCLOUD_REDIRECT_URI
-import tech.egrie.soundtrail.integrations.SPOTIFY_REDIRECT_URI
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 @Composable
 internal fun MusicSearchScreen(
-    state: AppState, onSearch: (String) -> Unit, onSelectProvider: (SearchProvider) -> Unit,
+    state: AppState, onSearch: (String) -> Unit,
     onConnect: () -> Unit, onSelectTrack: (TrackResult) -> Unit, onPlayTrack: (TrackResult) -> Unit,
-    onAddLink: (String) -> Unit,
-    onLookup: (String, String) -> Unit, onSelectLookup: (SongInfo) -> Unit,
-    onSearchYoutubeMusic: (String) -> Unit, onOpenYoutubeLibrary: () -> Unit,
-    onNotice: (String) -> Unit
+    onLookup: (String, String) -> Unit, onSelectLookup: (SongInfo) -> Unit
 ) {
     var query by rememberSaveable { mutableStateOf("") }
-    var youtubeMusicQuery by rememberSaveable { mutableStateOf("") }
-    var youtubeLink by rememberSaveable { mutableStateOf("") }
     var lookupArtist by rememberSaveable { mutableStateOf("") }
     var lookupTitle by rememberSaveable { mutableStateOf("") }
     var hasSearched by rememberSaveable { mutableStateOf(false) }
     var hasLookedUp by rememberSaveable { mutableStateOf(false) }
-    var youtubeExpanded by rememberSaveable { mutableStateOf(false) }
     var lookupExpanded by rememberSaveable { mutableStateOf(false) }
     fun search() { hasSearched = query.isNotBlank(); onSearch(query) }
     fun lookUp() {
@@ -106,19 +94,8 @@ internal fun MusicSearchScreen(
         onLookup(lookupArtist, lookupTitle)
     }
 
-    val provider = state.searchProvider
-    val connected = when (provider) {
-        SearchProvider.SPOTIFY -> state.spotifyConnected
-        SearchProvider.SOUNDCLOUD -> state.soundcloudConnected
-        SearchProvider.JELLYFIN -> state.jellyfinConnected
-        SearchProvider.YOUTUBE_DATA -> state.youtubeDataConnected
-    }
-    val accent = when (provider) {
-        SearchProvider.SPOTIFY -> Palette.spotify
-        SearchProvider.SOUNDCLOUD -> Palette.soundcloud
-        SearchProvider.JELLYFIN -> Palette.jellyfin
-        SearchProvider.YOUTUBE_DATA -> Palette.youtube
-    }
+    val connected = state.jellyfinConnected
+    val accent = Palette.jellyfin
 
     LazyColumn(
         Modifier.fillMaxSize().padding(horizontal = 20.dp),
@@ -132,7 +109,7 @@ internal fun MusicSearchScreen(
             Spacer(Modifier.height(5.dp))
             Text("Find a song", style = MaterialTheme.typography.headlineLarge)
             Spacer(Modifier.height(4.dp))
-            Text("Choose a service, or use another source below.",
+            Text("Search the server you run yourself, or look up a song's details below.",
                 style = MaterialTheme.typography.bodyMedium, color = Palette.secondary)
             Spacer(Modifier.height(14.dp))
             SurfaceCard(Modifier.fillMaxWidth()) {
@@ -142,88 +119,31 @@ internal fun MusicSearchScreen(
                         Icon(Icons.Rounded.MusicNote, null, tint = accent, modifier = Modifier.size(19.dp))
                     }
                     Spacer(Modifier.width(10.dp))
-                    Text("Search ${provider.label}", style = MaterialTheme.typography.titleLarge)
+                    Text("Search Jellyfin", style = MaterialTheme.typography.titleLarge)
                 }
-                // Provider choices remain reachable on narrow screens as the list grows.
                 Spacer(Modifier.height(10.dp))
-                ProviderSwitch(provider, onSelectProvider)
-                Spacer(Modifier.height(8.dp))
                 if (connected) {
                     Text(
-                        if (provider == SearchProvider.YOUTUBE_DATA) {
-                            "Read-only search of your playlists${state.youtubeDataAccount?.let { " · $it" }.orEmpty()}."
-                        } else "Search tracks from your connected account.",
+                        "Searches the music library on the server you connected. What comes back is " +
+                            "only what that server lets your account read, and every result plays here.",
                         color = Palette.secondary, style = MaterialTheme.typography.bodyMedium
                     )
                     Spacer(Modifier.height(13.dp))
                     OutlinedTextField(
                         value = query, onValueChange = { query = it }, modifier = Modifier.fillMaxWidth(),
-                        placeholder = {
-                            Text(if (provider == SearchProvider.YOUTUBE_DATA) "Song, artist, or playlist" else "Song, artist, or album")
-                        }, singleLine = true,
+                        placeholder = { Text("Song, artist, or album") }, singleLine = true,
                         leadingIcon = { Icon(Icons.Rounded.Search, null) },
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                         keyboardActions = KeyboardActions(onSearch = { search() })
                     )
                     Spacer(Modifier.height(11.dp))
-                    PrimaryButton("Search ${provider.label}", { search() }, Modifier.fillMaxWidth(),
+                    PrimaryButton("Search Jellyfin", { search() }, Modifier.fillMaxWidth(),
                         enabled = !state.searching && query.isNotBlank())
                 } else {
-                    Text("Connect ${provider.label} to search its music catalog.",
+                    Text("Connect the Jellyfin server you run yourself to search its music library.",
                         color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
                     Spacer(Modifier.height(14.dp))
-                    PrimaryButton("Connect ${provider.label}", onConnect, Modifier.fillMaxWidth())
-                }
-            }
-            Spacer(Modifier.height(10.dp))
-            SurfaceCard(Modifier.fillMaxWidth()) {
-                DisclosureHeader(
-                    title = "YouTube / YouTube Music",
-                    subtitle = "Search the app or paste a song link — kept separate",
-                    icon = Icons.Rounded.Link,
-                    accent = Palette.youtube,
-                    expanded = youtubeExpanded,
-                    onToggle = { youtubeExpanded = !youtubeExpanded }
-                )
-                if (youtubeExpanded) {
-                    Spacer(Modifier.height(12.dp))
-                    Text("music.youtube.com links stay as YouTube Music and youtube.com / youtu.be links stay as YouTube, so every row says where it came from. Liked videos from your Google account are imported into one liked list — the same list your own likes live in, one song per link — because the import cannot see YouTube Music's account likes, which no third-party app can. All playback happens directly in Soundtrail.",
-                        color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
-                    Spacer(Modifier.height(10.dp))
-                    OutlinedTextField(
-                        value = youtubeMusicQuery, onValueChange = { youtubeMusicQuery = it },
-                        modifier = Modifier.fillMaxWidth(), singleLine = true,
-                        label = { Text("Search YouTube Music") },
-                        placeholder = { Text("Song or artist") },
-                        leadingIcon = { Icon(Icons.Rounded.Search, null) },
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                        keyboardActions = KeyboardActions(onSearch = {
-                            if (youtubeMusicQuery.isNotBlank()) onSearchYoutubeMusic(youtubeMusicQuery)
-                        })
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    PrimaryButton("Search YouTube Music", {
-                        onSearchYoutubeMusic(youtubeMusicQuery)
-                    }, Modifier.fillMaxWidth(), enabled = youtubeMusicQuery.isNotBlank())
-                    TextButton(onClick = onOpenYoutubeLibrary) {
-                        Text("Open your YouTube Music library  ↗", color = Palette.youtube)
-                    }
-                    Spacer(Modifier.height(4.dp))
-                    Text("Or paste a YouTube or YouTube Music song link", style = MaterialTheme.typography.labelMedium,
-                        color = Palette.secondary)
-                    Spacer(Modifier.height(6.dp))
-                    OutlinedTextField(
-                        value = youtubeLink, onValueChange = { youtubeLink = it },
-                        modifier = Modifier.fillMaxWidth(), singleLine = true,
-                        placeholder = { Text("youtube.com/watch?v=… or music.youtube.com/watch?v=…", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done)
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    PrimaryButton("Pin this link", {
-                        val link = MusicLinkParser.fromText(youtubeLink)
-                        if (link?.provider == MusicProvider.YOUTUBE_MUSIC || link?.provider == MusicProvider.YOUTUBE) onAddLink(link.url)
-                        else onNotice("Paste a YouTube or YouTube Music song link (not a playlist or search page). YouTube and YouTube Music are kept separate.")
-                    }, Modifier.fillMaxWidth(), enabled = youtubeLink.isNotBlank())
+                    PrimaryButton("Connect Jellyfin", onConnect, Modifier.fillMaxWidth())
                 }
             }
             if (state.searching) {
@@ -240,24 +160,19 @@ internal fun MusicSearchScreen(
             }
             if (state.results.isNotEmpty()) {
                 Spacer(Modifier.height(18.dp))
-                SectionHeading(if (provider == SearchProvider.YOUTUBE_DATA) "Playlist videos" else "Tracks")
+                SectionHeading("Tracks")
                 Spacer(Modifier.height(4.dp))
             } else if (hasSearched && !state.searching && state.searchError == null && connected) {
                 Spacer(Modifier.height(14.dp))
-                Text(
-                    if (provider == SearchProvider.YOUTUBE_DATA) "No matching videos found in the playlists scanned." else "No tracks found. Try another search.",
-                    color = Palette.secondary
-                )
+                Text("No tracks found. Try another search.", color = Palette.secondary)
             }
         }
         items(state.results, key = { it.url }) { track ->
             TrackRow(
                 track,
                 onPin = { onSelectTrack(track) },
-                // Spotify is the one provider that plays in full somewhere else; its row says so.
-                onPlay = if (track.provider == MusicProvider.SPOTIFY) {
-                    { onPlayTrack(track) }
-                } else null
+                // Every row is a song on the listener's own server, so every row plays here.
+                onPlay = { onPlayTrack(track) }
             )
         }
         item {
@@ -278,7 +193,9 @@ internal fun MusicSearchScreen(
                 )
                 if (lookupExpanded) {
                     Spacer(Modifier.height(10.dp))
-                    Text("Free lookup; no account needed.",
+                    Text("TheAudioDB's free metadata API: no account, no key, nothing stored. It " +
+                        "answers with a song's exact title, artist, album, genre and mood tags — " +
+                        "never with audio, and never with a link this app could play.",
                         color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
                     Spacer(Modifier.height(10.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -365,32 +282,10 @@ private fun DisclosureHeader(
 }
 
 @Composable
-private fun ProviderSwitch(selected: SearchProvider, onSelect: (SearchProvider) -> Unit) {
-    Row(
-        Modifier.horizontalScroll(rememberScrollState())
-            .clip(RoundedCornerShape(50)).background(Palette.elevated).padding(3.dp),
-        horizontalArrangement = Arrangement.spacedBy(3.dp)
-    ) {
-        SearchProvider.entries.forEach { candidate ->
-            val on = candidate == selected
-            Text(
-                candidate.label,
-                modifier = Modifier.clip(RoundedCornerShape(50))
-                    .background(if (on) Palette.primary else Color.Transparent)
-                    .clickable { onSelect(candidate) }
-                    .padding(horizontal = 12.dp, vertical = 5.dp),
-                color = if (on) Palette.background else Palette.secondary,
-                style = MaterialTheme.typography.labelMedium
-            )
-        }
-    }
-}
-
-@Composable
-private fun LookupRow(song: SongInfo, onPin: () -> Unit) {
+private fun LookupRow(song: SongInfo, onUse: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Palette.surface)
-            .clickable(onClick = onPin).padding(12.dp),
+            .clickable(onClick = onUse).padding(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(
@@ -412,80 +307,12 @@ private fun LookupRow(song: SongInfo, onPin: () -> Unit) {
                 Text(detail, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.labelMedium, color = Palette.muted)
             }
-            if (song.url != null) {
-                Spacer(Modifier.height(5.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (song.spotifyUrl != null) ProviderPill(MusicProvider.SPOTIFY)
-                    if (song.youtubeUrl != null) ProviderPill(MusicProvider.YOUTUBE_MUSIC)
-                }
-            } else {
-                Text("Metadata only — add a song link when pinning",
-                    style = MaterialTheme.typography.labelMedium, color = Palette.muted)
-            }
+            Text("Metadata only — tap to start a pin with these details, then choose the song " +
+                "from your Jellyfin server.",
+                style = MaterialTheme.typography.labelMedium, color = Palette.muted)
         }
-        Icon(Icons.Rounded.Add, contentDescription = "Pin ${song.title}", tint = Palette.primary)
+        Icon(Icons.Rounded.Add, contentDescription = "Use details for ${song.title}", tint = Palette.primary)
         Spacer(Modifier.width(5.dp))
-    }
-}
-
-/**
- * The saved Google connection's health, with a one-tap reconnect.
- *
- * Nothing here can sign the listener out. Tokens are written durably to Android-Keystore
- * encrypted storage that app updates do not touch, they are never deleted because of a failed
- * refresh or a network outage, and the Desktop Client ID stays put — so even the one case Google
- * genuinely invalidates — a revoke,
- * a password change, or its own 7-day Testing-mode expiry — costs one tap, not a re-setup.
- */
-@Composable
-private fun GoogleConnectionStatus(state: AppState, onConnectYouTubeOAuth: (String) -> Unit) {
-    val health = state.youtubeAuth
-    val accent = when (health.state) {
-        GoogleAuthState.CONNECTED -> Palette.primary
-        GoogleAuthState.OFFLINE -> Palette.lilac
-        GoogleAuthState.NEEDS_RECONNECT, GoogleAuthState.UNREADABLE -> Palette.coral
-        GoogleAuthState.NOT_CONNECTED -> Palette.muted
-    }
-    SurfaceCard(Modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                Modifier.size(38.dp).background(accent.copy(alpha = .16f), CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(Icons.Rounded.Cloud, null, tint = accent, modifier = Modifier.size(19.dp))
-            }
-            Spacer(Modifier.width(11.dp))
-            Column(Modifier.weight(1f)) {
-                Text("Google connection", style = MaterialTheme.typography.titleMedium)
-                Text(health.state.label, color = accent, style = MaterialTheme.typography.bodyMedium)
-            }
-            health.method?.let { method ->
-                Text(method, color = Palette.muted, style = MaterialTheme.typography.labelMedium)
-            }
-        }
-        health.detail?.let { detail ->
-            Spacer(Modifier.height(8.dp))
-            Text(detail, color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
-        }
-        health.hint?.let { hint ->
-            Spacer(Modifier.height(6.dp))
-            Text(hint, color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
-        }
-        if (health.needsAttention) {
-            Spacer(Modifier.height(10.dp))
-            PrimaryButton(
-                if (state.connectingYouTubeOAuth) "Waiting for Google…" else "Reconnect Google (one tap)",
-                { onConnectYouTubeOAuth("") },
-                Modifier.fillMaxWidth(),
-                enabled = !state.connectingYouTubeOAuth
-            )
-        }
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "App updates never clear this connection: the saved tokens live in this device's " +
-                "encrypted storage, are renewed by themselves, and are re-checked when the app starts.",
-            color = Palette.muted, style = MaterialTheme.typography.labelMedium
-        )
     }
 }
 
@@ -504,15 +331,8 @@ internal data class ManagedBackupControls(
 @Composable
 internal fun ConnectionsScreen(
     state: AppState,
-    onConnect: (String) -> Unit, onDisconnect: () -> Unit,
-    onConnectSoundcloud: (String, String) -> Unit, onDisconnectSoundcloud: () -> Unit,
-    onOpenSpotify: () -> Unit, onOpenYoutube: () -> Unit, onOpenSoundcloud: () -> Unit,
-    onOpenDashboard: () -> Unit, onOpenMicroG: () -> Unit, onOpenMicroGRe: () -> Unit, onOpenSoundcloudApps: () -> Unit,
     onConnectJellyfin: (String, String, String) -> Unit, onDisconnectJellyfin: () -> Unit,
     onOpenJellyfin: () -> Unit,
-    onConnectYouTubeOAuth: (String) -> Unit, onDisconnectYouTubeData: () -> Unit,
-    onOpenYouTubeSetup: () -> Unit,
-    onImportYouTubePlaylists: () -> Unit, onSetYouTubeAutoImport: (Boolean) -> Unit,
     backupBusy: Boolean, onExportBackup: () -> Unit, onImportBackup: () -> Unit,
     managedBackups: ManagedBackupControls,
     syncBusy: Boolean,
@@ -536,13 +356,9 @@ internal fun ConnectionsScreen(
     var syncPassword by remember { mutableStateOf("") }
     var syncRecoveryInput by remember { mutableStateOf("") }
     var confirmDeleteCloudAccount by remember { mutableStateOf(false) }
-    var clientId by rememberSaveable(state.spotifyClientId) { mutableStateOf(state.spotifyClientId) }
-    var soundcloudId by rememberSaveable(state.soundcloudClientId) { mutableStateOf(state.soundcloudClientId) }
-    var soundcloudSecret by rememberSaveable { mutableStateOf("") }
     var jellyfinServer by rememberSaveable(state.jellyfinServer) { mutableStateOf(state.jellyfinServer) }
     var jellyfinUser by rememberSaveable(state.jellyfinName) { mutableStateOf(state.jellyfinName) }
     var jellyfinPassword by rememberSaveable { mutableStateOf("") }
-    var youtubeOAuthId by rememberSaveable(state.youtubeOAuthClientId) { mutableStateOf(state.youtubeOAuthClientId) }
     var expandedService by rememberSaveable { mutableStateOf<String?>(null) }
     var showManagedRestore by rememberSaveable { mutableStateOf(false) }
     var confirmDeleteManaged by rememberSaveable { mutableStateOf(false) }
@@ -556,153 +372,11 @@ internal fun ConnectionsScreen(
         Spacer(Modifier.height(5.dp))
         Text("Connections", style = MaterialTheme.typography.headlineLarge)
         Spacer(Modifier.height(4.dp))
-        Text("Set up only the music services you use. Pins and playlists stay local unless you enable optional, end-to-end encrypted sync to a server you control.",
+        Text("Connect the Jellyfin server you run yourself. Pins and playlists stay on this " +
+            "device unless you enable optional, end-to-end encrypted sync to a server you control.",
             color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
         Spacer(Modifier.height(16.dp))
 
-        SurfaceCard(Modifier.fillMaxWidth()) {
-            Row(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable {
-                    expandedService = if (expandedService == "spotify") null else "spotify"
-                }.padding(vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(Modifier.size(43.dp).background(Palette.spotify.copy(alpha = .17f), CircleShape),
-                    contentAlignment = Alignment.Center) {
-                    Icon(Icons.Rounded.MusicNote, null, tint = Palette.spotify)
-                }
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("Spotify", style = MaterialTheme.typography.titleLarge)
-                    Text(if (state.spotifyConnected) "Connected" else "Tap to set up",
-                        color = if (state.spotifyConnected) Palette.spotify else Palette.secondary,
-                        style = MaterialTheme.typography.bodyMedium)
-                }
-                if (state.spotifyConnected) Icon(Icons.Rounded.Check, "Connected", tint = Palette.spotify)
-                Icon(
-                    if (expandedService == "spotify") Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
-                    contentDescription = if (expandedService == "spotify") "Collapse Spotify" else "Set up Spotify",
-                    tint = Palette.muted
-                )
-            }
-            if (expandedService == "spotify") {
-                Spacer(Modifier.height(15.dp))
-                if (state.spotifyConnected) {
-                    Text("Signed in${state.spotifyName?.let { " as $it" }.orEmpty()}. Search tracks and save them to places.",
-                        color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
-                    Spacer(Modifier.height(13.dp))
-                    PrimaryButton("Open Spotify", onOpenSpotify, Modifier.fillMaxWidth())
-                    TextButton(onClick = onDisconnect) { Text("Disconnect on this device", color = Palette.coral) }
-                } else {
-                    Text("Use a Spotify Developer app's public Client ID. No client secret is stored or needed.",
-                        color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
-                    Spacer(Modifier.height(12.dp))
-                    Text("Redirect URI to register in your Spotify dashboard:",
-                        style = MaterialTheme.typography.labelMedium, color = Palette.secondary)
-                    Spacer(Modifier.height(6.dp))
-                    SelectionContainer {
-                        Text(SPOTIFY_REDIRECT_URI, color = Palette.primary, fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.bodyMedium)
-                    }
-                    Spacer(Modifier.height(13.dp))
-                    OutlinedTextField(
-                        value = clientId, onValueChange = { clientId = it.trim().take(32) },
-                        modifier = Modifier.fillMaxWidth(), singleLine = true,
-                        label = { Text("Spotify Client ID") },
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done)
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    PrimaryButton(if (state.connecting) "Connecting…" else "Connect Spotify",
-                        { onConnect(clientId) }, Modifier.fillMaxWidth(), enabled = !state.connecting)
-                    TextButton(onClick = onOpenDashboard) {
-                        Text("Open Spotify Developer Dashboard  ↗", color = Palette.spotify)
-                    }
-                    Text("Developer-mode apps may require a Premium app owner and an allowlisted test account.",
-                        style = MaterialTheme.typography.labelMedium, color = Palette.muted)
-                }
-            }
-        }
-        Spacer(Modifier.height(13.dp))
-        SurfaceCard(Modifier.fillMaxWidth()) {
-            Row(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable {
-                    expandedService = if (expandedService == "soundcloud") null else "soundcloud"
-                }.padding(vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(Modifier.size(43.dp).background(Palette.soundcloud.copy(alpha = .15f), CircleShape),
-                    contentAlignment = Alignment.Center) {
-                    Icon(Icons.Rounded.Cloud, null, tint = Palette.soundcloud)
-                }
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("SoundCloud", style = MaterialTheme.typography.titleLarge)
-                    Text(if (state.soundcloudConnected) "Connected" else "Tap to set up",
-                        color = if (state.soundcloudConnected) Palette.soundcloud else Palette.secondary,
-                        style = MaterialTheme.typography.bodyMedium)
-                }
-                if (state.soundcloudConnected) Icon(Icons.Rounded.Check, "Connected", tint = Palette.soundcloud)
-                Icon(
-                    if (expandedService == "soundcloud") Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
-                    contentDescription = if (expandedService == "soundcloud") "Collapse SoundCloud" else "Set up SoundCloud",
-                    tint = Palette.muted
-                )
-            }
-            if (expandedService == "soundcloud") {
-                Spacer(Modifier.height(15.dp))
-                if (state.soundcloudConnected) {
-                    Text("Signed in${state.soundcloudName?.let { " as $it" }.orEmpty()}. Search tracks and save them to places.",
-                        color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
-                    Spacer(Modifier.height(13.dp))
-                    PrimaryButton("Open SoundCloud", onOpenSoundcloud, Modifier.fillMaxWidth())
-                    TextButton(onClick = onDisconnectSoundcloud) {
-                        Text("Disconnect on this device", color = Palette.coral)
-                    }
-                } else {
-                    Text("SoundCloud's API needs a registered app (Artist Pro or an approved API request). " +
-                        "SoundCloud treats every client as confidential, so the Client Secret is required too; " +
-                        "it is stored encrypted with Android Keystore and never leaves this device.",
-                        color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
-                    Spacer(Modifier.height(12.dp))
-                    Text("Redirect URI to register in your SoundCloud app settings:",
-                        style = MaterialTheme.typography.labelMedium, color = Palette.secondary)
-                    Spacer(Modifier.height(6.dp))
-                    SelectionContainer {
-                        Text(SOUNDCLOUD_REDIRECT_URI, color = Palette.primary, fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.bodyMedium)
-                    }
-                    Spacer(Modifier.height(13.dp))
-                    OutlinedTextField(
-                        value = soundcloudId, onValueChange = { soundcloudId = it.trim().take(64) },
-                        modifier = Modifier.fillMaxWidth(), singleLine = true,
-                        label = { Text("SoundCloud Client ID") },
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next)
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    OutlinedTextField(
-                        value = soundcloudSecret, onValueChange = { soundcloudSecret = it.take(128) },
-                        modifier = Modifier.fillMaxWidth(), singleLine = true,
-                        label = { Text("SoundCloud Client Secret") },
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.Password, imeAction = ImeAction.Done
-                        )
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    PrimaryButton(
-                        if (state.connectingSoundcloud) "Connecting…" else "Connect SoundCloud",
-                        { onConnectSoundcloud(soundcloudId, soundcloudSecret) },
-                        Modifier.fillMaxWidth(), enabled = !state.connectingSoundcloud
-                    )
-                    TextButton(onClick = onOpenSoundcloudApps) {
-                        Text("Open SoundCloud for Developers  ↗", color = Palette.soundcloud)
-                    }
-                    Text("App registration is limited; see SoundCloud's docs for current access requirements.",
-                        style = MaterialTheme.typography.labelMedium, color = Palette.muted)
-                }
-            }
-        }
-        Spacer(Modifier.height(13.dp))
         SurfaceCard(Modifier.fillMaxWidth()) {
             Row(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable {
@@ -798,124 +472,6 @@ internal fun ConnectionsScreen(
                         "your own network usually speak plain http://.",
                         style = MaterialTheme.typography.labelMedium, color = Palette.muted)
                 }
-            }
-        }
-        Spacer(Modifier.height(13.dp))
-        SurfaceCard(Modifier.fillMaxWidth()) {
-            Row(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable {
-                    expandedService = if (expandedService == "youtube") null else "youtube"
-                }.padding(vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(Modifier.size(43.dp).background(Palette.youtube.copy(alpha = .16f), CircleShape),
-                    contentAlignment = Alignment.Center) {
-                    Icon(Icons.Rounded.MusicNote, null, tint = Palette.youtube)
-                }
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("YouTube Music", style = MaterialTheme.typography.titleLarge)
-                    Text(
-                        when {
-                            state.youtubeDataConnected -> "Playlists & search connected"
-                            state.youtubeAppInstalled -> "Music app detected"
-                            else -> "Tap to set up"
-                        },
-                        color = Palette.secondary, style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-                if (state.youtubeDataConnected) Icon(Icons.Rounded.Check, "Playlists & search connected", tint = Palette.youtube)
-                Icon(
-                    if (expandedService == "youtube") Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
-                    contentDescription = if (expandedService == "youtube") "Collapse YouTube Music" else "Set up YouTube Music",
-                    tint = Palette.muted
-                )
-            }
-            if (expandedService == "youtube") {
-                Spacer(Modifier.height(13.dp))
-                GoogleConnectionStatus(state, onConnectYouTubeOAuth)
-                Spacer(Modifier.height(13.dp))
-                Text("YouTube playlist import & search", style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(6.dp))
-                if (state.youtubeDataConnected) {
-                    Text(
-                        "Read-only access${state.youtubeDataAccount?.let { " · $it" }.orEmpty()}. " +
-                            "Playlists (including Liked videos and Uploads) are imported into your " +
-                            "library so you can pin or automate them. The YouTube Data API cannot " +
-                            "reach YouTube Music-only collections like saved songs/albums or " +
-                            "auto-generated mixes (Supermix, Daylist, etc.).",
-                        color = Palette.secondary, style = MaterialTheme.typography.bodyMedium
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    PrimaryButton(
-                        if (state.youtubeImporting) "Importing playlists…" else "Import playlists now",
-                        onImportYouTubePlaylists, Modifier.fillMaxWidth(),
-                        enabled = !state.youtubeImporting
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Import automatically when connected", style = MaterialTheme.typography.titleMedium)
-                            val importTime = if (state.youtubeLastImportedAt > 0L)
-                                " · last imported ${formatSyncTime(state.youtubeLastImportedAt)}" else ""
-                            Text(
-                                "Pulls new videos into matching Soundtrail playlists.$importTime",
-                                color = Palette.muted, style = MaterialTheme.typography.labelMedium
-                            )
-                        }
-                        Switch(
-                            checked = state.youtubeAutoImportEnabled,
-                            onCheckedChange = onSetYouTubeAutoImport
-                        )
-                    }
-                    Spacer(Modifier.height(10.dp))
-                    TextButton(onClick = onDisconnectYouTubeData) {
-                        Text("Disconnect and request revocation", color = Palette.coral)
-                    }
-                } else {
-                    val connectingAny = state.connectingYouTubeOAuth
-                    Text(
-                        "Sign in with your own Client ID",
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        "Optional read-only playlist search and import. Uses your own Desktop OAuth Client ID: " +
-                            "Google opens in your browser, and the tokens stay encrypted on this device. " +
-                            "No Google services or Google account are needed on the phone.",
-                        color = Palette.secondary, style = MaterialTheme.typography.bodyMedium
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    OutlinedTextField(
-                        value = youtubeOAuthId, onValueChange = { youtubeOAuthId = it.trim().take(120) },
-                        modifier = Modifier.fillMaxWidth(), singleLine = true,
-                        label = { Text("Google Desktop Client ID") },
-                        placeholder = { Text("123…-abc….apps.googleusercontent.com") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next)
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    PrimaryButton(
-                        if (state.connectingYouTubeOAuth) "Connecting…" else "Connect with Client ID",
-                        { onConnectYouTubeOAuth(youtubeOAuthId) }, Modifier.fillMaxWidth(),
-                        enabled = !connectingAny
-                    )
-                    TextButton(onClick = onOpenYouTubeSetup) {
-                        Text("Configure Google Cloud / YouTube API  ↗", color = Palette.youtube)
-                    }
-                }
-                Spacer(Modifier.height(7.dp))
-                Text("Jellyfin and audio you own play in-app. The YouTube sign-in powers playlist search AND playlist import; YouTube songs open in the YouTube Music app.",
-                    color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
-                Spacer(Modifier.height(15.dp))
-                PrimaryButton("Open YouTube Music", onOpenYoutube, Modifier.fillMaxWidth())
-                Text(
-                    "Opening YouTube Music never needs this connection, or any Google sign-in: it " +
-                        "hands the app a link, exactly as a browser would. The read-only connection " +
-                        "above is only for importing and searching your own playlists.",
-                    color = Palette.muted, style = MaterialTheme.typography.labelMedium
-                )
-                TextButton(onClick = onOpenMicroG) { Text("Learn about microG  ↗", color = Palette.lilac) }
-                TextButton(onClick = onOpenMicroGRe) { Text("MicroG RE (Morphe/ReVanced)  ↗", color = Palette.lilac) }
             }
         }
         Spacer(Modifier.height(13.dp))
@@ -1294,7 +850,11 @@ internal fun ConnectionsScreen(
                 Text("Private by design", style = MaterialTheme.typography.titleMedium)
             }
             Spacer(Modifier.height(7.dp))
-            Text("Location is requested only when you choose it. Saved pin locations enter sync only as end-to-end encrypted records when you enable self-hosted sync. Pins are rendered on-device; map requests use public tile coordinates. Official read-only YouTube API access is separate from rights-confirmed audio-only extraction; the extractor receives no OAuth token or app-session data. No background location tracking.",
+            Text("Location is requested only when you choose it. Saved pin locations enter sync " +
+                "only as end-to-end encrypted records when you enable sync. Pins are rendered " +
+                "on-device; map requests use public tile coordinates. Music is searched and " +
+                "streamed only from the Jellyfin server you connected, with that server's own " +
+                "permissions in charge of what comes back. No background location tracking.",
                 color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
         }
         Spacer(Modifier.height(27.dp))

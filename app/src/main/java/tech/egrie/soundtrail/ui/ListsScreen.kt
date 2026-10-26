@@ -73,14 +73,11 @@ import java.util.UUID
 /** Everything the Lists tab can ask the app to do. */
 data class ListsActions(
     val onToggleWatch: (Boolean) -> Unit,
-    val onToggleAutoSearch: (Boolean) -> Unit,
     val onNewPlaylist: (String) -> Unit,
     val onDeletePlaylist: (String) -> Unit,
     val onAddSong: (playlistId: String, title: String, artist: String, url: String) -> Unit,
     val onRemoveSong: (playlistId: String, itemId: String) -> Unit,
     val onPlaySong: (PlaylistItem) -> Unit,
-    val onSearchSong: (PlaylistItem) -> Unit,
-    val onGetSong: (PlaylistItem) -> Unit,
     val onDownloadJellyfin: (playlistId: String, itemId: String) -> Unit,
     val onRemoveOfflineAudio: (playlistId: String, itemId: String) -> Unit,
     val onRemoveOfflineFile: (fileName: String) -> Unit,
@@ -368,15 +365,8 @@ private fun WatchCard(state: AppState, actions: ListsActions) {
         Text("Uses a visible notification. Location stays on this device.",
             color = Palette.muted, style = MaterialTheme.typography.labelMedium)
         Spacer(Modifier.height(10.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("Search YouTube Music when adding songs", style = MaterialTheme.typography.titleMedium)
-                Text("Adds a YouTube link for in-app playback; all audio plays inside Soundtrail.",
-                    color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
-            }
-            Switch(checked = state.autoSearchYoutube, onCheckedChange = actions.onToggleAutoSearch)
-        }
-        Text("Local files, Jellyfin, Spotify previews, and SoundCloud play directly in Soundtrail. YouTube songs open in the YouTube Music app.",
+        Text("Every song plays inside Soundtrail: streamed from your own Jellyfin server, or from " +
+            "an audio file you attached yourself. Nothing is handed to another app.",
             color = Palette.muted, style = MaterialTheme.typography.labelMedium)
     }
 }
@@ -457,12 +447,6 @@ private fun PlaylistDetailCard(
                             }
                         }
                     }
-                    else -> {
-                        IconButton(onClick = { actions.onGetSong(item) }, Modifier.size(38.dp)) {
-                            Icon(Icons.Rounded.Download, "Get ${item.title} with an external app",
-                                tint = Palette.lilac)
-                        }
-                    }
                 }
                 IconButton(onClick = { actions.onImportAudio(playlist.id, item) }, Modifier.size(38.dp)) {
                     Icon(Icons.Rounded.AudioFile, "Attach audio file to ${item.title}", tint = Palette.primary)
@@ -485,12 +469,13 @@ private fun PlaylistDetailCard(
         Spacer(Modifier.height(8.dp))
         OutlinedTextField(
             value = url, onValueChange = { url = it }, modifier = Modifier.fillMaxWidth(),
-            singleLine = true, label = { Text("Spotify, SoundCloud, YouTube Music, or Jellyfin link (optional)") },
+            singleLine = true, label = { Text("Jellyfin song link (optional)") },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done)
         )
         if (url.isNotBlank() && MusicLinkParser.parse(url) == null) {
             Spacer(Modifier.height(6.dp))
-            Text("That link is not a supported song URL; it will be ignored and a YouTube Music search will be used.",
+            Text("That link is not a song this app can play, so it will be ignored. Pick a song " +
+                "from your Jellyfin server on the Search tab, or attach audio you own.",
                 color = Palette.coral, style = MaterialTheme.typography.labelMedium)
         }
         Spacer(Modifier.height(10.dp))
@@ -499,7 +484,8 @@ private fun PlaylistDetailCard(
             title = ""; artist = ""; url = ""
         }, Modifier.fillMaxWidth(), enabled = title.isNotBlank())
         Spacer(Modifier.height(8.dp))
-        Text("All songs play directly in Soundtrail. Jellyfin uses your server's authenticated stream. YouTube songs open in an external app; ♪ attaches audio you already own for in-app playback.",
+        Text("All songs play directly in Soundtrail. A Jellyfin song uses your server's " +
+            "authenticated stream; ♪ attaches audio you already own, which plays with no server at all.",
             color = Palette.muted, style = MaterialTheme.typography.labelMedium)
     }
 }

@@ -11,7 +11,7 @@ import tech.egrie.soundtrail.data.PlaylistItem
 import tech.egrie.soundtrail.integrations.MusicProvider
 
 class LibraryMediaTest {
-    private val trackUrl = "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT"
+    private val trackUrl = "jellyfin:item:4cOdK2wGLETKBW3PvgPWqT"
 
     @Test fun `song and playlist ids round-trip through their prefixes`() {
         val song = LibraryMedia.song("a-b-c")
@@ -33,7 +33,7 @@ class LibraryMediaTest {
     @Test fun `a pin carries its link and the place it was saved to`() {
         val pin = MusicPin(
             id = "pin-1", title = "Nightcall", artist = "Kavinsky", place = "Lookout point",
-            note = "", url = trackUrl, provider = MusicProvider.SPOTIFY,
+            note = "", url = trackUrl, provider = MusicProvider.JELLYFIN,
             point = GeoPoint(43.65, -79.38), createdAt = 5L
         )
         val entry = pin.toQueueEntry()
@@ -48,15 +48,15 @@ class LibraryMediaTest {
     @Test fun `a playlist song keeps its provider, its playlist and its offline copy`() {
         val item = PlaylistItem(
             id = "song-1", title = "Motion Sickness", artist = "Phoebe Bridgers",
-            url = trackUrl, provider = MusicProvider.SPOTIFY, createdAt = 9L,
+            url = trackUrl, provider = MusicProvider.JELLYFIN, createdAt = 9L,
             localFile = "offline-9.mp3"
         )
         val entry = item.toQueueEntry("Road trip")
         assertEquals(LibraryMedia.song("song-1"), entry.mediaId)
-        assertEquals(MusicProvider.SPOTIFY, entry.provider)
+        assertEquals(MusicProvider.JELLYFIN, entry.provider)
         assertEquals(trackUrl, entry.url)
         assertEquals("offline-9.mp3", entry.localFile)
-        assertEquals("Spotify · Road trip", entry.detail)
+        assertEquals("Jellyfin · Road trip", entry.detail)
         assertTrue(entry.hasSource)
     }
 

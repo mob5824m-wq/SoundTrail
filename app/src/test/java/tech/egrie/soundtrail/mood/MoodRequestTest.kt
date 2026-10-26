@@ -21,27 +21,27 @@ class MoodRequestTest {
 
     @Test fun `the request names the provider and the words that were used`() {
         assertEquals(
-            "find music on YouTube that fits: \"tired but warm\"",
-            MoodSearchTarget.request("tired but warm", MoodSearchTarget.YOUTUBE)
+            "find music on your Jellyfin server that fits: \"tired but warm\"",
+            MoodSearchTarget.request("tired but warm", MoodSearchTarget.JELLYFIN)
         )
         assertEquals(
             "find music in your own library that fits: \"quiet focus\"",
             MoodSearchTarget.LIBRARY.let { MoodSearchTarget.request("quiet focus", it) }
         )
         assertEquals(
-            "find music on Spotify that fits: \"rainy sunday\"",
-            MoodSearchTarget.request("  rainy sunday  ", MoodSearchTarget.SPOTIFY)
+            "find music on your Jellyfin server that fits: \"rainy sunday\"",
+            MoodSearchTarget.request("  rainy sunday  ", MoodSearchTarget.JELLYFIN)
         )
     }
 
     @Test fun `the first line the model reads is that request`() {
-        val prompt = MoodAiPrompts.describe("tired but warm", MoodContext(), MoodSearchTarget.YOUTUBE)
-        assertTrue(prompt.startsWith("find music on YouTube that fits: \"tired but warm\""))
+        val prompt = MoodAiPrompts.describe("tired but warm", MoodContext(), MoodSearchTarget.JELLYFIN)
+        assertTrue(prompt.startsWith("find music on your Jellyfin server that fits: \"tired but warm\""))
         // The context still travels, because the hour and motion tilt the reading.
         val withContext = MoodAiPrompts.describe(
             "tired but warm",
             MoodContext(energyHint = 0.8, hourOfDay = 22, motion = "walking"),
-            MoodSearchTarget.YOUTUBE
+            MoodSearchTarget.JELLYFIN
         )
         assertTrue(withContext.contains("energy around 80"))
         assertTrue(withContext.contains("Local time: 22:00"))
@@ -63,30 +63,23 @@ class MoodRequestTest {
         }
         assertEquals(MoodSearchTarget.LIBRARY, MoodSearchTarget.from(null))
         assertEquals(MoodSearchTarget.LIBRARY, MoodSearchTarget.from("gpt-9000"))
-        assertEquals(MoodSearchTarget.YOUTUBE_MUSIC, MoodSearchTarget.from(" YouTube_Music "))
+        assertEquals(MoodSearchTarget.JELLYFIN, MoodSearchTarget.from(" Jellyfin "))
+        // An id saved by an older version for a service that is gone falls back to the library
+        // instead of selecting something that no longer exists.
+        listOf("youtube", "youtube_music", "spotify", "soundcloud").forEach { gone ->
+            assertEquals(gone, MoodSearchTarget.LIBRARY, MoodSearchTarget.from(gone))
+        }
     }
 
-    @Test fun `picking a provider that is not connected says so, and the others stay quiet`() {
-        val nothingConnected = MoodSearchTarget.entries.associateWith { target ->
-            target.missingConnection(spotify = false, soundcloud = false, jellyfin = false, youtube = false)
-        }
-        assertNull(nothingConnected[MoodSearchTarget.LIBRARY])
-        assertNull(nothingConnected[MoodSearchTarget.YOUTUBE_MUSIC])
-        listOf(
-            MoodSearchTarget.YOUTUBE,
-            MoodSearchTarget.SPOTIFY,
-            MoodSearchTarget.SOUNDCLOUD,
-            MoodSearchTarget.JELLYFIN
-        ).forEach { target ->
-            val sentence = nothingConnected.getValue(target)
-            assertTrue("$target should warn without a connection", !sentence.isNullOrBlank())
-            assertTrue(sentence!!.contains(target.short))
-        }
+    @Test fun `picking the server without a server says so, and the library stays quiet`() {
+        val warned = MoodSearchTarget.JELLYFIN.missingConnection(jellyfin = false)
+        assertTrue("Jellyfin should warn without a connection", !warned.isNullOrBlank())
+        assertTrue(warned!!.contains(MoodSearchTarget.JELLYFIN.short))
+        // The library needs no connection, so it never has anything to warn about.
+        assertNull(MoodSearchTarget.LIBRARY.missingConnection(jellyfin = false))
+        assertNull(MoodSearchTarget.LIBRARY.missingConnection(jellyfin = true))
         MoodSearchTarget.entries.forEach { target ->
-            assertNull(
-                "$target should be quiet once connected",
-                target.missingConnection(spotify = true, soundcloud = true, jellyfin = true, youtube = true)
-            )
+            assertNull("$target should be quiet once connected", target.missingConnection(jellyfin = true))
         }
     }
 
@@ -216,7 +209,7 @@ class MoodRequestTest {
     private fun track(title: String, artist: String) = tech.egrie.soundtrail.integrations.TrackResult(
         title = title,
         artist = artist,
-        url = "https://example.com/$title",
-        provider = tech.egrie.soundtrail.integrations.MusicProvider.YOUTUBE
+        url = "jellyfin:item:4cOdK2wGLETKBW3PvgPWqT",
+        provider = tech.egrie.soundtrail.integrations.MusicProvider.JELLYFIN
     )
 }

@@ -13,15 +13,15 @@ import tech.egrie.soundtrail.integrations.MusicProvider
 class BackupFormatTest {
     private val pin = MusicPin(
         id = "pin-1", title = "Night Swim", artist = "The Marías", place = "Hanlan's Point",
-        note = "Sunset swim, phone in a bag", url = "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT",
-        provider = MusicProvider.SPOTIFY, point = GeoPoint(43.6259, -79.4047), createdAt = 1_700_000_000_000L
+        note = "Sunset swim, phone in a bag", url = "jellyfin:item:4cOdK2wGLETKBW3PvgPWqT",
+        provider = MusicProvider.JELLYFIN, point = GeoPoint(43.6259, -79.4047), createdAt = 1_700_000_000_000L
     )
     private val playlist = Playlist(
         id = "pl-1", name = "Island ferries", createdAt = 1_700_000_100_000L,
         items = listOf(
             PlaylistItem(
-                id = "it-1", title = "Ribs", artist = "Lorde", url = "https://music.youtube.com/watch?v=APl0u1m4cOk",
-                provider = MusicProvider.YOUTUBE_MUSIC, createdAt = 1_700_000_200_000L, localFile = "123.mp3"
+                id = "it-1", title = "Ribs", artist = "Lorde", url = "jellyfin:item:4cOdK2wGLETKBW3PvgPWqT",
+                provider = MusicProvider.JELLYFIN, createdAt = 1_700_000_200_000L, localFile = "123.mp3"
             ),
             PlaylistItem(
                 id = "it-2", title = "Handwritten", artist = "The Bathrels", url = null,
@@ -85,11 +85,11 @@ class BackupFormatTest {
               "version": 1,
               "pins": [
                 {"id":"ok","title":"Song","place":"P","note":"","artist":"",
-                 "url":"https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT",
+                 "url":"jellyfin:item:4cOdK2wGLETKBW3PvgPWqT",
                  "lat":10.0,"lon":20.0,"createdAt":5},
-                {"id":"bad","title":"No link","url":"https://example.com/not-a-song",
+                {"id":"bad","title":"Unsupported link","url":"https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT",
                  "lat":10.0,"lon":20.0,"createdAt":6},
-                {"id":"bad2","title":"Off-world","url":"https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT",
+                {"id":"bad2","title":"Off-world","url":"jellyfin:item:4cOdK2wGLETKBW3PvgPWqT",
                  "lat":91.0,"lon":20.0,"createdAt":7}
               ],
               "playlists": [],
@@ -116,7 +116,7 @@ class BackupFormatTest {
         assertNull(items[1].url)
         assertNull(items[1].provider)
         assertEquals("123.mp3", items[0].localFile)
-        assertEquals(MusicProvider.YOUTUBE_MUSIC, items[0].provider)
+        assertEquals(MusicProvider.JELLYFIN, items[0].provider)
     }
 
     @Test fun `automations without a place keep motion and time conditions`() {

@@ -57,7 +57,6 @@ internal data class AssistantActions(
     val onMic: () -> Unit,
     val onSetSpeakReplies: (Boolean) -> Unit,
     val onPlayHit: (AssistantHit) -> Unit,
-    val onOpenHitInYouTubeMusic: (AssistantHit) -> Unit,
     val onOpenMood: () -> Unit,
     /** False when this phone has no speech recognition, which hides the button. */
     val micAvailable: Boolean,
@@ -88,8 +87,8 @@ internal fun AssistantScreen(state: AppState, actions: AssistantActions, onNotic
         Text(
             "Ask for a song by talking or typing. Soundtrail looks in your own pins and " +
                 "playlists first — those play with no connection at all — and then, with your " +
-                "Google account connected, searches YouTube's music catalogue and plays what it " +
-                "finds here. Describe a feeling instead and the mood engine takes over.",
+                "Jellyfin server connected, searches its library and plays what it finds here. " +
+                "Describe a feeling instead and the mood engine takes over.",
             color = Palette.secondary, style = MaterialTheme.typography.bodyMedium
         )
 
@@ -119,12 +118,10 @@ internal fun AssistantScreen(state: AppState, actions: AssistantActions, onNotic
 
         Spacer(Modifier.height(16.dp))
         Text(
-            "What the search is: YouTube's own catalogue of music videos, lyric videos and audio " +
-                "uploads, found with the Google account you connected on the Connect tab. " +
-                "YouTube Music's account library — saved songs, albums and your likes there — " +
-                "is not open to other apps, so songs are looked up by name and each row can open " +
-                "in YouTube Music itself, where your own account and quality apply. Nothing you " +
-                "say is sent anywhere but that search.",
+            "What the search is: your own Jellyfin server's music library, searched with the " +
+                "account you connected on the Connect tab, so what comes back is limited to what " +
+                "that server lets you read. Nothing you say is sent anywhere but your own pins, " +
+                "playlists and that server.",
             color = Palette.muted, style = MaterialTheme.typography.labelMedium
         )
         Spacer(Modifier.height(24.dp))
@@ -209,7 +206,7 @@ private fun AskCard(ask: AssistantUiState, actions: AssistantActions, onNotice: 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                 Spacer(Modifier.width(10.dp))
-                Text("Looking in your library, then on YouTube…", color = Palette.secondary)
+                Text("Looking in your library, then on your Jellyfin server…", color = Palette.secondary)
             }
         }
 
@@ -298,11 +295,6 @@ private fun HitRow(hit: AssistantHit, actions: AssistantActions) {
                 color = Palette.secondary, style = MaterialTheme.typography.bodyMedium,
                 maxLines = 1, overflow = TextOverflow.Ellipsis
             )
-        }
-        hit.musicUrl?.let {
-            TextButton(onClick = { actions.onOpenHitInYouTubeMusic(hit) }) {
-                Text("YT Music", color = Palette.youtube)
-            }
         }
     }
 }

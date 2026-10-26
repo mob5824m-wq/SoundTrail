@@ -25,7 +25,7 @@ class AssistantParserTest {
 
     @Test
     fun `a one-word title keeps the verb, because the title may be the verb`() {
-        // "Play Sunsets" searches for "Play Sunsets": YouTube finds the song either way, and a
+        // "Play Sunsets" searches for "Play Sunsets": a server search finds the song either way, and a
         // song actually called "Play" is still findable. Matching drops the command word, so the
         // library still answers (see AssistantLibraryTest).
         assertEquals("Play Sunsets", AssistantParser.parse("Play Sunsets")?.phrase)
@@ -79,28 +79,34 @@ class AssistantParserTest {
     }
 
     @Test
-    fun `the app a listener names is where the look should go`() {
+    fun `the one place a listener can name is where the look should go`() {
         assertEquals(
-            MusicProvider.YOUTUBE_MUSIC,
-            AssistantParser.parse("Play Bohemian Rhapsody on YouTube Music")?.provider
-        )
-        assertEquals(
-            MusicProvider.SPOTIFY,
-            AssistantParser.parse("Play Bohemian Rhapsody on Spotify")?.provider
-        )
-        assertEquals(
-            MusicProvider.SOUNDCLOUD,
-            AssistantParser.parse("Sunsets by The xx on SoundCloud")?.provider
+            MusicProvider.JELLYFIN,
+            AssistantParser.parse("Play Bohemian Rhapsody on Jellyfin")?.provider
         )
         // Where to look is not part of the song.
         assertEquals(
             "Bohemian Rhapsody",
-            AssistantParser.parse("Play Bohemian Rhapsody on YouTube Music")?.query
+            AssistantParser.parse("Play Bohemian Rhapsody on Jellyfin")?.query
         )
         assertEquals(
             "Bohemian Rhapsody",
-            AssistantParser.parse("Play Bohemian Rhapsody on YouTube Music.")?.query
+            AssistantParser.parse("Play Bohemian Rhapsody on Jellyfin.")?.query
         )
+    }
+
+    @Test
+    fun `a service this app no longer has is not a place to look`() {
+        // The words stay in the query, which costs nothing: the search simply carries them. What
+        // must not happen is a row that claims to come from a service that was removed.
+        listOf("YouTube Music", "YouTube", "Spotify", "SoundCloud").forEach { named ->
+            val request = AssistantParser.parse("Play Bohemian Rhapsody on $named")!!
+            assertNull("on $named should name no provider", request.provider)
+            assertTrue(
+                "on $named should stay in the query",
+                request.query.contains(named, ignoreCase = true)
+            )
+        }
     }
 
     @Test
@@ -148,32 +154,41 @@ class AssistantParserTest {
         assertEquals("Song 2", AssistantParser.parse("Play Song 2 by Blur")?.title)
     }
 
-    // ----- "find music on Spotify that fits …": the request the Mood tab builds -----
+    // ----- "find music on Jellyfin that fits …": the request the Mood tab builds -----
 
     @Test
-    fun `a find-my-music request names the service and the feeling`() {
-        val said = AssistantParser.findMusic("find music on Spotify that fits: tired but warm")!!
+    fun `a find-my-music request names the place and the feeling`() {
+        val said = AssistantParser.findMusic("find music on Jellyfin that fits: tired but warm")!!
         assertEquals("tired but warm", said.text)
-        assertEquals(MusicProvider.SPOTIFY, said.provider)
+        assertEquals(MusicProvider.JELLYFIN, said.provider)
         // The same sentence without the colon, and the way a person would say it out loud.
         assertEquals(
             "rainy sunday",
-            AssistantParser.findMusic("find me music on YouTube that fits rainy sunday")?.text
+            AssistantParser.findMusic("find me music on Jellyfin that fits rainy sunday")?.text
         )
         assertEquals(
-            MusicProvider.YOUTUBE,
-            AssistantParser.findMusic("find me music on YouTube that fits rainy sunday")?.provider
+            MusicProvider.JELLYFIN,
+            AssistantParser.findMusic("find me music on Jellyfin that fits rainy sunday")?.provider
         )
-        assertEquals(
-            MusicProvider.YOUTUBE_MUSIC,
-            AssistantParser.findMusic("find music on YouTube Music that fits driving at night")?.provider
-        )
-        val soundcloud = AssistantParser.findMusic("find music on SoundCloud which suits a long walk")!!
-        assertEquals(MusicProvider.SOUNDCLOUD, soundcloud.provider)
-        assertEquals("a long walk", soundcloud.text)
+        val walked = AssistantParser.findMusic("find music on Jellyfin which suits a long walk")!!
+        assertEquals(MusicProvider.JELLYFIN, walked.provider)
+        assertEquals("a long walk", walked.text)
         assertEquals(
             MusicProvider.JELLYFIN,
             AssistantParser.findMusic("find music on Jellyfin that matches quiet focus")?.provider
+        )
+    }
+
+    @Test
+    fun `a find-my-music request naming a removed service is not claimed as a mood`() {
+        // With no joiner this reader can see and no place it recognises, the sentence is left to
+        // the ordinary parser rather than being turned into a mood reading about "on Spotify".
+        assertNull(AssistantParser.findMusic("find music on Spotify that fits: tired but warm"))
+        assertNull(AssistantParser.findMusic("find music on YouTube Music that fits driving at night"))
+        // A feeling is still a feeling without any place named at all.
+        assertEquals(
+            "tired but warm",
+            AssistantParser.findMusic("find music that fits: tired but warm")?.text
         )
     }
 
@@ -185,7 +200,7 @@ class AssistantParserTest {
         // "goes with", "to suit", and a plain "for" are the same request in different words.
         assertEquals("a slow morning", AssistantParser.findMusic("find music that goes with a slow morning")?.text)
         assertEquals("a slow morning", AssistantParser.findMusic("find music for a slow morning")?.text)
-        assertEquals("a rainy day", AssistantParser.findMusic("find music on Spotify for a rainy day")?.text)
+        assertEquals("a rainy day", AssistantParser.findMusic("find music on Jellyfin for a rainy day")?.text)
         assertEquals("a rainy day", AssistantParser.findMusic("find music to suit a rainy day")?.text)
     }
 

@@ -86,7 +86,7 @@ internal fun PinEditor(
             Spacer(Modifier.height(10.dp))
             OutlinedTextField(
                 url, { url = it }, modifier = Modifier.fillMaxWidth(), singleLine = true,
-                label = { Text("Spotify, YouTube, YouTube Music, SoundCloud, or Jellyfin link *") },
+                label = { Text("Jellyfin song link *") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
             )
             if (provider != null) {
@@ -94,7 +94,9 @@ internal fun PinEditor(
                 ProviderPill(provider)
             } else if (url.isNotBlank()) {
                 Spacer(Modifier.height(8.dp))
-                Text("Use a Spotify, YouTube, YouTube Music, SoundCloud, or Jellyfin song URL. YouTube and YouTube Music are kept separate.",
+                Text("Pick a song on the Search tab to fill this in — it searches your own " +
+                    "Jellyfin server. A stored link is a server item reference, so it keeps " +
+                    "working if your server moves, and it never contains its address or token.",
                     style = MaterialTheme.typography.labelMedium, color = Palette.coral)
             }
         }

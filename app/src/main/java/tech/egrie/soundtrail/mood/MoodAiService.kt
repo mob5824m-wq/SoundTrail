@@ -96,7 +96,7 @@ internal object MoodAiPrompts {
     /**
      * The listener's own words plus the coarse context, which is all that is ever sent.
      *
-     * The first line is the request as it was asked for — "find music on YouTube that fits: …" —
+     * The first line is the request as it was asked for — "find music on Jellyfin that fits: …" —
      * naming where to look in the same words the Mood tab shows back.
      */
     fun describe(text: String, context: MoodContext, target: MoodSearchTarget): String =

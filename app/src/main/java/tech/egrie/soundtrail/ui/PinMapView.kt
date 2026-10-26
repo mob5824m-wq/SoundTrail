@@ -461,12 +461,8 @@ private fun MapControl(label: String, contentDescription: String, onClick: () ->
 /** How close the map is when it is aimed at one soundspot. */
 private const val FOCUS_ZOOM = 15.0
 
-/** Provider colours match the pills used everywhere else in Soundtrail. */
+/** Pin colours match the pills used everywhere else in Soundtrail. */
 private fun pinColor(provider: MusicProvider): Color = when (provider) {
-    MusicProvider.SPOTIFY -> Palette.spotify
-    MusicProvider.YOUTUBE -> Palette.youtube
-    MusicProvider.YOUTUBE_MUSIC -> Palette.youtube
-    MusicProvider.SOUNDCLOUD -> Palette.soundcloud
     MusicProvider.JELLYFIN -> Palette.jellyfin
 }
 

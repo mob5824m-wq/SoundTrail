@@ -49,9 +49,9 @@ internal object AssistantAnswer {
             }
             return when {
                 error != null -> error
-                searched -> "Nothing matched that, in your library or on YouTube."
-                else -> "Nothing in your library matches that. Connect your Google account on " +
-                    "the Connect tab to search YouTube as well."
+                searched -> "Nothing matched that, in your library or on your Jellyfin server."
+                else -> "Nothing in your library matches that. Connect your Jellyfin server on " +
+                    "the Connect tab to search its library as well."
             }
         }
         val first = playable.first()
@@ -71,7 +71,7 @@ internal object AssistantAnswer {
     /**
      * True when the two rows are the same song. Titles match exactly or one contains the other,
      * and artists must be unknown on one side or agree — which keeps "Sunsets" by The xx from
-     * appearing twice (once from the library, once from YouTube) without hiding a cover.
+     * appearing twice (once from the library, once from the server) without hiding a cover.
      */
     private fun AssistantHit.isSameSongAs(other: AssistantHit): Boolean {
         val mine = title.lowercase().trim()

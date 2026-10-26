@@ -106,8 +106,16 @@ def build_workspace(root: Path, appid: str, workspace: Path) -> Path:
     return recipe
 
 
+# fdroidserver logs through Python logging: "2026-10-26 06:33:03,321 INFO: Using ...".
+# Those lines are the tool talking to itself, not findings about the recipe, so they must
+# not decide the verdict - a runner that happens to have the Android SDK installed logs
+# "Using .../apksigner" and one that does not logs "apksigner not found". `fdroid lint`
+# exits non-zero when it has something to say about the metadata, and that is the answer.
+LOG_LINE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+ [A-Z]+: ")
+
+
 def run_lint(workspace: Path, appid: str) -> tuple[int, str]:
-    """Run `fdroid lint -f` on one recipe; returns (exit code, combined output)."""
+    """Run `fdroid lint -f` on one recipe; returns (exit code, findings)."""
     done = subprocess.run(
         [sys.executable, "-m", "fdroidserver", "lint", "-f", appid],
         cwd=workspace,
@@ -115,12 +123,12 @@ def run_lint(workspace: Path, appid: str) -> tuple[int, str]:
         text=True,
         check=False,
     )
-    output = (done.stdout + done.stderr).strip()
-    # The missing apksigner warning is about signing repo indexes, which lint does not do.
-    output = "\n".join(
-        line for line in output.splitlines() if "apksigner not found" not in line
-    ).strip()
-    return done.returncode, output
+    lines = [
+        line
+        for line in (done.stdout + done.stderr).splitlines()
+        if "apksigner" not in line and not LOG_LINE.match(line)
+    ]
+    return done.returncode, "\n".join(lines).strip()
 
 
 def copy_tree_for_scan(root: Path, dest: Path) -> None:
@@ -209,12 +217,14 @@ def main(argv: list[str] | None = None) -> int:
         build_workspace(root, appid, workspace)
 
         print(f"== fdroid lint -f {appid} ==")
-        code, output = run_lint(workspace, appid)
-        if output:
-            print(output)
-        if code == 0 and not output:
+        code, findings = run_lint(workspace, appid)
+        if code == 0:
             print("clean: no lint findings, and the recipe is in `fdroid rewritemeta` format")
+            if findings:
+                print(findings)
         else:
+            if findings:
+                print(findings)
             print(f"FAILED: `fdroid lint` exited {code}")
             failures += 1
 

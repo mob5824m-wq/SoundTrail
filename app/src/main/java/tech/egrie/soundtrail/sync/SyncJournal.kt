@@ -52,6 +52,31 @@ internal class SyncJournal(context: Context) {
         saveLocalSnapshot(snapshot)
     }
 
+    /**
+     * Re-queues every current record for upload with a fresh delivery id, leaving the records
+     * themselves exactly as they are.
+     *
+     * This is the recovery path for a server whose history went backwards — one restored from a
+     * database backup has lost events this device already had acknowledged, and the ordinary push
+     * only sends what is still pending, so nothing would ever put them back.
+     *
+     * Nothing is re-encrypted and no clock is advanced: each record goes out with the clock, the
+     * device id and the ciphertext it was created with, so merge on any device resolves it to the
+     * same winner it already had. Only the delivery id is new, because the old one was consumed by
+     * the upload that the restore undid. That is what makes the re-push idempotent in effect — a
+     * record the server still has collapses to the same version, and one it lost is restored.
+     *
+     * @return how many records are now pending, so the caller can say whether anything was queued
+     */
+    @Synchronized
+    fun requeueAll(): Int {
+        val state = latest()
+        if (state.isEmpty()) return 0
+        val queued = state.values.map { PendingSyncRecord(UUID.randomUUID().toString(), it) }
+        save(prefs.getLong("clock", 0L), state, queued)
+        return queued.size
+    }
+
     /** Records the store snapshot after a successful remote apply without creating new events. */
     @Synchronized
     fun markLocalSnapshot(snapshot: List<SyncRecord>) {

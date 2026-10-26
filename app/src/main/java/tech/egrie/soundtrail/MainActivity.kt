@@ -1,11 +1,15 @@
 package tech.egrie.soundtrail
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipDescription
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import androidx.activity.ComponentActivity
+import android.os.PersistableBundle
+import android.view.WindowManager
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -19,7 +23,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.toArgb
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.ViewModelProvider
 import tech.egrie.soundtrail.automation.LocationWatchService
 import tech.egrie.soundtrail.data.GeoPoint
@@ -42,7 +49,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     private lateinit var model: MainViewModel
     private lateinit var apps: DeviceApps
     private var incomingDraft by mutableStateOf<PinDraft?>(null)
@@ -164,6 +171,23 @@ class MainActivity : ComponentActivity() {
             val importBackupLauncher = rememberLauncherForActivityResult(
                 ActivityResultContracts.OpenDocument()
             ) { uri -> if (uri != null) model.importBackup(uri) }
+            // The recovery key decrypts the whole synced library, so while it is on screen this
+            // window is FLAG_SECURE: no screenshot, no screen recording, no thumbnail in recents.
+            // It is cleared the moment the key is hidden and again on dispose, so leaving the
+            // screen with the key showing cannot leave the rest of the app un-capturable.
+            val recoveryKeyVisible = state.syncRecoveryKey != null
+            DisposableEffect(recoveryKeyVisible) {
+                if (recoveryKeyVisible) {
+                    window.setFlags(
+                        WindowManager.LayoutParams.FLAG_SECURE,
+                        WindowManager.LayoutParams.FLAG_SECURE
+                    )
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                }
+                onDispose { window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
+            }
+
             SoundtrailTheme {
                 SoundtrailApp(
                     state = state,
@@ -262,10 +286,20 @@ class MainActivity : ComponentActivity() {
                     onSignInCloudSync = model::signInCloudSync,
                     onUnlockCloudSync = model::unlockCloudSync,
                     onSyncCloudData = model::syncCloudData,
-                    onShowCloudRecoveryKey = model::showCloudRecoveryKey,
+                    // Re-displaying a *stored* key is gated on this device's own unlock. The key
+                    // shown once at account creation is not: nobody has had a chance to save it
+                    // yet, and putting a prompt in front of that would be a way to lose it.
+                    onShowCloudRecoveryKey = {
+                        requireUnlock("your saved recovery key") { model.showCloudRecoveryKey() }
+                    },
+                    onCopyRecoveryKey = ::copyRecoveryKey,
                     onForgetCloudRecoveryKey = model::forgetCloudRecoveryKey,
                     onDismissCloudRecoveryKey = model::dismissCloudRecoveryKey,
                     onSetCloudSyncAutoEnabled = model::setCloudSyncAutoEnabled,
+                    onLoadSyncSessions = model::loadSyncSessions,
+                    onSignOutSyncSession = model::signOutSyncSession,
+                    onChangeSyncPassword = model::changeSyncPassword,
+                    onRepushSyncJournal = model::repushSyncJournal,
                     onDisconnectCloudSync = model::disconnectCloudSync,
                     onDeleteCloudSyncAccount = model::deleteCloudSyncAccount,
                     onTogglePlayback = model::togglePlayback,
@@ -339,6 +373,100 @@ class MainActivity : ComponentActivity() {
         setIntent(Intent(this, MainActivity::class.java).apply { action = Intent.ACTION_MAIN })
     }
 
+    /**
+     * Runs [action] only after the listener has unlocked this device.
+     *
+     * Biometric where one is enrolled and the PIN/pattern/password otherwise, both through the one
+     * prompt via `DEVICE_CREDENTIAL`. This is the gate on re-displaying a stored recovery key: the
+     * key decrypts the entire synced library, so "the app happened to be open" is not sufficient
+     * authority to read it out, and a phone handed to somebody else must not become a way to copy
+     * it.
+     *
+     * A device with no screen lock at all fails **closed**. There is nothing to authenticate
+     * against, so the key is not shown and the listener is told what to set up; showing it anyway
+     * would make the gate decorative.
+     */
+    private fun requireUnlock(what: String, action: () -> Unit) {
+        val authenticators = BiometricManager.Authenticators.BIOMETRIC_STRONG or
+            BiometricManager.Authenticators.DEVICE_CREDENTIAL
+        if (BiometricManager.from(this).canAuthenticate(authenticators) !=
+            BiometricManager.BIOMETRIC_SUCCESS
+        ) {
+            model.notify(
+                "This device has no screen lock, so $what cannot be shown again here. Set a PIN, " +
+                    "pattern or password in Android's settings, or use the copy you saved when the " +
+                    "account was created."
+            )
+            return
+        }
+        val prompt = BiometricPrompt(
+            this,
+            ContextCompat.getMainExecutor(this),
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    action()
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    // Backing out is a decision rather than a failure, and needs no message.
+                    if (errorCode != BiometricPrompt.ERROR_USER_CANCELED &&
+                        errorCode != BiometricPrompt.ERROR_NEGATIVE_BUTTON &&
+                        errorCode != BiometricPrompt.ERROR_CANCELED
+                    ) {
+                        model.notify("Could not unlock this device: $errString")
+                    }
+                }
+            }
+        )
+        prompt.authenticate(
+            BiometricPrompt.PromptInfo.Builder()
+                .setTitle("Unlock Soundtrail")
+                .setDescription("Confirm it is you to show $what.")
+                .setAllowedAuthenticators(authenticators)
+                // No negative button: with DEVICE_CREDENTIAL allowed the prompt brings its own
+                // cancel, and setting one alongside it throws.
+                .build()
+        )
+    }
+
+    /**
+     * Copies the recovery key as a *sensitive* clipboard item, then clears it again.
+     *
+     * On Android 13 and later `EXTRA_IS_SENSITIVE` is what keeps the system from showing the key in
+     * the clipboard preview and tells whatever reads it next what it is holding. Below 13 there is
+     * no such flag, so the copy still works and the delayed clear is the only protection available
+     * — hence "where Android allows it" in the wording the listener sees.
+     *
+     * The clear is best-effort and has to be: Android 10 and later refuse clipboard writes from an
+     * app that is not in focus, so a listener who switches to their password manager before the
+     * minute is up keeps the key, which is what they were doing. It is attempted only when the clip
+     * still holds this exact key, so it can never overwrite something copied afterwards.
+     */
+    private fun copyRecoveryKey(key: String) {
+        val clipboard = getSystemService(ClipboardManager::class.java)
+        if (clipboard == null) {
+            model.notify("This device has no clipboard to copy to.")
+            return
+        }
+        val clip = ClipData.newPlainText("Soundtrail recovery key", key)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            runCatching {
+                clip.description.extras = PersistableBundle().apply {
+                    putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+                }
+            }
+        }
+        clipboard.setPrimaryClip(clip)
+        model.notify("Recovery key copied. Save it somewhere private — it leaves the clipboard in a minute.")
+        window.decorView.postDelayed({
+            runCatching {
+                val current = clipboard.primaryClip
+                    ?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text
+                if (current == key) clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
+            }
+        }, CLIPBOARD_CLEAR_AFTER_MS)
+    }
+
     /** All music now plays directly in the app via the unified player. */
     private fun play(pin: MusicPin) {
         model.playPin(pin)
@@ -351,5 +479,10 @@ class MainActivity : ComponentActivity() {
 
     private fun showMap(point: GeoPoint) {
         if (!apps.showOnMap(point)) model.notify("No maps app or browser found.")
+    }
+
+    private companion object {
+        /** How long a copied recovery key stays on the clipboard before the clear is attempted. */
+        const val CLIPBOARD_CLEAR_AFTER_MS = 60_000L
     }
 }

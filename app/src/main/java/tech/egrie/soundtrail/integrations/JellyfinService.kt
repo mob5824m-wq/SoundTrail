@@ -51,7 +51,7 @@ class JellyfinService(context: Context) {
 
     /** Signs in and stores the resulting session; throws [JellyfinException] with a usable message. */
     suspend fun connect(rawServer: String, rawUser: String, rawPassword: String): String {
-        val server = JellyfinApi.normalizeServerUrl(rawServer)
+        val server = EndpointPolicy.jellyfinServer(rawServer)
             ?: throw JellyfinException("Enter your Jellyfin address, like http://192.168.1.20:8096.")
         val user = rawUser.trim()
         if (user.isEmpty()) throw JellyfinException("Enter your Jellyfin username.")
@@ -68,7 +68,8 @@ class JellyfinService(context: Context) {
             "$server/Users/AuthenticateByName", "POST",
             body = JellyfinApi.authenticationBody(user, rawPassword),
             authorization = JellyfinApi.authorizationHeader(deviceId),
-            contentType = "application/json; charset=UTF-8"
+            contentType = "application/json; charset=UTF-8",
+            transport = TransportRule.JELLYFIN
         )
         if (response.code !in 200..299) throw response.error()
         val session = JellyfinApi.session(response.body)
@@ -99,7 +100,8 @@ class JellyfinService(context: Context) {
         runCatching {
             httpRequest(
                 "$server/Sessions/Logout", "POST",
-                authorization = JellyfinApi.authorizationHeader(deviceId, previousToken)
+                authorization = JellyfinApi.authorizationHeader(deviceId, previousToken),
+                transport = TransportRule.JELLYFIN
             )
         }
     }
@@ -131,6 +133,13 @@ class JellyfinService(context: Context) {
         if (!connected) throw JellyfinException("Connect your Jellyfin server before downloading.")
         val path = JellyfinApi.downloadPath(rawItemId)
             ?: throw JellyfinException("That Jellyfin item link is not valid.")
+        // This request streams instead of going through httpRequest, so it applies the same
+        // transport rule itself, before the connection exists and before the token is attached.
+        try {
+            EndpointPolicy.requireSecureTransport(serverUrl + path, TransportRule.JELLYFIN)
+        } catch (e: EndpointPolicyException) {
+            throw JellyfinException(e.message ?: "That Jellyfin address cannot be used.")
+        }
         val connection = try {
             (URL(serverUrl + path).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
@@ -229,14 +238,15 @@ class JellyfinService(context: Context) {
     }
 
     private suspend fun publicInfo(server: String): JellyfinServerInfo? {
-        val response = httpRequest("$server/System/Info/Public")
+        val response = httpRequest("$server/System/Info/Public", transport = TransportRule.JELLYFIN)
         if (response.code !in 200..299) return null
         return JellyfinApi.publicInfo(response.body)
     }
 
     private suspend fun apiGet(path: String): HttpResponse {
         val response = httpRequest(
-            serverUrl + path, authorization = JellyfinApi.authorizationHeader(deviceId, token)
+            serverUrl + path, authorization = JellyfinApi.authorizationHeader(deviceId, token),
+            transport = TransportRule.JELLYFIN
         )
         if (response.code == 401) {
             // A revoked or expired token is useless; drop it so the UI stops claiming a session.

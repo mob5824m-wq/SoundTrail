@@ -75,6 +75,10 @@ import tech.egrie.soundtrail.playback.QueueEntry
 import tech.egrie.soundtrail.playback.toQueueEntry
 import tech.egrie.soundtrail.sync.CloudSyncException
 import tech.egrie.soundtrail.sync.CloudSyncService
+import tech.egrie.soundtrail.sync.PasswordChange
+import tech.egrie.soundtrail.sync.SessionRenewal
+import tech.egrie.soundtrail.sync.SessionSignOut
+import tech.egrie.soundtrail.sync.SyncDeviceSession
 import java.util.UUID
 
 internal data class AppState(
@@ -108,6 +112,25 @@ internal data class AppState(
     val syncFailed: Boolean = false,
     val syncError: String? = null,
     val syncRecoveryKey: String? = null,
+    /** This device's own session id, so the device list can mark itself without another request. */
+    val syncSessionId: String? = null,
+    val syncSessionExpiresAt: Long = 0L,
+    /** Every signed-in device on the account, newest first. Ids only — never a token. */
+    val syncSessions: List<SyncDeviceSession> = emptyList(),
+    val syncSessionsLoading: Boolean = false,
+    val syncSessionsError: String? = null,
+    val syncPasswordBusy: Boolean = false,
+    /**
+     * When a password change last succeeded, as a timestamp.
+     *
+     * The form clears on this rather than on the tap, so a refusal — "that is not your current
+     * password" — leaves what was typed in place to correct. A success is the only thing that
+     * should empty a password field.
+     */
+    val syncPasswordDone: Long = 0L,
+    val syncRepushBusy: Boolean = false,
+    /** True while a server history that went backwards has not been re-pushed. */
+    val syncRollbackWarning: Boolean = false,
     val jellyfinDownloads: Map<String, JellyfinDownloadProgress> = emptyMap(),
     val offlineAudioFiles: List<OfflineAudioItem> = emptyList(),
     val offlineAudioBusy: Boolean = false,
@@ -316,6 +339,9 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             syncHasRecoveryKey = cloudSync.hasRecoveryKey,
             syncAutoEnabled = cloudSync.autoSyncEnabled,
             syncLastSyncAt = cloudSync.lastSyncAt,
+            syncSessionId = cloudSync.sessionId,
+            syncSessionExpiresAt = cloudSync.sessionExpiresAt,
+            syncRollbackWarning = cloudSync.hasRollbackWarning,
             mood = MoodUiState(
                 text = moodPrefs.lastText,
                 energyHint = moodPrefs.lastEnergyHint,
@@ -363,6 +389,11 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 recordCloudSyncChanges()
                 notify(cleanup.message())
             }
+            // On start: ask the server whether this session is still the one it issued, and renew
+            // it if expiry is inside a week. Throttled to once a day inside refreshSession, because
+            // renewing kills the old token and doing that per request would be self-inflicted
+            // sign-out. A lost session is reported before any sync is attempted on top of it.
+            if (cloudSync.connected) refreshSyncSession()
             if (cloudSync.autoSyncEnabled && cloudSync.connected && cloudSync.hasRecoveryKey) {
                 runCloudSync(showMessages = false)
             }
@@ -427,6 +458,9 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 syncHasRecoveryKey = cloudSync.hasRecoveryKey,
                 syncAutoEnabled = cloudSync.autoSyncEnabled,
                 syncLastSyncAt = cloudSync.lastSyncAt,
+                syncSessionId = cloudSync.sessionId,
+                syncSessionExpiresAt = cloudSync.sessionExpiresAt,
+                syncRollbackWarning = cloudSync.hasRollbackWarning,
                 syncPendingChanges = cloudSync.pendingChangeCount()
             )
         }
@@ -2076,7 +2110,10 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                         syncPendingChanges = cloudSync.pendingChangeCount(),
                         syncFailed = false,
                         syncError = null,
-                        syncRecoveryKey = recoveryKey
+                        syncRecoveryKey = recoveryKey,
+                        syncSessionId = cloudSync.sessionId,
+                        syncSessionExpiresAt = cloudSync.sessionExpiresAt,
+                        syncRollbackWarning = cloudSync.hasRollbackWarning
                     )
                 }
                 notify("Sync account created. Save the recovery key shown on the Connect tab before leaving this device.")
@@ -2110,7 +2147,10 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                         syncPendingChanges = cloudSync.pendingChangeCount(),
                         syncFailed = false,
                         syncError = null,
-                        syncRecoveryKey = null
+                        syncRecoveryKey = null,
+                        syncSessionId = cloudSync.sessionId,
+                        syncSessionExpiresAt = cloudSync.sessionExpiresAt,
+                        syncRollbackWarning = cloudSync.hasRollbackWarning
                     )
                 }
                 notify(if (cloudSync.hasRecoveryKey) "Sync account connected." else "Account connected. Enter your saved recovery key to sync this device.")
@@ -2153,6 +2193,223 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
 
     fun dismissCloudRecoveryKey() = _state.update { it.copy(syncRecoveryKey = null) }
 
+    /**
+     * Asks the server whether this device's session is still the one it issued, and renews it when
+     * expiry is inside a week.
+     *
+     * Called on app start and before every sync. The throttle to once a day lives in
+     * [CloudSyncService.refreshSession], because renewing invalidates the old token the moment the
+     * server answers — doing it per request would be a self-inflicted sign-out.
+     *
+     * A network failure here is deliberately quiet: the check is an optimisation, and the sync that
+     * follows reports its own failures. A *lost* session is not quiet, because every later request
+     * would fail against a token the server has already revoked.
+     */
+    private suspend fun refreshSyncSession(force: Boolean = false) {
+        if (!cloudSync.connected) return
+        val outcome = try {
+            withContext(Dispatchers.IO) { cloudSync.refreshSession(force) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return
+        }
+        _state.update {
+            it.copy(
+                syncSessionId = cloudSync.sessionId,
+                syncSessionExpiresAt = cloudSync.sessionExpiresAt
+            )
+        }
+        if (outcome == SessionRenewal.Lost) {
+            cloudSync.forgetSession()
+            _state.update {
+                it.copy(
+                    syncConnected = false,
+                    syncSessionId = null,
+                    syncSessions = emptyList(),
+                    syncError = "Your sync session ended. Sign in again to keep syncing.",
+                    syncFailed = false
+                )
+            }
+            notify("Your sync session ended on the server. Sign in again — your library on this device is untouched.")
+        }
+    }
+
+    /** The account's signed-in devices, newest first. Ids and dates only; never a token. */
+    fun loadSyncSessions() {
+        if (_state.value.syncSessionsLoading || !cloudSync.connected) return
+        _state.update { it.copy(syncSessionsLoading = true, syncSessionsError = null) }
+        viewModelScope.launch {
+            try {
+                val list = withContext(Dispatchers.IO) { cloudSync.sessions() }
+                _state.update { it.copy(syncSessions = list.sessions) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(syncSessionsError = e.message ?: "Could not list the signed-in devices.")
+                }
+            } finally {
+                _state.update { it.copy(syncSessionsLoading = false) }
+            }
+        }
+    }
+
+    /**
+     * Signs one device out.
+     *
+     * If the id turns out to be this device's — which the server says with `signedOut` — this
+     * handles it exactly like signing out here: the credentials go, the local library stays.
+     */
+    fun signOutSyncSession(sessionId: String) {
+        if (_state.value.syncBusy) return
+        _state.update { it.copy(syncBusy = true) }
+        viewModelScope.launch {
+            try {
+                when (val outcome = withContext(Dispatchers.IO) { cloudSync.signOutSession(sessionId) }) {
+                    SessionSignOut.RevokedOther -> {
+                        notify("That device was signed out.")
+                        val list = withContext(Dispatchers.IO) { cloudSync.sessions() }
+                        _state.update { it.copy(syncSessions = list.sessions, syncSessionsError = null) }
+                    }
+                    SessionSignOut.SignedOutThisDevice -> {
+                        _state.update {
+                            it.copy(
+                                syncConnected = false,
+                                syncHasRecoveryKey = cloudSync.hasRecoveryKey,
+                                syncSessions = emptyList(),
+                                syncSessionId = null,
+                                syncRecoveryKey = null
+                            )
+                        }
+                        notify("That was this device's own session, so this device is signed out too. Your library here is untouched.")
+                    }
+                    is SessionSignOut.Refused -> notify(outcome.message)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                notify(e.message ?: "Could not sign that device out.")
+            } finally {
+                _state.update { it.copy(syncBusy = false) }
+            }
+        }
+    }
+
+    /**
+     * Changes the account password.
+     *
+     * The server signs every session out, this one included, and the token in its response is the
+     * only one still working — [CloudSyncService.changePassword] stores that pair before it
+     * returns, so the success message below is never claiming a state the app does not have.
+     *
+     * An unknown outcome claims neither success nor failure. The server may have changed the
+     * password and revoked this device, or may never have seen the request, so the answer comes
+     * from asking the server rather than from guessing.
+     */
+    fun changeSyncPassword(current: String, next: String, confirm: String) {
+        if (_state.value.syncPasswordBusy) return
+        if (next != confirm) {
+            notify("The two new passwords do not match.")
+            return
+        }
+        _state.update { it.copy(syncPasswordBusy = true) }
+        viewModelScope.launch {
+            try {
+                when (val outcome = withContext(Dispatchers.IO) { cloudSync.changePassword(current, next) }) {
+                    is PasswordChange.Changed -> {
+                        // The new token and session id are already stored — changePassword writes
+                        // them before it returns — so this state update is a report, not the thing
+                        // that makes the sign-in real.
+                        _state.update {
+                            it.copy(
+                                syncSessionId = cloudSync.sessionId,
+                                syncSessionExpiresAt = cloudSync.sessionExpiresAt,
+                                syncSessions = emptyList(),
+                                syncPasswordDone = System.currentTimeMillis()
+                            )
+                        }
+                        val revoked = if (outcome.revokedSessions > 0) {
+                            " (${outcome.revokedSessions} ${if (outcome.revokedSessions == 1) "session" else "sessions"})"
+                        } else ""
+                        notify(
+                            "Password changed. All other devices have been signed out$revoked. " +
+                                "Your recovery key is unchanged — the password signs you in, it never decrypts anything."
+                        )
+                    }
+                    PasswordChange.WrongCurrentPassword -> notify("That is not your current password.")
+                    is PasswordChange.Refused -> notify(outcome.message)
+                    PasswordChange.Unknown -> {
+                        val check = withContext(Dispatchers.IO) {
+                            runCatching { cloudSync.refreshSession(force = true) }.getOrNull()
+                        }
+                        if (check == SessionRenewal.Lost || !cloudSync.connected) {
+                            cloudSync.forgetSession()
+                            _state.update {
+                                it.copy(syncConnected = false, syncSessions = emptyList(), syncSessionId = null)
+                            }
+                            notify(
+                                "The password change did not come back, and this device is no longer signed in. " +
+                                    "The server may have changed it and signed every device out. Sign in again to " +
+                                    "find out which — your library on this device is untouched."
+                            )
+                        } else {
+                            _state.update {
+                                it.copy(
+                                    syncSessionId = cloudSync.sessionId,
+                                    syncSessionExpiresAt = cloudSync.sessionExpiresAt
+                                )
+                            }
+                            notify(
+                                "The server did not answer, so the password may or may not have changed. This " +
+                                    "device is still signed in. If your other devices ask for a password, use the new one."
+                            )
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                notify(e.message ?: "Could not change the password.")
+            } finally {
+                _state.update { it.copy(syncPasswordBusy = false) }
+            }
+        }
+    }
+
+    /**
+     * Puts the library back on a server whose history went backwards.
+     *
+     * Offered only when [CloudSyncService.sync] reported a rollback, and it is an offer rather than
+     * something the app does on its own: a server restored from a backup is a legitimate thing for
+     * the person who runs it to have done, and re-pushing writes to their server.
+     */
+    fun repushSyncJournal() {
+        if (_state.value.syncRepushBusy) return
+        _state.update { it.copy(syncRepushBusy = true) }
+        viewModelScope.launch {
+            try {
+                val uploaded = withContext(Dispatchers.IO) { cloudSync.repushJournal() }
+                _state.update {
+                    it.copy(
+                        syncRollbackWarning = cloudSync.hasRollbackWarning,
+                        syncPendingChanges = cloudSync.pendingChangeCount()
+                    )
+                }
+                notify(
+                    if (uploaded == 0) "Nothing needed re-pushing — this device has no stored changes."
+                    else "Re-pushed $uploaded encrypted ${if (uploaded == 1) "record" else "records"} to the server."
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                notify(e.message ?: "Could not re-push your library to the server.")
+            } finally {
+                _state.update { it.copy(syncRepushBusy = false) }
+            }
+        }
+    }
+
     fun syncCloudData() = runCloudSync(showMessages = true)
 
     fun setCloudSyncAutoEnabled(enabled: Boolean) {
@@ -2180,6 +2437,10 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         _state.update { it.copy(syncBusy = true, syncError = null, syncFailed = false) }
         viewModelScope.launch {
             try {
+                // Renew before pushing rather than after a 401 has already cost the listener a
+                // sync: the old token is dead the moment the server answers a renewal.
+                refreshSyncSession()
+                if (!cloudSync.connected) return@launch
                 val result = withContext(Dispatchers.IO) { cloudSync.sync() }
                 _state.update {
                     it.copy(
@@ -2191,16 +2452,21 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                         syncLastSyncAt = cloudSync.lastSyncAt,
                         syncPendingChanges = cloudSync.pendingChangeCount(),
                         syncFailed = false,
-                        syncError = result.compactionWarning
+                        syncError = result.compactionWarning ?: result.rollbackWarning,
+                        syncRollbackWarning = cloudSync.hasRollbackWarning
                     )
                 }
                 refreshOfflineAudioState()
                 if (showMessages) {
                     val warning = result.compactionWarning?.let { " History checkpoint warning: $it" }.orEmpty()
+                    // A server whose history went backwards is a warning, not a failure: the sync
+                    // completed, the library here is intact, and restoring a server is a legitimate
+                    // thing for its owner to have done.
+                    val rollback = result.rollbackWarning?.let { " $it" }.orEmpty()
                     notify(
                         "Synced ${counted(result.pins, "pin")}, ${counted(result.playlists, "playlist")}, " +
                             "${counted(result.automations, "automation")}. " +
-                            "${result.uploaded} changes sent, ${result.downloaded} received.$warning"
+                            "${result.uploaded} changes sent, ${result.downloaded} received.$warning$rollback"
                     )
                 }
             } catch (e: Exception) {
@@ -2233,7 +2499,9 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                         syncConnected = false, syncHasRecoveryKey = false,
                         syncEffectiveServer = cloudSync.effectiveServerUrl,
                         syncUsingCustomServer = cloudSync.isUsingCustomServer,
-                        syncRecoveryKey = null, syncLastSyncAt = cloudSync.lastSyncAt
+                        syncRecoveryKey = null, syncLastSyncAt = cloudSync.lastSyncAt,
+                        syncSessions = emptyList(), syncSessionId = null, syncSessionExpiresAt = 0L,
+                        syncRollbackWarning = false
                     )
                 }
                 notify("Signed out of cloud sync on this device. Local pins and playlists are untouched.")
@@ -2255,7 +2523,9 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                         syncEffectiveServer = cloudSync.effectiveServerUrl,
                         syncUsingCustomServer = cloudSync.isUsingCustomServer,
                         syncRecoveryKey = null, syncLastSyncAt = 0L, syncPendingChanges = 0,
-                        syncFailed = false, syncError = null
+                        syncFailed = false, syncError = null,
+                        syncSessions = emptyList(), syncSessionId = null, syncSessionExpiresAt = 0L,
+                        syncRollbackWarning = false
                     )
                 }
                 notify("Sync account and remote encrypted history deleted. This device's library is untouched.")

@@ -131,10 +131,16 @@ internal fun SoundtrailApp(
     onSignInCloudSync: (server: String, email: String, password: String) -> Unit,
     onUnlockCloudSync: (String) -> Unit,
     onSyncCloudData: () -> Unit,
+    /** The activity gates this on the device's own unlock before the view model is asked. */
     onShowCloudRecoveryKey: () -> Unit,
+    onCopyRecoveryKey: (String) -> Unit,
     onForgetCloudRecoveryKey: () -> Unit,
     onDismissCloudRecoveryKey: () -> Unit,
     onSetCloudSyncAutoEnabled: (Boolean) -> Unit,
+    onLoadSyncSessions: () -> Unit,
+    onSignOutSyncSession: (String) -> Unit,
+    onChangeSyncPassword: (String, String, String) -> Unit,
+    onRepushSyncJournal: () -> Unit,
     onDisconnectCloudSync: () -> Unit,
     onDeleteCloudSyncAccount: () -> Unit,
     onTogglePlayback: () -> Unit,
@@ -258,7 +264,10 @@ internal fun SoundtrailApp(
                     managedBackups,
                     state.syncBusy, onCreateCloudSyncAccount, onSignInCloudSync,
                     onUnlockCloudSync, onSyncCloudData, onShowCloudRecoveryKey,
+                    onCopyRecoveryKey,
                     onForgetCloudRecoveryKey, onDismissCloudRecoveryKey, onSetCloudSyncAutoEnabled,
+                    onLoadSyncSessions, onSignOutSyncSession, onChangeSyncPassword,
+                    onRepushSyncJournal,
                     onDisconnectCloudSync, onDeleteCloudSyncAccount
                 )
             }

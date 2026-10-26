@@ -44,6 +44,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -62,7 +63,6 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.PaddingValues
 import tech.egrie.soundtrail.AppState
@@ -340,10 +340,17 @@ internal fun ConnectionsScreen(
     onSignInCloudSync: (String, String, String) -> Unit,
     onUnlockCloudSync: (String) -> Unit,
     onSyncCloudData: () -> Unit,
+    /** Gated on the device's own unlock by the activity, because it re-displays a stored key. */
     onShowCloudRecoveryKey: () -> Unit,
+    /** Hands the key to the activity, which is what can mark a clipboard entry sensitive. */
+    onCopyRecoveryKey: (String) -> Unit,
     onForgetCloudRecoveryKey: () -> Unit,
     onDismissCloudRecoveryKey: () -> Unit,
     onSetCloudSyncAutoEnabled: (Boolean) -> Unit,
+    onLoadSyncSessions: () -> Unit,
+    onSignOutSyncSession: (String) -> Unit,
+    onChangeSyncPassword: (String, String, String) -> Unit,
+    onRepushSyncJournal: () -> Unit,
     onDisconnectCloudSync: () -> Unit,
     onDeleteCloudSyncAccount: () -> Unit
 ) {
@@ -356,6 +363,23 @@ internal fun ConnectionsScreen(
     var syncPassword by remember { mutableStateOf("") }
     var syncRecoveryInput by remember { mutableStateOf("") }
     var confirmDeleteCloudAccount by remember { mutableStateOf(false) }
+    var passwordCurrent by remember { mutableStateOf("") }
+    var passwordNext by remember { mutableStateOf("") }
+    var passwordConfirm by remember { mutableStateOf("") }
+    // The device list is fetched rather than cached: sessions are created and revoked by other
+    // devices, so a stored copy would be a claim about now that this screen cannot keep.
+    LaunchedEffect(state.syncConnected) {
+        if (state.syncConnected) onLoadSyncSessions()
+    }
+    // Clearing the password fields only on success keeps them open after a refusal, which is what
+    // "that is not your current password" needs: the form is still there to correct.
+    LaunchedEffect(state.syncPasswordDone) {
+        if (state.syncPasswordDone > 0L) {
+            passwordCurrent = ""
+            passwordNext = ""
+            passwordConfirm = ""
+        }
+    }
     var jellyfinServer by rememberSaveable(state.jellyfinServer) { mutableStateOf(state.jellyfinServer) }
     var jellyfinUser by rememberSaveable(state.jellyfinName) { mutableStateOf(state.jellyfinName) }
     var jellyfinPassword by rememberSaveable { mutableStateOf("") }
@@ -647,15 +671,159 @@ internal fun ConnectionsScreen(
                     Text("Save this 256-bit recovery key somewhere private. Anyone with it and your account can decrypt your synced library; Soundtrail cannot recover it.",
                         color = Palette.coral, style = MaterialTheme.typography.bodyMedium)
                     Spacer(Modifier.height(6.dp))
-                    SelectionContainer {
-                        Text(key, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                            color = Palette.primary, fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.titleMedium)
-                    }
+                    // No SelectionContainer here on purpose. A long-press copy goes through the
+                    // system's own clipboard path, which this app cannot mark sensitive; the one
+                    // button below can, so it is the only way to copy the key.
+                    Text(key, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                        color = Palette.primary, fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.titleMedium)
+                    PrimaryButton("Copy recovery key", { onCopyRecoveryKey(key) },
+                        Modifier.fillMaxWidth())
+                    Text("Copied as a sensitive item, and cleared from the clipboard shortly " +
+                        "afterwards where Android allows it.",
+                        color = Palette.muted, style = MaterialTheme.typography.labelMedium)
                     TextButton(onClick = onDismissCloudRecoveryKey) {
                         Text("Hide recovery key", color = Palette.secondary)
                     }
                 }
+                if (state.syncRollbackWarning) {
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "This server's history is older than this device's last sync. It may have " +
+                            "been restored from a backup. Your library here is intact, but changes " +
+                            "this device had already sent may be missing from the server.",
+                        color = Palette.coral, style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    PrimaryButton(
+                        if (state.syncRepushBusy) "Re-pushing…" else "Re-push my library to this server",
+                        onRepushSyncJournal, Modifier.fillMaxWidth(),
+                        enabled = !state.syncRepushBusy && !syncBusy
+                    )
+                    Text(
+                        "A restore is a legitimate thing for whoever runs the server to have done, " +
+                            "so this is a warning and not a failure — and nothing is re-pushed " +
+                            "without you asking. Re-pushing sends every stored record with the " +
+                            "clocks and ciphertext it already has, so a record the server still " +
+                            "has merges to the same winner and one it lost comes back.",
+                        color = Palette.muted, style = MaterialTheme.typography.labelMedium
+                    )
+                }
+
+                if (state.syncConnected) {
+                    Spacer(Modifier.height(14.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Signed-in devices", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "Every device signed in to this account. The server stores no " +
+                                    "device name — only a token, an address and a time — so a row " +
+                                    "is either this device or the date it signed in.",
+                                color = Palette.muted, style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                        TextButton(onClick = onLoadSyncSessions, enabled = !state.syncSessionsLoading) {
+                            Text(if (state.syncSessionsLoading) "Loading…" else "Refresh",
+                                color = Palette.lilac)
+                        }
+                    }
+                    state.syncSessionsError?.let { error ->
+                        Text(error, color = Palette.coral, style = MaterialTheme.typography.labelMedium)
+                    }
+                    if (state.syncSessions.isEmpty() && !state.syncSessionsLoading &&
+                        state.syncSessionsError == null
+                    ) {
+                        Text("Not loaded yet. Tap Refresh to list the devices on this account.",
+                            color = Palette.muted, style = MaterialTheme.typography.labelMedium)
+                    }
+                    state.syncSessions.forEach { session ->
+                        val thisDevice = session.id == state.syncSessionId
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(session.label(thisDevice),
+                                    style = MaterialTheme.typography.bodyMedium)
+                                if (session.expiresAt > 0L) {
+                                    Text("Expires ${formatSyncTime(session.expiresAt)}",
+                                        color = Palette.muted,
+                                        style = MaterialTheme.typography.labelMedium)
+                                }
+                            }
+                            // No sign-out beside this device's own row: that is what "Sign out on
+                            // this device" below is for, and two ways to do the same destructive
+                            // thing is one too many.
+                            if (!session.current && !thisDevice) {
+                                TextButton(
+                                    onClick = { onSignOutSyncSession(session.id) },
+                                    enabled = !syncBusy
+                                ) { Text("Sign out", color = Palette.coral) }
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(14.dp))
+                    Text("Change password", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Changing your password signs every other device out — including this one, " +
+                            "which is then given the one session that survives. Your recovery key " +
+                            "is NOT rotated: the password only signs you in, it has never decrypted " +
+                            "anything, so nobody should read a password change as a new key.",
+                        color = Palette.muted, style = MaterialTheme.typography.labelMedium
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = passwordCurrent, onValueChange = { passwordCurrent = it },
+                        modifier = Modifier.fillMaxWidth(), singleLine = true,
+                        label = { Text("Current password") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Password, imeAction = ImeAction.Next
+                        )
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = passwordNext, onValueChange = { passwordNext = it.take(128) },
+                        modifier = Modifier.fillMaxWidth(), singleLine = true,
+                        label = { Text("New password") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Password, imeAction = ImeAction.Next
+                        )
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = passwordConfirm, onValueChange = { passwordConfirm = it.take(128) },
+                        modifier = Modifier.fillMaxWidth(), singleLine = true,
+                        label = { Text("Confirm new password") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Password, imeAction = ImeAction.Done
+                        )
+                    )
+                    // The server's own rules, checked here so the listener hears them before a
+                    // round trip rather than after one.
+                    val passwordProblem = when {
+                        passwordNext.isEmpty() -> null
+                        passwordNext.length < 10 -> "Use at least 10 characters."
+                        passwordNext == passwordCurrent -> "The new password has to differ from the current one."
+                        passwordConfirm.isNotEmpty() && passwordConfirm != passwordNext ->
+                            "The two new passwords do not match."
+                        else -> null
+                    }
+                    passwordProblem?.let { problem ->
+                        Spacer(Modifier.height(6.dp))
+                        Text(problem, color = Palette.coral, style = MaterialTheme.typography.labelMedium)
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    PrimaryButton(
+                        if (state.syncPasswordBusy) "Changing…" else "Change password",
+                        onClick = { onChangeSyncPassword(passwordCurrent, passwordNext, passwordConfirm) },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !state.syncPasswordBusy && !syncBusy && passwordProblem == null &&
+                            passwordCurrent.isNotEmpty() && passwordNext.length in 10..128 &&
+                            passwordNext == passwordConfirm && passwordNext != passwordCurrent
+                    )
+                }
+
                 Spacer(Modifier.height(6.dp))
                 TextButton(onClick = onDisconnectCloudSync, enabled = !syncBusy) {
                     Text("Sign out on this device", color = Palette.coral)

@@ -1,5 +1,7 @@
 package tech.egrie.soundtrail.mood
 
+import tech.egrie.soundtrail.integrations.EndpointPolicy
+
 /** The model that answers a mood reading when the listener has not named one. */
 internal const val DEFAULT_OLLAMA_MODEL = "llama3.2"
 
@@ -114,7 +116,11 @@ internal object MoodAiUrls {
     fun normalize(input: String): String? {
         val typed = input.trim()
         if (typed.isBlank()) return null
-        val withScheme = if (typed.contains("://")) typed else "http://$typed"
+        // A bare host defaults to plain HTTP only when it is plainly local, exactly as
+        // [normalizeOpenAi] does. Defaulting a public name to http:// would produce an address
+        // that EndpointPolicy refuses at request time — a stored URL that can never be used.
+        val withScheme =
+            if (typed.contains("://")) typed else "${if (looksLocal(typed)) "http" else "https"}://$typed"
         val scheme = withScheme.substringBefore("://").lowercase()
         if (scheme != "http" && scheme != "https") return null
         var value = withScheme.substringAfter("://").trimEnd('/')
@@ -253,7 +259,12 @@ internal object MoodAiUrls {
     fun isArena(base: String?): Boolean =
         base != null && hostOf(base) == "api.preview.arena.ai"
 
-    /** True when a host with no scheme is plainly a machine on the listener's own network. */
+    /**
+     * True when a host with no scheme is plainly a machine on the listener's own network.
+     *
+     * The classification itself is [EndpointPolicy.isOnPremises], so what counts as local is
+     * decided in one place and cannot drift from what the transport rule will actually allow.
+     */
     private fun looksLocal(input: String): Boolean {
         val typed = input.substringAfter("://").substringBefore('/')
         val host = (if (typed.startsWith("[")) {
@@ -262,14 +273,7 @@ internal object MoodAiUrls {
             typed.substringBefore(':')
         }).lowercase()
         if (host.isBlank()) return false
-        if (host == "localhost" || host == "[::1]" || host == "::1") return true
-        if (host.endsWith(".local") || host.endsWith(".localhost")) return true
-        if (host.startsWith("127.") || host.startsWith("10.") || host.startsWith("192.168.")) return true
-        if (host.startsWith("172.") && host.substringAfter("172.").substringBefore('.').toIntOrNull()
-                ?.let { it in 16..31 } == true
-        ) return true
-        // A bare machine name is a LAN name; a public host nearly always carries a dot.
-        return !host.contains('.') && !host.contains(':')
+        return EndpointPolicy.isOnPremises(host)
     }
 
     fun hostOf(url: String): String =

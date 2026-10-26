@@ -1,12 +1,10 @@
 AntiFeatures:
-  NonFreeAdd:
-    en-US: Soundtrail can hand a song to the proprietary Spotify, SoundCloud and YouTube
-      Music apps, including patched YouTube Music builds (Morphe, ReVanced). It only
-      lists what is installed; nothing proprietary is bundled.
   NonFreeNet:
-    en-US: Optional connections to third-party online services the listener chooses
-      and supplies credentials for - Spotify, SoundCloud, YouTube, map tiles, TheAudioDB,
-      and any OpenAI-compatible or Google Gemini AI provider. All are off until configured.
+    en-US: Three optional services it can reach are not free software and cannot be
+      self-hosted - map tiles for pin and trip maps, TheAudioDB song lookup, and whatever
+      AI provider you point the mood engine at (OpenAI, Google Gemini or Arena AI).
+      Each is off until you enter it. Jellyfin, a local Ollama server and the sync
+      server are all free software you host yourself.
 Categories:
   - Multimedia
   - Navigation
@@ -56,13 +54,21 @@ MaintainerNotes: |-
   android.media.browse.MediaBrowserService is androidx.media (Apache-2.0), and onGetRoot
   only answers the car host and the system media UI.
 
-  The <queries> package names (Spotify, SoundCloud, YouTube Music, Morphe, ReVanced) exist
-  for Android 11+ package visibility so the app can tell whether a player is installed
-  before offering to hand a song to it.
+  The <queries> element declares one android.speech.RecognitionService intent so the
+  assistant can list the speech engines that are installed on Android 11+, where other
+  apps are hidden by default. It names no package and requires no third-party app; music
+  plays through the app's own ExoPlayer against a Jellyfin server or a local file.
 
   network_security_config.xml permits cleartext HTTP because the listener types the address
-  of their own Jellyfin server, which is usually plain HTTP on a LAN. Certificates are still
-  validated against the system trust store only; user-installed CAs are not trusted.
+  of their own Jellyfin server, which is usually plain HTTP on a LAN. The code enforces a
+  stricter policy than the manifest on top of it: integrations/EndpointPolicy.kt requires
+  HTTPS for every address a listener enters and allows plain HTTP only for a Jellyfin
+  server or another on-premises host (loopback, RFC 1918, link-local, .local/.lan or a
+  bare machine name). The sync server has no cleartext exception, never accepts
+  credentials embedded in its URL, and a redirect is reported as an error rather than
+  followed silently. Certificates are still validated against the system trust store
+  only; user-installed CAs are not trusted, there is no pinning and no custom
+  TrustManager.
 
   The tree passes fdroidserver's source scanner with zero problems and this recipe passes
   `fdroid lint`; tools/fdroid_check.py and tools/fdroid_lint.py re-run both in CI on every

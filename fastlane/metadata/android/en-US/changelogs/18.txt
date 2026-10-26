@@ -1,4 +1,4 @@
-This is the release F-Droid builds.
-- The release APK stays unsigned, so F-Droid signs it with its own key.
-- CI builds that release variant and checks the store metadata on every commit: descriptions and changelog lengths, the icon, the build recipe, and a scan for non-free libraries.
-- Every release now ships the changelog for its own versionCode, so F-Droid can show what is new.
+Music now comes from your own Jellyfin server and audio you attach.
+- Spotify, SoundCloud and YouTube are gone: their links, sign-ins and app hand-offs. Pins and songs pointing at them are stripped on upgrade, with a one-time count. A song with audio you attached keeps the file and loses only the link.
+- Sync: list your devices and sign one out, change your password, and the session renews before it expires.
+- Recovery key: no screenshots, sensitive clipboard copy, and unlock to show it again.

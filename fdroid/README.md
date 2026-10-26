@@ -18,14 +18,18 @@ signing key, and refuses anything that is not free software. Concretely:
 | A build recipe fdroiddata can take as-is | `tech.egrie.soundtrail.yml` in this folder, byte-for-byte what `fdroid rewritemeta` writes. |
 | An unsigned release APK | The release build type sets no `signingConfig`, so `assembleRelease` produces `app-release-unsigned.apk` for F-Droid to sign. |
 | A build that works from a tag | Gradle wrapper committed, dependencies only from `google()` and `mavenCentral()`, `subdir: app` with the wrapper and settings at the root. |
-| Anti-features declared, not hidden | `NonFreeNet` and `NonFreeAdd`, each with an explanation, in the recipe. |
-| Reviewer questions answered up front | `MaintainerNotes` in the recipe: the debug keystore, the Android Auto meta-data key, the `<queries>` package names, cleartext HTTP for LAN Jellyfin servers. |
+| Anti-features declared, not hidden | `NonFreeNet`, with an explanation, in the recipe. `NonFreeAdd` was dropped when the proprietary-player hand-offs were removed: nothing is handed to another app's player any more. |
+| Reviewer questions answered up front | `MaintainerNotes` in the recipe: the debug keystore, the Android Auto meta-data key, the one `<queries>` intent, cleartext HTTP for LAN Jellyfin servers and the stricter policy the code enforces on top of it. |
 
-Google Play services is not a dependency, in the code, or in the manifest. The YouTube
-connection uses the browser OAuth flow with the listener's own Desktop client ID, and
-motion for automations comes from GPS speed. The one Google string left in the manifest is
-the `com.google.android.gms.car.application` meta-data key, which Android Auto reads to
-find a media app; it pulls in no library and F-Droid's scanner does not flag it.
+Google Play services is not a dependency, in the code, or in the manifest, and no
+third-party OAuth flow is left either: the Spotify, SoundCloud and YouTube integrations
+were removed, so music comes from the listener's own Jellyfin server or from audio files
+they attach, and motion for automations comes from GPS speed. The one Google string left
+in the manifest is the `com.google.android.gms.car.application` meta-data key, which
+Android Auto reads to find a media app; it pulls in no library and F-Droid's scanner does
+not flag it. The `<queries>` element declares one `android.speech.RecognitionService`
+intent so the assistant can list the speech engines that are installed; it names no
+package.
 
 ## Verified, not assumed
 
@@ -148,8 +152,11 @@ produces no diff for a reviewer to undo.
   uses it: it builds the release variant and signs with its own key. `tools/fdroid_check.py`
   reports it as a warning, with that reasoning, and the recipe explains it in
   `MaintainerNotes`.
-- **Anti-features.** `NonFreeNet` (optional Spotify, SoundCloud, YouTube, map tile and
-  AI-provider connections) and `NonFreeAdd` (handing songs to proprietary players,
-  including patched YouTube Music builds) are declared with explanations. Both are
-  informational. Reviewers may still ask about the patched-player package names in
-  `<queries>`; the answer is in `MaintainerNotes`.
+- **Anti-features.** Only `NonFreeNet` remains, covering the three optional services that
+  are not free software and cannot be self-hosted: map tiles, TheAudioDB song lookup, and
+  whichever AI provider the listener points the mood engine at. Each is off until an
+  address or key is entered, and Jellyfin, a local Ollama server and the sync server are
+  all free software the listener hosts. `NonFreeAdd` was removed with the proprietary
+  player hand-offs it described - there is no patched-player package name anywhere in the
+  tree now, and the `<queries>` element declares an intent rather than a package, which is
+  what `MaintainerNotes` explains.

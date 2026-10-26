@@ -56,16 +56,57 @@ jobs:
           else
             # Expose useful diagnostics as a check annotation as well as in the runner log.
             # This also helps when an environment cannot download Actions log archives.
+            # The "* What went wrong:" block is included with the lines after it, because
+            # that is where Gradle names the cause; matching single lines alone drops it.
             python3 - <<'PY'
           from pathlib import Path
           lines = Path('android-build.log').read_text(errors='replace').splitlines()
-          errors = [line for line in lines if line.startswith(('e: ', 'error: ', '* What went wrong:', 'FAILURE:')) or ' FAILED' in line]
-          excerpt = '\n'.join(errors[:50] if errors else lines[-60:])[:15000]
+          picked = []
+          for i, line in enumerate(lines):
+              if line.startswith(('e: ', 'error: ', 'FAILURE:')) or ' FAILED' in line:
+                  picked.append(line)
+              elif line.startswith('* What went wrong:'):
+                  picked.extend(lines[i:i + 12])
+          excerpt = '\n'.join(dict.fromkeys(picked))[:15000] or '\n'.join(lines[-60:])[:15000]
           escaped = excerpt.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
           print(f'::error title=Android build failure::{escaped}')
           PY
             exit 1
           fi
+
+      # `assembleRelease` runs :app:lintVitalRelease, which fails the build on any
+      # fatal-severity Android lint issue. F-Droid builds the same variant from the tag, so
+      # a fatal lint finding blocks inclusion and the report has to be readable from the
+      # check annotation - not only from a log archive that may not be reachable.
+      - name: Report Android lint findings
+        if: failure()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          reports = sorted(Path('app/build/reports').glob('lint-results-*')) if Path('app/build/reports').is_dir() else []
+          text = ''
+          for report in reports:
+              if report.suffix not in ('.txt', '.xml'):
+                  continue
+              body = report.read_text(errors='replace')
+              lines = body.splitlines()
+              errors = [line for line in lines if 'Error:' in line or 'severity="Fatal"' in line or 'severity="Error"' in line]
+              text += f'--- {report} ({len(errors)} finding(s)) ---\n'
+              text += '\n'.join(errors[:40] if errors else lines[:40]) + '\n'
+          if not text:
+              text = 'no lint report was written; the build failed before lint produced one'
+          escaped = text.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+          print(f'::error title=Android lint (fatal) findings::{escaped[:1500]}')
+          print('reports found: ' + ', '.join(str(r) for r in reports))
+          PY
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        continue-on-error: true
+        with:
+          name: android-lint-reports
+          path: app/build/reports/
 
       # The APK has to be signed with the key committed in the repository: a key that
       # changes per build makes Android reject the next sideloaded update with
@@ -158,7 +199,24 @@ jobs:
       - name: Run F-Droid's own tools on the recipe and the source tree
         shell: bash
         run: |
-          set -eu
           python3 -m venv .venv-fdroid
-          .venv-fdroid/bin/pip install --quiet --disable-pip-version-check fdroidserver
-          .venv-fdroid/bin/python tools/fdroid_lint.py --require
+          .venv-fdroid/bin/pip install --disable-pip-version-check fdroidserver \
+            > fdroid-install.log 2>&1 || install_failed=1
+          tail -3 fdroid-install.log
+          if [ -n "${install_failed:-}" ]; then
+            echo "::error title=fdroidserver install failed::$(tail -c 800 fdroid-install.log | tr '\n' ' ')"
+            exit 1
+          fi
+          # The findings are mirrored into a check annotation because Actions log archives
+          # are not reachable from every environment that has to triage a failure.
+          if ! .venv-fdroid/bin/python tools/fdroid_lint.py --require > fdroid-lint.log 2>&1; then
+            cat fdroid-lint.log
+            python3 - <<'PY'
+          from pathlib import Path
+          text = Path('fdroid-lint.log').read_text(errors='replace').strip()
+          escaped = text.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+          print(f'::error title=F-Droid tools reported a problem::{escaped[-1400:]}')
+          PY
+            exit 1
+          fi
+          cat fdroid-lint.log

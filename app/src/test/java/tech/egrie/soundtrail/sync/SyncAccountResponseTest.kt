@@ -4,7 +4,10 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
+import tech.egrie.soundtrail.MainSources
 
 /**
  * The gate between an account response and the credential store.
@@ -139,6 +142,36 @@ class SyncAccountResponseTest {
             SyncAccountResponse.parse(
                 JSONObject().put("accountId", "a").put("token", JSONObject()), "e@example.net"
             )
+        )
+    }
+
+    // ----- and the ordering the tests above only imply -----
+
+    @Test fun `nothing is written until the response has been validated`() {
+        // Refusing a bad response is half the requirement; leaving nothing behind is the other
+        // half. A sign-in that wrote the owner id and then failed on the token would report itself
+        // as connected while holding nothing usable, and every later sync would look like a server
+        // problem. parse() is the first statement in acceptAccount() and every write is below it,
+        // so a response that does not parse cannot have touched the stores on its way out.
+        val body = MainSources.bodyOf(
+            MainSources.read("sync/CloudSyncService.kt"),
+            "private fun acceptAccount("
+        ) ?: fail("could not find acceptAccount") as Nothing
+        val gate = body.indexOf("SyncAccountResponse.parse(response, email)")
+        assertTrue("acceptAccount must gate on the parsed response", gate >= 0)
+        listOf(
+            "settings.edit()" to "the account identity",
+            "storeSession(" to "the token and session id",
+            "secrets.put(" to "the recovery key",
+            "journal.record(" to "the key-check event"
+        ).forEach { (write, what) ->
+            val at = body.indexOf(write)
+            assertTrue("acceptAccount must still write $what", at >= 0)
+            assertTrue("$what must be written only after the response has been validated", at > gate)
+        }
+        assertTrue(
+            "and a refused response must throw rather than return quietly",
+            body.contains("?: throw CloudSyncException(\"The sync server returned an incomplete sign-in.\")")
         )
     }
 }

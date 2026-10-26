@@ -34,6 +34,18 @@
         </intent>
     </queries>
 
+    <!-- Package visibility (Android 11+) for exactly one thing: the assistant needs to
+         enumerate the speech engines actually installed so the listener can pick one.
+         This declares an intent, never a package name, so no specific app is targeted or
+         required. Nothing else is queried - music playback goes to the listener's own
+         Jellyfin server or to an audio file, and an external app is only ever offered
+         through the system chooser for a geo: or web URL, which needs no query. -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="true"
         android:fullBackupContent="@xml/backup_rules"

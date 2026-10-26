@@ -123,6 +123,50 @@ def run_lint(workspace: Path, appid: str) -> tuple[int, str]:
     return done.returncode, output
 
 
+def copy_tree_for_scan(root: Path, dest: Path) -> None:
+    """Copy the tree the way F-Droid sees it: what git has, and nothing else.
+
+    F-Droid clones the repository, so untracked and ignored files are not part of the
+    build. Scanning them reports problems in files that never reach F-Droid - a local
+    virtualenv alone produces over a hundred "binary" and "executable binary, possibly
+    code" findings from its own dependencies.
+
+    `--others --exclude-standard` keeps new, not-yet-committed files in the scan (so a
+    freshly added non-free library is still caught) while leaving ignored paths such as
+    .venv-fdroid/ and build output out.
+    """
+    listing = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if listing.returncode != 0 or not listing.stdout:
+        shutil.copytree(
+            root,
+            dest,
+            ignore=shutil.ignore_patterns(
+                ".git", "build", ".gradle", ".venv*", "venv", "node_modules", "__pycache__"
+            ),
+        )
+        return
+
+    copied = 0
+    for rel in listing.stdout.split("\0"):
+        if not rel:
+            continue
+        source = root / rel
+        if not source.is_file() or source.is_symlink():
+            continue
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        copied += 1
+    if copied == 0:
+        raise SystemExit("error: git listed no files to scan; is --root a repository?")
+
+
 def run_scanner(root: Path, workspace: Path) -> tuple[int, list, list]:
     """Run fdroidserver's source scanner over a copy of the tree.
 
@@ -133,7 +177,8 @@ def run_scanner(root: Path, workspace: Path) -> tuple[int, list, list]:
 
     source = Path(tempfile.mkdtemp(prefix="fdroid-scan-src-"))
     copy = source / "repo"
-    shutil.copytree(root, copy, ignore=shutil.ignore_patterns(".git", "build", ".gradle"))
+    copy.mkdir()
+    copy_tree_for_scan(root, copy)
 
     common.read_config()
     store = scanner.MessageStore()

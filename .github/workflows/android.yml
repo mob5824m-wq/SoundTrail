@@ -59,11 +59,15 @@ jobs:
             # The "* What went wrong:" block is included with the lines after it, because
             # that is where Gradle names the cause; matching single lines alone drops it.
             python3 - <<'PY'
+          import re
           from pathlib import Path
           lines = Path('android-build.log').read_text(errors='replace').splitlines()
+          # Android lint prints its findings as "<path>:<line>: Error: <message> [Issue]".
+          lint_finding = re.compile(r'^\S+:\d+: (Error|Warning): ')
           picked = []
           for i, line in enumerate(lines):
-              if line.startswith(('e: ', 'error: ', 'FAILURE:')) or ' FAILED' in line:
+              if (line.startswith(('e: ', 'error: ', 'FAILURE:')) or ' FAILED' in line
+                      or lint_finding.match(line) or re.match(r'^\d+ errors?, \d+ warnings?', line)):
                   picked.append(line)
               elif line.startswith('* What went wrong:'):
                   picked.extend(lines[i:i + 12])
@@ -84,7 +88,8 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          reports = sorted(Path('app/build/reports').glob('lint-results-*')) if Path('app/build/reports').is_dir() else []
+          reports = sorted(Path('app/build').rglob('*lint*')) if Path('app/build').is_dir() else []
+          print('lint paths under app/build: ' + ', '.join(str(r) for r in reports[:20]))
           text = ''
           for report in reports:
               if report.suffix not in ('.txt', '.xml'):
@@ -199,8 +204,12 @@ jobs:
       - name: Run F-Droid's own tools on the recipe and the source tree
         shell: bash
         run: |
-          python3 -m venv .venv-fdroid
-          .venv-fdroid/bin/pip install --disable-pip-version-check fdroidserver \
+          # The virtualenv lives outside the checkout on purpose: the source scanner walks
+          # the tree, and fdroidserver's own dependencies (libcloud test fixtures, the venv
+          # interpreter) read to it as prebuilt binaries.
+          venv="${RUNNER_TEMP:-/tmp}/fdroid-venv"
+          python3 -m venv "$venv"
+          "$venv/bin/pip" install --disable-pip-version-check fdroidserver \
             > fdroid-install.log 2>&1 || install_failed=1
           tail -3 fdroid-install.log
           if [ -n "${install_failed:-}" ]; then
@@ -209,7 +218,7 @@ jobs:
           fi
           # The findings are mirrored into a check annotation because Actions log archives
           # are not reachable from every environment that has to triage a failure.
-          if ! .venv-fdroid/bin/python tools/fdroid_lint.py --require > fdroid-lint.log 2>&1; then
+          if ! "$venv/bin/python" tools/fdroid_lint.py --require > fdroid-lint.log 2>&1; then
             cat fdroid-lint.log
             python3 - <<'PY'
           from pathlib import Path

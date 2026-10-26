@@ -70,16 +70,19 @@ jobs:
           # runner's system Python (3.12 on ubuntu-24.04) when it is there.
           py=python3
           if [ -x /usr/bin/python3 ]; then py=/usr/bin/python3; fi
+          # Outside the checkout: the source scanner walks the tree, and fdroidserver's own
+          # dependencies read to it as prebuilt binaries.
+          venv="${RUNNER_TEMP:-/tmp}/fdroid-venv"
           # An unavailable fdroidserver must not block a release: the step above already
           # checked every requirement in this repository's own code, and the `fdroid` job
           # in the Android build workflow runs the real tools strictly on the same commit.
           # A finding, as opposed to a failed install, does block the release.
-          if ! "$py" -m venv .venv-fdroid \
-            || ! .venv-fdroid/bin/pip install --quiet --disable-pip-version-check fdroidserver; then
+          if ! "$py" -m venv "$venv" \
+            || ! "$venv/bin/pip" install --quiet --disable-pip-version-check fdroidserver; then
             echo "::warning title=F-Droid tools not run::fdroidserver could not be installed, so 'fdroid lint' and the source scanner were skipped for this release. tools/fdroid_check.py did run."
             exit 0
           fi
-          .venv-fdroid/bin/python tools/fdroid_lint.py --require
+          "$venv/bin/python" tools/fdroid_lint.py --require
 
       # Tests and APK build finish before anything is pushed, so a failure leaves main untouched.
       # assembleRelease is the variant F-Droid builds from the tag, so it has to work here

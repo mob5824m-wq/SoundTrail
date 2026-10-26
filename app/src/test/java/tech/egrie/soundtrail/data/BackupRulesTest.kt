@@ -85,11 +85,15 @@ class BackupRulesTest {
         // Both blocks of the 12+ file: cloud backup and device transfer.
         assertEquals(allowedIncludes, includesIn(extractionRules).toSet())
         assertEquals(
-            "device-transfer must carry the same allowlist as cloud-backup",
-            2, countBlocks(extractionRules, "device-transfer")
+            "data_extraction_rules.xml must carry exactly one cloud-backup block",
+            1, countBlocks(extractionRules, "cloud-backup")
         )
         assertEquals(
-            "each block includes the same three files",
+            "data_extraction_rules.xml must carry exactly one device-transfer block",
+            1, countBlocks(extractionRules, "device-transfer")
+        )
+        assertEquals(
+            "each of the two blocks includes the same three files",
             allowedIncludes.size * 2, includesIn(extractionRules).size
         )
     }

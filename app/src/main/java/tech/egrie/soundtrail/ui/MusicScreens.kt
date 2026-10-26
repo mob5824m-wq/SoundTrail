@@ -67,6 +67,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.PaddingValues
 import tech.egrie.soundtrail.AppState
 import tech.egrie.soundtrail.sync.CloudSyncService
+import tech.egrie.soundtrail.sync.SessionPolicy
 import tech.egrie.soundtrail.integrations.SongInfo
 import tech.egrie.soundtrail.integrations.TrackResult
 import tech.egrie.soundtrail.data.ManagedBackupStatus
@@ -781,7 +782,8 @@ internal fun ConnectionsScreen(
                     )
                     Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
-                        value = passwordNext, onValueChange = { passwordNext = it.take(128) },
+                        value = passwordNext,
+                        onValueChange = { passwordNext = it.take(SessionPolicy.PASSWORD_MAX_LENGTH) },
                         modifier = Modifier.fillMaxWidth(), singleLine = true,
                         label = { Text("New password") },
                         visualTransformation = PasswordVisualTransformation(),
@@ -791,7 +793,8 @@ internal fun ConnectionsScreen(
                     )
                     Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
-                        value = passwordConfirm, onValueChange = { passwordConfirm = it.take(128) },
+                        value = passwordConfirm,
+                        onValueChange = { passwordConfirm = it.take(SessionPolicy.PASSWORD_MAX_LENGTH) },
                         modifier = Modifier.fillMaxWidth(), singleLine = true,
                         label = { Text("Confirm new password") },
                         visualTransformation = PasswordVisualTransformation(),
@@ -799,15 +802,19 @@ internal fun ConnectionsScreen(
                             keyboardType = KeyboardType.Password, imeAction = ImeAction.Done
                         )
                     )
-                    // The server's own rules, checked here so the listener hears them before a
-                    // round trip rather than after one.
-                    val passwordProblem = when {
-                        passwordNext.isEmpty() -> null
-                        passwordNext.length < 10 -> "Use at least 10 characters."
-                        passwordNext == passwordCurrent -> "The new password has to differ from the current one."
-                        passwordConfirm.isNotEmpty() && passwordConfirm != passwordNext ->
-                            "The two new passwords do not match."
-                        else -> null
+                    // The server's own rules, read from the same place the service reads them, so
+                    // what this form says and what a refusal would have said cannot disagree. An
+                    // untouched field is not complained about; that is this form's decision, not
+                    // the rule's.
+                    val passwordProblem = if (passwordNext.isEmpty()) {
+                        null
+                    } else {
+                        SessionPolicy.passwordProblem(passwordCurrent, passwordNext)
+                            ?: if (passwordConfirm.isNotEmpty() && passwordConfirm != passwordNext) {
+                                "The two new passwords do not match."
+                            } else {
+                                null
+                            }
                     }
                     passwordProblem?.let { problem ->
                         Spacer(Modifier.height(6.dp))
@@ -818,9 +825,11 @@ internal fun ConnectionsScreen(
                         if (state.syncPasswordBusy) "Changing…" else "Change password",
                         onClick = { onChangeSyncPassword(passwordCurrent, passwordNext, passwordConfirm) },
                         modifier = Modifier.fillMaxWidth(),
+                        // A null problem is the whole rule: in range, different from the current
+                        // password, and confirmed. Restating the numbers here is how they drift.
                         enabled = !state.syncPasswordBusy && !syncBusy && passwordProblem == null &&
-                            passwordCurrent.isNotEmpty() && passwordNext.length in 10..128 &&
-                            passwordNext == passwordConfirm && passwordNext != passwordCurrent
+                            passwordCurrent.isNotEmpty() && passwordNext.isNotEmpty() &&
+                            passwordNext == passwordConfirm
                     )
                 }
 

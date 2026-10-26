@@ -491,7 +491,7 @@ internal class CloudSyncService(
      *
      * Renewal is not free: `POST /v1/sessions/current/renew` kills the old token the moment it
      * answers, and hands back a new token *and* a new session id. So it is done at most once a day,
-     * and only when expiry is inside [RENEW_WITHIN_MILLIS] — not on every request, which would
+     * and only when expiry is inside [SessionPolicy.RENEW_WITHIN_MILLIS] — not on every request, which would
      * invalidate a working token for nothing.
      *
      * The new token and the new session id are written in **one** [SecretStore.putAll], which is a
@@ -510,7 +510,9 @@ internal class CloudSyncService(
     suspend fun refreshSession(force: Boolean = false): SessionRenewal {
         if (!connected) return SessionRenewal.NotConnected
         val now = System.currentTimeMillis()
-        if (!force && now - settings.getLong(LAST_SESSION_CHECK, 0L) < RENEW_CHECK_INTERVAL_MILLIS) {
+        // Half the rule: not more than one check a day, so a working token is not invalidated on
+        // every launch. The other half needs the server's own answer, so it is decided below.
+        if (SessionPolicy.checkedRecently(now, settings.getLong(LAST_SESSION_CHECK, 0L), force)) {
             return SessionRenewal.Skipped
         }
 
@@ -528,9 +530,7 @@ internal class CloudSyncService(
         val expiresAt = current.optLong("expiresAt", 0L)
         if (expiresAt > 0L) settings.edit().putLong(SESSION_EXPIRES_AT, expiresAt).apply()
         val knownExpiry = if (expiresAt > 0L) expiresAt else sessionExpiresAt
-        if (knownExpiry > 0L && knownExpiry - now > RENEW_WITHIN_MILLIS) {
-            return SessionRenewal.StillValid
-        }
+        if (!SessionPolicy.renewalDue(now, knownExpiry)) return SessionRenewal.StillValid
 
         // Close enough to expiry to be worth the invalidation. One attempt: a retry after an
         // ambiguous failure would renew against a token that may already be dead.
@@ -573,13 +573,8 @@ internal class CloudSyncService(
         requireConnected()
         // The server's own rules, checked here first so the listener hears them before a round
         // trip rather than after one.
-        if (newPassword.length !in PASSWORD_MIN_LENGTH..PASSWORD_MAX_LENGTH) {
-            return PasswordChange.Refused(
-                "Use a password of $PASSWORD_MIN_LENGTH to $PASSWORD_MAX_LENGTH characters."
-            )
-        }
-        if (newPassword == currentPassword) {
-            return PasswordChange.Refused("The new password has to differ from the current one.")
+        SessionPolicy.passwordProblem(currentPassword, newPassword)?.let {
+            return PasswordChange.Refused(it)
         }
         val body = JSONObject()
             .put("currentPassword", currentPassword)
@@ -846,19 +841,12 @@ internal class CloudSyncService(
      */
     private fun detectRollback(response: JSONObject): Boolean {
         val reported = response.optLong("latestSequence", -1L)
-        if (reported < 0L) return false
         val seen = settings.getLong(HIGHEST_SEQUENCE, -1L)
-        if (seen < 0L) {
-            settings.edit().putLong(HIGHEST_SEQUENCE, reported).apply()
-            return false
-        }
-        if (reported > seen) {
-            settings.edit().putLong(HIGHEST_SEQUENCE, reported).apply()
-            return false
-        }
-        // Equal is normal: nothing was appended since the last page. Only strictly older is a
-        // rollback, and the mark is never lowered, so one old response cannot erase the evidence.
-        return reported < seen
+        val warning = SessionPolicy.rollbackIsWarning(reported, seen)
+        // The highest sequence seen is only ever raised, never lowered, so one old response cannot
+        // erase the evidence that this server fell behind.
+        if (reported > seen) settings.edit().putLong(HIGHEST_SEQUENCE, reported).apply()
+        return warning
     }
 
     private suspend fun compactHistory(key: ByteArray, throughCursor: Long): Boolean {
@@ -1058,15 +1046,8 @@ internal class CloudSyncService(
         private const val KEY_CHECK_ID = "account-key-check-v1"
         private const val KEY_CHECK_MARKER = "soundtrail-e2e-sync-v1"
 
-        /** The server's password rules, mirrored so the listener hears them before a round trip. */
-        const val PASSWORD_MIN_LENGTH = 10
-        const val PASSWORD_MAX_LENGTH = 128
-
-        /** Renew at most this often, so a working token is not invalidated on every request. */
-        private const val RENEW_CHECK_INTERVAL_MILLIS = 24L * 60L * 60L * 1000L
-
-        /** Renew when expiry is this close. The server's sessions last 30 days. */
-        private const val RENEW_WITHIN_MILLIS = 7L * 24L * 60L * 60L * 1000L
+        // The password length, the renewal interval and the renewal window live in
+        // [SessionPolicy], with the rules that use them, so they are testable without a server.
 
         /**
          * What a server whose history went backwards is reported as.

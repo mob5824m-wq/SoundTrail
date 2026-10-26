@@ -170,12 +170,16 @@ internal object EndpointPolicy {
      * @throws EndpointPolicyException with a message that can be shown to the listener as-is
      */
     fun syncServer(raw: String): String {
-        val trimmed = raw.trim().trimEnd('/')
-        val value = when {
-            trimmed.isBlank() -> throw EndpointPolicyException("Enter the address of your sync server.")
-            !trimmed.contains("://") -> "https://$trimmed"
-            else -> trimmed
-        }
+        val typed = raw.trim()
+        if (typed.isBlank()) throw EndpointPolicyException("Enter the address of your sync server.")
+        // Whether a scheme was typed has to be decided *before* trailing slashes are trimmed:
+        // "https://" trimmed first becomes "https:", which no longer looks scheme-ful and would be
+        // given a second "https://" — producing "https://https:", a URL that parses happily with
+        // the host "https" because RFC 3986 permits an empty port. Deciding first means the
+        // scheme-only address stays "https:", whose host is null and is therefore refused.
+        val hasScheme = typed.contains("://")
+        val trimmed = typed.trimEnd('/')
+        val value = if (hasScheme) trimmed else "https://$trimmed"
         val uri = runCatching { java.net.URI(value) }.getOrNull()
             ?: throw EndpointPolicyException("Enter the HTTPS address of your sync server.")
         if (!uri.scheme.equals("https", ignoreCase = true) || uri.host.isNullOrBlank() ||

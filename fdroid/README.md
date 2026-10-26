@@ -81,12 +81,20 @@ limit cannot land unnoticed:
 - `tools/fdroid_check.py` - the requirements above, in this repository's own code, with no
   dependencies beyond the standard library. It cross-checks the recipe against
   `app/build.gradle.kts`, so version, versionCode and the newest build entry cannot drift.
-- `tools/fdroid_lint.py` - F-Droid's own `fdroid lint -f` and source scanner.
+- `tools/fdroid_lint.py` - F-Droid's own `fdroid lint -f` and source scanner. The scan
+  copies only what git lists, because that is what F-Droid clones; scanning the working
+  directory instead reports fdroidserver's own dependencies as prebuilt binaries.
+- `tools/fdroid_recipe_sync.py` - repoints the recipe at the version being released. No
+  pull request can carry the recipe for a version the release workflow has not chosen yet,
+  so the workflow runs this between the version bump and the gate; without it every release
+  after the first would fail its own consistency check.
 - The `fdroid` job in `.github/workflows/android.yml` runs both, plus the checker's tests.
-- The `release` job in `.github/workflows/release.yml` runs both after the version is
-  selected and before anything is tagged, builds `:app:assembleRelease`, and asserts the
-  release APK is unsigned. If the release has no changelog for its versionCode, it writes
-  one from the merged pull request title; a changelog committed by hand always wins.
+- The `release` job in `.github/workflows/release.yml` repoints the recipe at the version
+  it selected, then runs both gates before anything is tagged, builds
+  `:app:assembleRelease`, and asserts the release APK is unsigned. If the release has no
+  changelog for its versionCode, it writes one from the merged pull request title; a
+  changelog committed by hand always wins. The bump, the changelog and the recipe are
+  staged together, so the tag F-Droid builds from always carries all three.
 
 ## The version F-Droid builds
 

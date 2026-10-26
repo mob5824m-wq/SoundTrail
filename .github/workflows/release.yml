@@ -47,6 +47,15 @@ jobs:
         id: bump
         run: python3 .github/scripts/bump_version.py
 
+      # The step above moved versionCode and versionName, and the recipe in fdroid/ names
+      # the version F-Droid builds from a tag. tools/fdroid_check.py requires the two to
+      # agree, so without this every release after the first would fail its own gate: no
+      # pull request can carry the recipe for a version the release workflow has not
+      # chosen yet. The output stays in `fdroid rewritemeta` format, which the lint step
+      # below verifies.
+      - name: Point the F-Droid recipe at this release
+        run: python3 tools/fdroid_recipe_sync.py
+
       # Runs after the version is selected, so it checks the version that is about to be
       # tagged. F-Droid publishes "What's new" per versionCode and truncates anything over
       # its 500 character limit without failing, so a tag with no changelog (or a too-long
@@ -102,11 +111,12 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # The version bump edits app/build.gradle.kts, and the F-Droid gate above may have
-          # added a new file under fastlane/.../changelogs/. Stage both explicitly: the old
-          # `git commit -a` only commits tracked files, so a generated changelog would have
-          # stayed out of the commit and out of the tag F-Droid builds from.
-          git add app/build.gradle.kts fastlane/metadata/android/en-US/changelogs
+          # The version bump edits app/build.gradle.kts, the F-Droid gate above may have
+          # added a changelog under fastlane/.../changelogs/, and the recipe sync repoints
+          # fdroid/*.yml at this release. Stage all three explicitly: the old `git commit -a`
+          # only commits tracked files, so a generated changelog would have stayed out of the
+          # commit and out of the tag F-Droid builds from.
+          git add app/build.gradle.kts fastlane/metadata/android/en-US/changelogs fdroid/*.yml
           if git diff --cached --quiet; then
             echo "Using existing version $VERSION; no version bump commit is needed."
           else

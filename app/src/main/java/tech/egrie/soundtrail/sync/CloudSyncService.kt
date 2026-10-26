@@ -11,7 +11,6 @@ import tech.egrie.soundtrail.data.PinStore
 import tech.egrie.soundtrail.data.PlaylistStore
 import tech.egrie.soundtrail.integrations.EndpointPolicy
 import tech.egrie.soundtrail.integrations.EndpointPolicyException
-import tech.egrie.soundtrail.integrations.HttpResponse
 import tech.egrie.soundtrail.integrations.SecretStore
 import tech.egrie.soundtrail.integrations.httpRequest
 import java.util.UUID
@@ -963,10 +962,8 @@ internal class CloudSyncService(
         var attempt = 0
         while (true) {
             attempt += 1
-            val response: HttpResponse?
-            val transport: Exception?
-            try {
-                response = httpRequest(
+            val outcome = runCatching {
+                httpRequest(
                     url,
                     method = method,
                     body = body,
@@ -975,16 +972,20 @@ internal class CloudSyncService(
                     connectTimeoutMs = 15_000,
                     readTimeoutMs = 60_000
                 )
-                transport = null
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: EndpointPolicyException) {
-                // A refused address is not transient: waiting and asking again changes nothing.
-                throw CloudSyncException(e.message ?: "That sync server address cannot be used.")
-            } catch (e: Exception) {
-                response = null
-                transport = e
             }
+            // runCatching swallows everything, so the two exceptions that must not be swallowed are
+            // re-raised here: cancellation belongs to the caller's coroutine, and a refused address
+            // is not transient — waiting and asking the same disallowed host again changes nothing.
+            when (val failure = outcome.exceptionOrNull()) {
+                is CancellationException -> throw failure
+                is EndpointPolicyException -> throw CloudSyncException(
+                    failure.message ?: "That sync server address cannot be used."
+                )
+                else -> Unit
+            }
+            // Null means no answer arrived at all: a timeout, a dropped connection, a name that did
+            // not resolve. That is the ambiguous case, and it is handled as one below.
+            val response = outcome.getOrNull()
 
             if (response != null) {
                 val parsed = runCatching { JSONObject(response.body) }.getOrNull()
@@ -1066,6 +1067,18 @@ internal class CloudSyncService(
 
         /** Renew when expiry is this close. The server's sessions last 30 days. */
         private const val RENEW_WITHIN_MILLIS = 7L * 24L * 60L * 60L * 1000L
+
+        /**
+         * What a server whose history went backwards is reported as.
+         *
+         * Worded as a warning and not an error on purpose: the listener's library here is intact,
+         * the sync completed, and restoring a server from a database backup is a legitimate thing
+         * for the person who runs it to have done.
+         */
+        internal const val ROLLBACK_WARNING =
+            "This server's history is older than this device's last sync. It may have been " +
+                "restored from a backup. Your library here is intact; re-push it to put the " +
+                "missing events back on the server."
 
     }
 }

@@ -1,0 +1,41 @@
+# The category identifiers F-Droid's schema accepts, one entry per category.
+# `fdroid lint` rejects a recipe whose Categories are not in this list, so the list has to
+# be spelled the way fdroiddata spells it (config/categories.yml there).
+#
+# Only `name` is given: the real file also carries an icon and a description per category,
+# and neither changes what lint accepts. Written from scratch for this repository rather
+# than copied, because fdroiddata is AGPL-3.0 and this project is MIT.
+Connectivity:
+  name: Connectivity
+Development:
+  name: Development
+Games:
+  name: Games
+Graphics:
+  name: Graphics
+Internet:
+  name: Internet
+Money:
+  name: Money
+Multimedia:
+  name: Multimedia
+Navigation:
+  name: Navigation
+Phone & SMS:
+  name: Phone & SMS
+Reading:
+  name: Reading
+Science & Education:
+  name: Science & Education
+Security:
+  name: Security
+Sports & Health:
+  name: Sports & Health
+System:
+  name: System
+Theming:
+  name: Theming
+Time:
+  name: Time
+Writing:
+  name: Writing

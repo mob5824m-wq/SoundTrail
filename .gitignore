@@ -27,3 +27,6 @@ server/data/
 # OS / editor
 .DS_Store
 *.swp
+
+# F-Droid tooling virtualenvs (tools/fdroid_lint.py needs fdroidserver)
+.venv-*/

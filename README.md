@@ -295,9 +295,10 @@ It is a one-off. Every APK built from this repository — locally or by CI — i
 The first release published from this repository is **v1.0.9** (`versionCode` 10). Releases published before the repository move (v1.0.1–v1.0.8) remain at the [Geotagged-Music-App releases page](https://github.com/egrie-tech/Geotagged-Music-App/releases). The `Release on merge` workflow (`.github/workflows/release.yml`) uses the configured version for its first untagged release; after that tag exists, each merged pull request or manual run increments the patch version and `versionCode`:
 
 1. selects the current version for its first release, then adds 1 to `versionCode` and `0.0.1` to `versionName` on later releases (via `.github/scripts/bump_version.py`, which skips patches whose `vX.Y.Z` tags already exist),
-2. runs the server API tests and Android unit tests, then builds `:app:assembleDebug` **before** pushing anything, so a failed check leaves `main` untouched,
-3. commits a version bump when needed, tags `vX.Y.Z`, and pushes the commit (if any) and tag,
-4. creates the GitHub Release `Soundtrail X.Y.Z` with generated notes (the merged pull requests) and the debug APK attached as `soundtrail-X.Y.Z-debug.apk`.
+2. runs the server API tests and Android unit tests, then builds `:app:assembleDebug` and `:app:assembleRelease` **before** pushing anything, so a failed check leaves `main` untouched,
+3. runs the F-Droid gates against the version it is about to tag (`tools/fdroid_check.py`, then F-Droid's own `fdroid lint` and source scanner through `tools/fdroid_lint.py`), writing the changelog for the new `versionCode` if the merge did not ship one, and asserts the release APK is unsigned — see *F-Droid* below,
+4. commits a version bump when needed, tags `vX.Y.Z`, and pushes the commit (if any) and tag,
+5. creates the GitHub Release `Soundtrail X.Y.Z` with generated notes (the merged pull requests) and the debug APK attached as `soundtrail-X.Y.Z-debug.apk`.
 
 Details worth knowing:
 
@@ -310,6 +311,30 @@ Details worth knowing:
 - The `Android build` workflow checks the APK it built against the committed keystore and fails if the signing certificate does not match, so the "updates install in place" guarantee cannot regress silently.
 - The `Server tests` workflow runs the API suite on Python 3.10 and 3.14 for pushes and pull requests; the release workflow also reruns the suite against `main` before changing the version or publishing.
 - CI note: because the bump is pushed with `GITHUB_TOKEN`, the separate `Android build` workflow does not re-run for that commit — the release workflow compiles the same code itself.
+
+## F-Droid
+
+Soundtrail contains no proprietary libraries, so F-Droid can build and publish it. The recipe F-Droid needs is `fdroid/tech.egrie.soundtrail.yml`, ready to copy unchanged into [fdroiddata](https://gitlab.com/fdroid/fdroiddata)'s `metadata/` folder; `fdroid/README.md` has the submission steps, what each requirement is answered by, and the open questions (screenshots, the canonical source URL, reproducible builds).
+
+Two checks keep the repository in that state:
+
+- **`tools/fdroid_check.py`** encodes the requirements in this repository's own code, with nothing but the standard library: store metadata inside fdroidserver's character limits (name 50, summary 80, description 4000, whatsNew 500), a changelog for the `versionCode` about to be tagged, a recipe that agrees with `app/build.gradle.kts`, no non-free dependency, tracker or prebuilt binary, no Git LFS, an executable Gradle wrapper, and a release build type left unsigned so F-Droid signs what it publishes. Over-length store text is the one F-Droid will never report: fdroidserver truncates it silently, so the listing would simply end mid-sentence.
+- **`tools/fdroid_lint.py`** runs F-Droid's own tools — `fdroid lint -f` on the recipe and `fdroidserver`'s source scanner on the tree — in a throwaway workspace that looks like a checkout of fdroiddata, with `fdroid/lint-config/` standing in for its configuration. Install fdroidserver into a virtualenv first; the script prints the commands when it is missing.
+
+The `fdroid` job in the `Android build` workflow runs both, plus the checker's own tests, on every push and pull request. The release workflow runs them again after selecting the version and before tagging, writes the changelog for a new `versionCode` when the merge did not ship one, and asserts the release APK is unsigned — so nothing that would break an F-Droid build can be published. Both report clean at the moment:
+
+```
+$ .venv-fdroid/bin/python tools/fdroid_lint.py
+== fdroid lint -f tech.egrie.soundtrail ==
+clean: no lint findings, and the recipe is in `fdroid rewritemeta` format
+
+== fdroidserver.scanner.scan_source ==
+clean: no non-free libraries, trackers, unknown Maven repos or prebuilt binaries
+```
+
+The recipe is in `fdroid rewritemeta` format on purpose: fdroiddata's tooling rewrites metadata into exactly that shape, so a submitted recipe that already matches produces no diff for a reviewer to undo.
+
+What F-Droid publishes is not the APK attached to a GitHub Release. F-Droid checks out the tag, runs `gradlew assembleRelease`, and signs the resulting `app-release-unsigned.apk` with its own key, so the shared debug keystore never touches an F-Droid build.
 
 ## Permissions, and why
 

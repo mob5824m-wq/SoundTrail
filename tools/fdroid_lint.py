@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""Run F-Droid's own tools against this repository before submitting a recipe.
+
+`tools/fdroid_check.py` encodes F-Droid's requirements in this repository's own code and
+needs nothing but the standard library. This script runs the real thing instead, so the
+answer does not depend on that encoding staying correct:
+
+1. `fdroid lint -f fdroid/<applicationId>.yml` inside a throwaway workspace that looks
+   like a checkout of https://gitlab.com/fdroid/fdroiddata. The `-f` also requires the
+   recipe to be byte-for-byte what `fdroid rewritemeta` would write, which is the format
+   fdroiddata expects to receive.
+2. `fdroidserver.scanner.scan_source()` over a copy of the tree. This is the scan
+   `fdroid build` runs before compiling: it reports non-free libraries and trackers,
+   unknown Maven repositories, and prebuilt binaries, and it deletes the Gradle wrapper
+   because F-Droid supplies its own.
+
+The workspace configuration comes from `fdroid/lint-config/`, a minimal stand-in for
+fdroiddata's `config.yml`, `config/categories.yml` and `config/antiFeatures.yml`. Without
+those two identifier lists `fdroid lint` calls every category and anti-feature invalid,
+which is a property of the stub rather than of the recipe.
+
+Usage
+-----
+    tools/fdroid_lint.py                 # check, and explain how to install fdroidserver
+    tools/fdroid_lint.py --require       # fail when fdroidserver is not installed (CI)
+    tools/fdroid_lint.py --keep          # print the workspace path and leave it behind
+    tools/fdroid_lint.py --root PATH     # check a copy of the repository elsewhere
+
+Installing fdroidserver:
+
+    python3 -m venv .venv-fdroid
+    .venv-fdroid/bin/pip install fdroidserver
+    .venv-fdroid/bin/python tools/fdroid_lint.py
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+class _ApksignerNoticeFilter(logging.Filter):
+    """Drop fdroidserver's 'apksigner not found' notice.
+
+    linting a recipe and scanning source never sign anything, so the missing Android SDK
+    tool is noise here - and in CI it reads like a failure.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "apksigner not found" not in record.getMessage()
+
+
+logging.getLogger().addFilter(_ApksignerNoticeFilter())
+
+RECIPE_DIR = Path("fdroid")
+LINT_CONFIG_DIR = RECIPE_DIR / "lint-config"
+FASTLANE_BASE = Path("fastlane/metadata/android")
+GRADLE_FILE = Path("app/build.gradle.kts")
+
+INSTALL_HINT = """fdroidserver is not installed, so F-Droid's own tools could not run.
+Install it into a virtualenv and re-run this script with that interpreter:
+
+    python3 -m venv .venv-fdroid
+    .venv-fdroid/bin/pip install fdroidserver
+    .venv-fdroid/bin/python tools/fdroid_lint.py
+
+tools/fdroid_check.py covers the same requirements without that dependency and did run."""
+
+
+def application_id(root: Path) -> str:
+    """Read the applicationId the recipe filename and the F-Droid package name come from."""
+    text = (root / GRADLE_FILE).read_text(encoding="utf-8", errors="replace")
+    match = re.search(r'applicationId\s*=\s*"([^"]+)"', text)
+    if not match:
+        raise SystemExit(f"error: no applicationId in {GRADLE_FILE}")
+    return match.group(1)
+
+
+def build_workspace(root: Path, appid: str, workspace: Path) -> Path:
+    """Lay the recipe and store metadata out the way fdroiddata holds them."""
+    recipe = root / RECIPE_DIR / f"{appid}.yml"
+    if not recipe.is_file():
+        raise SystemExit(f"error: {recipe} is missing")
+    config = root / LINT_CONFIG_DIR / "config.yml"
+    if not config.is_file():
+        raise SystemExit(f"error: {config} is missing; it stubs fdroiddata's configuration")
+
+    (workspace / "metadata").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(config, workspace / "config.yml")
+    shutil.copytree(root / LINT_CONFIG_DIR / "config", workspace / "config")
+    shutil.copy2(recipe, workspace / "metadata" / recipe.name)
+
+    # fdroiddata keeps an app's store metadata beside its recipe, in the same layout
+    # fastlane uses. Copying it here lets lint see the listing F-Droid would publish.
+    fastlane = root / FASTLANE_BASE
+    if fastlane.is_dir():
+        target = workspace / "metadata" / appid
+        shutil.copytree(fastlane, target)
+    return recipe
+
+
+def run_lint(workspace: Path, appid: str) -> tuple[int, str]:
+    """Run `fdroid lint -f` on one recipe; returns (exit code, combined output)."""
+    done = subprocess.run(
+        [sys.executable, "-m", "fdroidserver", "lint", "-f", appid],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    output = (done.stdout + done.stderr).strip()
+    # The missing apksigner warning is about signing repo indexes, which lint does not do.
+    output = "\n".join(
+        line for line in output.splitlines() if "apksigner not found" not in line
+    ).strip()
+    return done.returncode, output
+
+
+def run_scanner(root: Path, workspace: Path) -> tuple[int, list, list]:
+    """Run fdroidserver's source scanner over a copy of the tree.
+
+    The scan deletes the files F-Droid replaces (gradlew, gradle-wrapper.jar), so it must
+    never be pointed at the working copy.
+    """
+    from fdroidserver import common, metadata, scanner  # type: ignore
+
+    source = Path(tempfile.mkdtemp(prefix="fdroid-scan-src-"))
+    copy = source / "repo"
+    shutil.copytree(root, copy, ignore=shutil.ignore_patterns(".git", "build", ".gradle"))
+
+    common.read_config()
+    store = scanner.MessageStore()
+    problems = scanner.scan_source(str(copy), metadata.Build(), store)
+    shutil.rmtree(source, ignore_errors=True)
+    return problems, store.errors, store.warnings
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--root", default=".", help="repository root to check (default: cwd)")
+    parser.add_argument("--require", action="store_true", help="fail when fdroidserver is missing")
+    parser.add_argument("--keep", action="store_true", help="leave the temporary workspace behind")
+    options = parser.parse_args(argv)
+
+    root = Path(options.root).resolve()
+    appid = application_id(root)
+
+    try:
+        import fdroidserver  # noqa: F401
+    except ImportError:
+        print(INSTALL_HINT)
+        return 1 if options.require else 0
+
+    workspace = Path(tempfile.mkdtemp(prefix="fdroid-lint-"))
+    failures = 0
+    try:
+        build_workspace(root, appid, workspace)
+
+        print(f"== fdroid lint -f {appid} ==")
+        code, output = run_lint(workspace, appid)
+        if output:
+            print(output)
+        if code == 0 and not output:
+            print("clean: no lint findings, and the recipe is in `fdroid rewritemeta` format")
+        else:
+            print(f"FAILED: `fdroid lint` exited {code}")
+            failures += 1
+
+        print("\n== fdroidserver.scanner.scan_source ==")
+        # The scanner reads its signature data through the config in the workspace, so it
+        # has to run with that as the working directory.
+        previous = os.getcwd()
+        os.chdir(workspace)
+        try:
+            problems, errors, warnings = run_scanner(root, workspace)
+        finally:
+            os.chdir(previous)
+        for item in errors:
+            print(f"error: {item[0]} at {item[1]}")
+        for item in warnings:
+            print(f"warning: {item[0]} at {item[1]}")
+        if problems:
+            print(f"FAILED: the source scanner reported {problems} problem(s)")
+            failures += 1
+        else:
+            print("clean: no non-free libraries, trackers, unknown Maven repos or prebuilt binaries")
+    finally:
+        if options.keep:
+            print(f"\nworkspace kept at {workspace}")
+        else:
+            shutil.rmtree(workspace, ignore_errors=True)
+
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

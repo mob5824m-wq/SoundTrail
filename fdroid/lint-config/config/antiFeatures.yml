@@ -1,0 +1,29 @@
+# The anti-feature identifiers F-Droid's schema accepts. `fdroid lint` rejects an
+# AntiFeatures entry whose name is not in this list, so the names have to be spelled the
+# way fdroiddata spells them (config/antiFeatures.yml there).
+#
+# Only `name` is given: the real file also carries an icon and a longer description per
+# anti-feature, and neither changes what lint accepts. Written from scratch for this
+# repository rather than copied, because fdroiddata is AGPL-3.0 and this project is MIT.
+Ads:
+  name: Contains advertising
+ApplicationDebuggable:
+  name: The app is a debug build
+DisabledAlgorithm:
+  name: Signed with a disabled signing algorithm
+KnownVuln:
+  name: Contains a known security vulnerability
+NoSourceSince:
+  name: No source code available since
+NonFreeAdd:
+  name: Promotes non-free add-ons
+NonFreeAssets:
+  name: Contains non-free assets
+NonFreeDep:
+  name: Depends on non-free libraries
+NonFreeNet:
+  name: Relies on non-free network services
+Tracking:
+  name: Tracks and reports your activity
+UpstreamNonFree:
+  name: Upstream source code is non-free

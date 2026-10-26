@@ -1,24 +1,22 @@
-# Draft F-Droid build recipe for Soundtrail.
-#
-# F-Droid does not read this file from the app repository. Submit it to the fdroiddata
-# repository (https://gitlab.com/fdroid/fdroiddata) as metadata/tech.egrie.soundtrail.yml.
-# See fdroid/README.md for the submission steps.
-#
-# The first build F-Droid can accept is the first release after the Google Play services
-# removal (v1.0.16, versionCode 17). Earlier tags still depend on proprietary Google
-# libraries and must not be built.
-
-# Check these against config/categories.yml in fdroiddata at submission time: F-Droid has
-# been expanding its category list.
+AntiFeatures:
+  NonFreeAdd:
+    en-US: Soundtrail can hand a song to the proprietary Spotify, SoundCloud and YouTube
+      Music apps, including patched YouTube Music builds (Morphe, ReVanced). It only
+      lists what is installed; nothing proprietary is bundled.
+  NonFreeNet:
+    en-US: Optional connections to third-party online services the listener chooses
+      and supplies credentials for - Spotify, SoundCloud, YouTube, map tiles, TheAudioDB,
+      and any OpenAI-compatible or Google Gemini AI provider. All are off until configured.
 Categories:
   - Multimedia
   - Navigation
 License: MIT
 AuthorName: egrie-tech
-AutoName: Soundtrail
 SourceCode: https://github.com/mob5824m-wq/SoundTrail
 IssueTracker: https://github.com/mob5824m-wq/SoundTrail/issues
 Changelog: https://github.com/mob5824m-wq/SoundTrail/releases
+
+AutoName: Soundtrail
 
 RepoType: git
 Repo: https://github.com/mob5824m-wq/SoundTrail.git
@@ -31,15 +29,49 @@ Builds:
     gradle:
       - yes
 
+  - versionName: 1.0.17
+    versionCode: 18
+    commit: v1.0.17
+    subdir: app
+    gradle:
+      - yes
+
+MaintainerNotes: |-
+  Build: `./gradlew assembleRelease` from the repository root produces an unsigned
+  app-release-unsigned.apk (subdir app is the Gradle module; the wrapper and settings are
+  at the root). The release build type deliberately has no signingConfig, so F-Droid signs
+  the APK with its own key. Dependencies come only from google() and mavenCentral(); there
+  is no google-services.json, no Play services, Firebase, billing or ads dependency, and no
+  prebuilt .jar/.aar/.so in the tree.
+
+  keystore/soundtrail-debug.p12 is committed on purpose and holds the well-known public
+  Android debug credentials (androiddebugkey / android). It signs debug builds only, so a
+  sideloaded debug APK updates the previous one instead of failing with
+  INSTALL_FAILED_UPDATE_INCOMPATIBLE. It is not a release key, it guards no secret, and
+  F-Droid builds never use it.
+
+  The manifest keeps the string meta-data key com.google.android.gms.car.application with
+  res/xml/automotive_app_desc.xml. That is the key Android Auto reads to find a media app;
+  it is not a Google library and pulls in no dependency. The exported
+  android.media.browse.MediaBrowserService is androidx.media (Apache-2.0), and onGetRoot
+  only answers the car host and the system media UI.
+
+  The <queries> package names (Spotify, SoundCloud, YouTube Music, Morphe, ReVanced) exist
+  for Android 11+ package visibility so the app can tell whether a player is installed
+  before offering to hand a song to it.
+
+  network_security_config.xml permits cleartext HTTP because the listener types the address
+  of their own Jellyfin server, which is usually plain HTTP on a LAN. Certificates are still
+  validated against the system trust store only; user-installed CAs are not trusted.
+
+  The tree passes fdroidserver's source scanner with zero problems and this recipe passes
+  `fdroid lint`; tools/fdroid_check.py and tools/fdroid_lint.py re-run both in CI on every
+  push, so a non-free dependency or an over-length store description cannot land unnoticed.
+
+  The store metadata has no phone screenshots yet. They are optional; they would go in
+  fastlane/metadata/android/en-US/images/phoneScreenshots/.
+
 AutoUpdateMode: Version
 UpdateCheckMode: Tags
-CurrentVersion: 1.0.16
-CurrentVersionCode: 17
-
-# Declared rather than hidden. NonFreeNet: optional connections to third-party online services
-# (YouTube, Spotify, SoundCloud, and any AI provider the listener chooses). NonFreeAdd: the app
-# hands links to proprietary apps (Spotify, SoundCloud, YouTube Music). None of these is bundled
-# as a proprietary library in the APK, and the app works without them.
-AntiFeatures:
-  - NonFreeNet
-  - NonFreeAdd
+CurrentVersion: 1.0.17
+CurrentVersionCode: 18

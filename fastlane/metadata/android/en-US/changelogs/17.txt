@@ -1,4 +1,4 @@
 Soundtrail now contains no proprietary Google libraries, so it can be built and distributed as free software (for example by F-Droid).
-- YouTube connects with your own Desktop OAuth client ID in the browser. The Google Play services sign-in is removed.
+- YouTube connects with your own Desktop OAuth client ID in the browser. The Play services sign-in is removed.
 - Motion for automations comes from GPS speed. The optional Google activity recognition is removed.
-- The optional YouTube audio extraction is removed. Soundtrail no longer downloads YouTube audio, and the sync server no longer has a YouTube endpoint. YouTube songs open in the YouTube Music app.
+- YouTube audio extraction is removed: Soundtrail no longer downloads YouTube audio, and YouTube songs open in the YouTube Music app.

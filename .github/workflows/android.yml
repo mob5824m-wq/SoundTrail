@@ -47,21 +47,71 @@ jobs:
           set -o pipefail
           # assembleDebugAndroidTest compiles the instrumented smoke tests without needing an
           # emulator, so a change that breaks them fails here instead of at release time.
-          if ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace 2>&1 | tee android-build.log; then
+          # assembleRelease builds the variant F-Droid builds: its buildserver runs
+          # `gradlew assembleRelease` on the tag, signs the APK itself, and never builds
+          # debug, so a release-only failure has to surface here rather than in an
+          # fdroiddata merge request.
+          if ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleRelease --stacktrace 2>&1 | tee android-build.log; then
             echo "Build and unit tests passed."
           else
             # Expose useful diagnostics as a check annotation as well as in the runner log.
             # This also helps when an environment cannot download Actions log archives.
+            # The "* What went wrong:" block is included with the lines after it, because
+            # that is where Gradle names the cause; matching single lines alone drops it.
             python3 - <<'PY'
+          import re
           from pathlib import Path
           lines = Path('android-build.log').read_text(errors='replace').splitlines()
-          errors = [line for line in lines if line.startswith(('e: ', 'error: ', '* What went wrong:', 'FAILURE:')) or ' FAILED' in line]
-          excerpt = '\n'.join(errors[:50] if errors else lines[-60:])[:15000]
+          # Android lint prints its findings as "<path>:<line>: Error: <message> [Issue]".
+          lint_finding = re.compile(r'^\S+:\d+: (Error|Warning): ')
+          picked = []
+          for i, line in enumerate(lines):
+              if (line.startswith(('e: ', 'error: ', 'FAILURE:')) or ' FAILED' in line
+                      or lint_finding.match(line) or re.match(r'^\d+ errors?, \d+ warnings?', line)):
+                  picked.append(line)
+              elif line.startswith('* What went wrong:'):
+                  picked.extend(lines[i:i + 12])
+          excerpt = '\n'.join(dict.fromkeys(picked))[:15000] or '\n'.join(lines[-60:])[:15000]
           escaped = excerpt.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
           print(f'::error title=Android build failure::{escaped}')
           PY
             exit 1
           fi
+
+      # `assembleRelease` runs :app:lintVitalRelease, which fails the build on any
+      # fatal-severity Android lint issue. F-Droid builds the same variant from the tag, so
+      # a fatal lint finding blocks inclusion and the report has to be readable from the
+      # check annotation - not only from a log archive that may not be reachable.
+      - name: Report Android lint findings
+        if: failure()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          reports = sorted(Path('app/build').rglob('*lint*')) if Path('app/build').is_dir() else []
+          print('lint paths under app/build: ' + ', '.join(str(r) for r in reports[:20]))
+          text = ''
+          for report in reports:
+              if report.suffix not in ('.txt', '.xml'):
+                  continue
+              body = report.read_text(errors='replace')
+              lines = body.splitlines()
+              errors = [line for line in lines if 'Error:' in line or 'severity="Fatal"' in line or 'severity="Error"' in line]
+              text += f'--- {report} ({len(errors)} finding(s)) ---\n'
+              text += '\n'.join(errors[:40] if errors else lines[:40]) + '\n'
+          if not text:
+              text = 'no lint report was written; the build failed before lint produced one'
+          escaped = text.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+          print(f'::error title=Android lint (fatal) findings::{escaped[:1500]}')
+          print('reports found: ' + ', '.join(str(r) for r in reports))
+          PY
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        continue-on-error: true
+        with:
+          name: android-lint-reports
+          path: app/build/reports/
 
       # The APK has to be signed with the key committed in the repository: a key that
       # changes per build makes Android reject the next sideloaded update with
@@ -91,8 +141,91 @@ jobs:
           # visible in the run summary without downloading job logs.
           echo "::notice title=Debug APK signing key SHA-256::APK=${apk_sha:-unknown} keystore=${key_sha:-unknown}"
 
+      # F-Droid builds the release variant and signs the result with its own key, so two
+      # things have to hold: the release build produces app-release-unsigned.apk, and that
+      # APK really is unsigned. A signingConfig on the release build type would publish an
+      # app signed by a key from this repository instead of the one F-Droid reviewed.
+      - name: Check the release APK F-Droid builds
+        shell: bash
+        run: |
+          set -eu
+          unsigned="app/build/outputs/apk/release/app-release-unsigned.apk"
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            echo "::error title=Release APK is signed::app-release.apk exists, so the release build type sets a signingConfig. F-Droid needs an unsigned APK it signs itself."
+            exit 1
+          fi
+          if [ ! -f "$unsigned" ]; then
+            echo "::error title=No unsigned release APK::Expected $unsigned. F-Droid runs 'gradlew assembleRelease' on the tag and signs that file."
+            find app/build/outputs -type f | sort || true
+            exit 1
+          fi
+          build_tools="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          if "$build_tools/apksigner" verify "$unsigned" >/dev/null 2>&1; then
+            echo "::error title=Release APK carries a signature::apksigner verified $unsigned; F-Droid must be the only signer of what it publishes."
+            exit 1
+          fi
+          echo "::notice title=Release APK is unsigned::$(du -h "$unsigned" | cut -f1), ready for F-Droid to sign"
+
       - uses: actions/upload-artifact@v7
         if: success()
         with:
           name: soundtrail-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+
+  # F-Droid builds from a Git tag with its own toolchain and publishes under its own key,
+  # so qualifying is a set of facts about the repository: no non-free dependency anywhere,
+  # store metadata inside fdroidserver's character limits with a changelog for the
+  # versionCode about to be tagged, and a recipe that agrees with app/build.gradle.kts.
+  # This job re-checks those facts on every push, because nothing else in the pipeline
+  # notices a re-added play-services line or a description that grew past 4000 characters.
+  fdroid:
+    name: F-Droid requirements
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The recipe check compares Repo against the git remote and looks the build
+          # commit up in the tag list, so the tags have to be fetched.
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-python@v7
+        with:
+          # fdroidserver supports 3.9+; 3.12 is the newest release its dependencies
+          # (androguard, paramiko) are known to build wheels for.
+          python-version: '3.12'
+
+      - name: Check the F-Droid requirements
+        shell: bash
+        run: |
+          set -eu
+          python3 -m unittest discover -s tools -p 'test_*.py'
+          python3 tools/fdroid_check.py
+
+      - name: Run F-Droid's own tools on the recipe and the source tree
+        shell: bash
+        run: |
+          # The virtualenv lives outside the checkout on purpose: the source scanner walks
+          # the tree, and fdroidserver's own dependencies (libcloud test fixtures, the venv
+          # interpreter) read to it as prebuilt binaries.
+          venv="${RUNNER_TEMP:-/tmp}/fdroid-venv"
+          python3 -m venv "$venv"
+          "$venv/bin/pip" install --disable-pip-version-check fdroidserver \
+            > fdroid-install.log 2>&1 || install_failed=1
+          tail -3 fdroid-install.log
+          if [ -n "${install_failed:-}" ]; then
+            echo "::error title=fdroidserver install failed::$(tail -c 800 fdroid-install.log | tr '\n' ' ')"
+            exit 1
+          fi
+          # The findings are mirrored into a check annotation because Actions log archives
+          # are not reachable from every environment that has to triage a failure.
+          if ! "$venv/bin/python" tools/fdroid_lint.py --require > fdroid-lint.log 2>&1; then
+            cat fdroid-lint.log
+            python3 - <<'PY'
+          from pathlib import Path
+          text = Path('fdroid-lint.log').read_text(errors='replace').strip()
+          escaped = text.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+          print(f'::error title=F-Droid tools reported a problem::{escaped[-1400:]}')
+          PY
+            exit 1
+          fi
+          cat fdroid-lint.log

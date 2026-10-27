@@ -10,19 +10,21 @@ private const val API_BASE = "https://www.theaudiodb.com/api/v1/json"
 
 class AudioDbException(message: String) : Exception(message)
 
-/** Metadata-only song details. Links exist only when TheAudioDB knows one that passes the allowlist. */
+/**
+ * Metadata-only song details.
+ *
+ * TheAudioDB also publishes a Spotify id and a music-video URL per track; this app no longer
+ * reads either, because it no longer supports those services and a link it cannot play would be
+ * a promise it cannot keep. What is left is the part that was always the point: the names and the
+ * tags that prefill a pin and enrich a mood mix.
+ */
 data class SongInfo(
     val title: String,
     val artist: String,
     val album: String,
     val genre: String,
-    val mood: String,
-    val spotifyUrl: String?,
-    val youtubeUrl: String?
-) {
-    /** Preferred playable link for a new pin; null means the user must add one themselves. */
-    val url: String? get() = spotifyUrl ?: youtubeUrl
-}
+    val mood: String
+)
 
 /**
  * TheAudioDB's free music API: no account, no secret, nothing stored. It is a metadata
@@ -42,7 +44,6 @@ class AudioDbService {
 }
 
 internal object AudioDbParser {
-    private val spotifyId = Regex("[A-Za-z0-9]{22}")
 
     fun parse(body: String): List<SongInfo> = runCatching {
         val items = JSONObject(body).optJSONArray("track") ?: return emptyList()
@@ -50,18 +51,12 @@ internal object AudioDbParser {
             val item = items.optJSONObject(index) ?: return@mapNotNull null
             val title = item.text("strTrack") ?: return@mapNotNull null
             val artist = item.text("strArtist") ?: return@mapNotNull null
-            val spotifyUrl = item.text("strSpotifyID")
-                ?.takeIf(spotifyId::matches)
-                ?.let { MusicLinkParser.parse("https://open.spotify.com/track/$it")?.url }
-            val youtubeUrl = item.text("strMusicVid")?.let(MusicLinkParser::parse)?.url
             SongInfo(
                 title = title.take(120),
                 artist = artist,
                 album = item.text("strAlbum").orEmpty(),
                 genre = item.text("strGenre").orEmpty(),
-                mood = item.text("strMood").orEmpty(),
-                spotifyUrl = spotifyUrl,
-                youtubeUrl = youtubeUrl
+                mood = item.text("strMood").orEmpty()
             )
         }.distinctBy { "${it.title}|${it.artist}|${it.album}".lowercase() }.take(12)
     }.getOrDefault(emptyList())

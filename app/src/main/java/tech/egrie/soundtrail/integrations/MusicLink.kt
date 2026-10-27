@@ -1,143 +1,53 @@
 package tech.egrie.soundtrail.integrations
 
-import java.net.URI
-import java.net.URLDecoder
-
-/** Only known song URLs are opened. Strip tracking parameters and refuse untrusted hosts. */
+/**
+ * The catalogues Soundtrail can hold a song from.
+ *
+ * Jellyfin is the only one left. Spotify, SoundCloud and YouTube were removed: their links
+ * cannot be resolved, streamed or handed to another app any more, so accepting one would mean
+ * storing a row that looks playable and is not. [MusicLinkParser] therefore refuses every link
+ * shape it used to accept, and [tech.egrie.soundtrail.data.LegacyServiceCleanup] strips the rows
+ * an older version already saved.
+ */
 enum class MusicProvider(val label: String) {
-    SPOTIFY("Spotify"),
-    YOUTUBE("YouTube"),
-    YOUTUBE_MUSIC("YouTube Music"),
-    SOUNDCLOUD("SoundCloud"),
-
     /** A song on the user's own Jellyfin server; played by Soundtrail itself, not an app. */
     JELLYFIN("Jellyfin")
 }
 
 data class MusicLink(val provider: MusicProvider, val url: String)
 
-/** A search result from a connected provider, ready to be pinned. */
+/** A search result from the connected catalogue, ready to be pinned. */
 data class TrackResult(
     val title: String,
     val artist: String,
     val url: String,
     val provider: MusicProvider,
-    /** Optional direct playable URL (Spotify preview, SoundCloud stream, etc.). */
-    val playableUrl: String? = null,
     val durationMs: Long? = null
 )
 
+/**
+ * Reads a stored or typed song link.
+ *
+ * The only accepted shape is a Jellyfin item reference (`jellyfin:item:<id>`), which carries an
+ * item id and nothing else: no server address, no user, no token. Everything else — including
+ * the https links this parser used to canonicalize for streaming services — is refused, so a
+ * caller can never mistake a dead link for a playable one.
+ */
 object MusicLinkParser {
-    private val spotifyId = Regex("[A-Za-z0-9]{22}")
-    private val youtubeId = Regex("[A-Za-z0-9_-]{11}")
-    private val soundcloudSlug = Regex("[A-Za-z0-9_-]{1,100}")
-    private val soundcloudSecret = Regex("s-[A-Za-z0-9]{1,64}")
-    private val soundcloudShort = Regex("[A-Za-z0-9_-]{4,64}")
-    private val sharedUrl = Regex("https?://[^\\s<>]+|spotify:track:[A-Za-z0-9]{22}", RegexOption.IGNORE_CASE)
+    fun fromText(text: String): MusicLink? = parse(text)
 
-    // Top-level SoundCloud site sections that can never be an artist permalink.
-    private val soundcloudReserved = setOf(
-        "you", "settings", "notifications", "messages", "discover", "search", "upload",
-        "pages", "feed", "charts", "popular", "tags", "tracks", "people", "playlists",
-        "albums", "groups", "stations", "library", "history", "jobs", "legal", "imprint",
-        "privacy", "terms-of-use", "cookies", "about", "help", "press", "mobile", "apps",
-        "developer", "developers", "api", "oauth", "login", "signin", "signup", "logout"
-    )
+    fun parse(input: String): MusicLink? =
+        JellyfinRef.itemId(input)?.let { itemId -> JellyfinRef.link(itemId) }
 
-    fun fromText(text: String): MusicLink? {
-        parse(text.trim())?.let { return it }
-        return sharedUrl.findAll(text).firstNotNullOfOrNull { match ->
-            parse(match.value.trimEnd('.', ',', ')', ']', '>', '!', ';'))
-        }
-    }
-
-    fun parse(input: String): MusicLink? {
-        val value = input.trim()
-        if (value.startsWith("spotify:track:", ignoreCase = true)) {
-            val id = value.substringAfterLast(':')
-            return if (spotifyId.matches(id)) {
-                MusicLink(MusicProvider.SPOTIFY, "https://open.spotify.com/track/$id")
-            } else null
-        }
-
-        // A Jellyfin item reference: just an id, so no server address or token is ever stored.
-        JellyfinRef.itemId(value)?.let { itemId -> return JellyfinRef.link(itemId) }
-
-        val uri = runCatching { URI(value) }.getOrNull() ?: return null
-        if (!uri.scheme.equals("https", ignoreCase = true) || uri.userInfo != null ||
-            uri.port != -1 || uri.fragment != null
-        ) return null
-
-        val host = uri.host?.lowercase() ?: return null
-        val path = uri.path?.trimEnd('/') ?: return null
-        if (host == "open.spotify.com") {
-            val id = path.removePrefix("/track/")
-            return if (path.startsWith("/track/") && spotifyId.matches(id)) {
-                MusicLink(MusicProvider.SPOTIFY, "https://open.spotify.com/track/$id")
-            } else null
-        }
-
-        // SoundCloud permalinks are slug-based, so they are canonicalized, not re-derived.
-        if (host == "soundcloud.com" || host == "www.soundcloud.com" || host == "m.soundcloud.com") {
-            val segments = path.split('/').filter(String::isNotEmpty)
-            if (segments.size !in 2..3 || segments[0].lowercase() in soundcloudReserved ||
-                !soundcloudSlug.matches(segments[0]) || !soundcloudSlug.matches(segments[1]) ||
-                (segments.size == 3 && !soundcloudSecret.matches(segments[2]))
-            ) return null
-            val secretTrail = if (segments.size == 3) "/${segments[2]}" else ""
-            return MusicLink(
-                MusicProvider.SOUNDCLOUD,
-                "https://soundcloud.com/${segments[0]}/${segments[1]}$secretTrail"
-            )
-        }
-
-        // The share shorteners the SoundCloud apps produce; they redirect to the permalink.
-        if (host == "on.soundcloud.com" || host == "soundcloud.app.goo.gl") {
-            val token = path.removePrefix("/")
-            return if (path.startsWith("/") && soundcloudShort.matches(token)) {
-                MusicLink(MusicProvider.SOUNDCLOUD, "https://on.soundcloud.com/$token")
-            } else null
-        }
-
-        val videoId = when {
-            host == "music.youtube.com" -> {
-                if (path != "/watch") return null
-                queryParameter(uri.rawQuery, "v")?.let { it to MusicProvider.YOUTUBE_MUSIC }
-            }
-            host == "www.youtube.com" || host == "youtube.com" || host == "m.youtube.com" -> {
-                if (path != "/watch") return null
-                queryParameter(uri.rawQuery, "v")?.let { it to MusicProvider.YOUTUBE }
-            }
-            host == "youtu.be" -> {
-                path.removePrefix("/").takeIf { path.startsWith("/") }?.let { it to MusicProvider.YOUTUBE }
-            }
-            else -> null
-        }
-        return videoId?.let { (id, provider) ->
-            if (!youtubeId.matches(id)) return null
-            val canonical = when (provider) {
-                MusicProvider.YOUTUBE_MUSIC -> "https://music.youtube.com/watch?v=$id"
-                MusicProvider.YOUTUBE -> "https://www.youtube.com/watch?v=$id"
-                else -> return null
-            }
-            MusicLink(provider, canonical)
-        }
-    }
-
-    fun youtubeVideoId(input: String): String? {
-        val link = parse(input)?.takeIf {
-            it.provider == MusicProvider.YOUTUBE_MUSIC || it.provider == MusicProvider.YOUTUBE
-        } ?: return null
-        val query = runCatching { URI(link.url).rawQuery }.getOrNull()
-        return queryParameter(query, "v")?.takeIf(youtubeId::matches)
-    }
-
-    private fun queryParameter(rawQuery: String?, name: String): String? = rawQuery
-        ?.split('&')
-        ?.firstNotNullOfOrNull { part ->
-            val key = part.substringBefore('=')
-            if (key == name && '=' in part) {
-                runCatching { URLDecoder.decode(part.substringAfter('='), "UTF-8") }.getOrNull()
-            } else null
-        }
+    /**
+     * True when a stored link is one this version cannot play.
+     *
+     * A link is either a Jellyfin item reference or it is nothing: a Spotify, SoundCloud or
+     * YouTube URL left behind by an older install reads as unplayable here, and so does anything
+     * that was never a song link at all. Callers use this to decide what survives an upgrade —
+     * see [tech.egrie.soundtrail.data.LegacyServiceCleanup]. A row keeps an audio file the
+     * listener attached themselves and loses the dead link; a row whose only content was the dead
+     * link goes away, because keeping it would show a song that can never play.
+     */
+    fun isUnplayable(url: String?): Boolean = url != null && parse(url) == null
 }

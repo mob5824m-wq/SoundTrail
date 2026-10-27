@@ -23,6 +23,7 @@ import tech.egrie.soundtrail.data.BackupException
 import tech.egrie.soundtrail.data.BackupFormat
 import tech.egrie.soundtrail.data.FileStore
 import tech.egrie.soundtrail.data.GeoPoint
+import tech.egrie.soundtrail.data.LegacyServiceCleanup
 import tech.egrie.soundtrail.data.ManagedBackup
 import tech.egrie.soundtrail.data.ManagedBackupStore
 import tech.egrie.soundtrail.data.ManagedBackupStatus
@@ -30,8 +31,6 @@ import tech.egrie.soundtrail.data.MusicPin
 import tech.egrie.soundtrail.data.PinStore
 import tech.egrie.soundtrail.data.Playlist
 import tech.egrie.soundtrail.data.PlaylistItem
-import tech.egrie.soundtrail.data.LikedSongs
-import tech.egrie.soundtrail.data.consolidateLikes
 import tech.egrie.soundtrail.data.PlaylistStore
 import tech.egrie.soundtrail.data.StoredAudioFile
 import tech.egrie.soundtrail.integrations.AudioDbService
@@ -42,20 +41,12 @@ import tech.egrie.soundtrail.integrations.MusicLink
 import tech.egrie.soundtrail.integrations.MusicLinkParser
 import tech.egrie.soundtrail.integrations.MusicProvider
 import tech.egrie.soundtrail.integrations.SongInfo
-import tech.egrie.soundtrail.integrations.SoundCloudService
-import tech.egrie.soundtrail.integrations.SpotifyService
 import tech.egrie.soundtrail.assistant.AssistantAnswer
 import tech.egrie.soundtrail.assistant.AssistantHit
 import tech.egrie.soundtrail.assistant.AssistantLibrary
 import tech.egrie.soundtrail.assistant.AssistantParser
 import tech.egrie.soundtrail.assistant.toQueueEntry
 import tech.egrie.soundtrail.integrations.TrackResult
-import tech.egrie.soundtrail.integrations.GoogleAuthHealth
-import tech.egrie.soundtrail.integrations.GoogleAuthState
-import tech.egrie.soundtrail.integrations.YouTubeDataService
-import tech.egrie.soundtrail.integrations.YouTubeImportedPlaylist
-import tech.egrie.soundtrail.integrations.YouTubeReconnectRequiredException
-import tech.egrie.soundtrail.integrations.YouTubeSearch
 import tech.egrie.soundtrail.location.DeviceLocation
 import tech.egrie.soundtrail.mood.DEFAULT_OLLAMA_MODEL
 import tech.egrie.soundtrail.mood.MoodAiException
@@ -84,35 +75,21 @@ import tech.egrie.soundtrail.playback.QueueEntry
 import tech.egrie.soundtrail.playback.toQueueEntry
 import tech.egrie.soundtrail.sync.CloudSyncException
 import tech.egrie.soundtrail.sync.CloudSyncService
+import tech.egrie.soundtrail.sync.PasswordChange
+import tech.egrie.soundtrail.sync.SessionRenewal
+import tech.egrie.soundtrail.sync.SessionSignOut
+import tech.egrie.soundtrail.sync.SyncDeviceSession
 import java.util.UUID
-
-/** Which connected catalog the Search tab queries. */
-internal enum class SearchProvider(val label: String) {
-    SPOTIFY("Spotify"), SOUNDCLOUD("SoundCloud"), JELLYFIN("Jellyfin"), YOUTUBE_DATA("YouTube")
-}
 
 internal data class AppState(
     val pins: List<MusicPin> = emptyList(),
     val location: GeoPoint? = null,
     val locating: Boolean = false,
-    val spotifyConnected: Boolean = false,
-    val spotifyClientId: String = "",
-    val spotifyName: String? = null,
-    val soundcloudConnected: Boolean = false,
-    val soundcloudClientId: String = "",
-    val soundcloudName: String? = null,
     val jellyfinConnected: Boolean = false,
     val jellyfinServer: String = "",
     val jellyfinName: String = "",
     val jellyfinServerName: String = "",
-    val youtubeDataConnected: Boolean = false,
-    val youtubeDataAccount: String? = null,
-    val youtubeOAuthClientId: String = "",
-    val connecting: Boolean = false,
-    val connectingSoundcloud: Boolean = false,
     val connectingJellyfin: Boolean = false,
-    val connectingYouTubeOAuth: Boolean = false,
-    val searchProvider: SearchProvider = SearchProvider.SPOTIFY,
     val searching: Boolean = false,
     val results: List<TrackResult> = emptyList(),
     val searchError: String? = null,
@@ -121,7 +98,6 @@ internal data class AppState(
     val lookupError: String? = null,
     val playlists: List<tech.egrie.soundtrail.data.Playlist> = emptyList(),
     val automations: List<AutomationRule> = emptyList(),
-    val autoSearchYoutube: Boolean = true,
     val backupBusy: Boolean = false,
     val syncServer: String = "",
     val syncEffectiveServer: String = CloudSyncService.DEFAULT_SYNC_SERVER,
@@ -136,25 +112,36 @@ internal data class AppState(
     val syncFailed: Boolean = false,
     val syncError: String? = null,
     val syncRecoveryKey: String? = null,
+    /** This device's own session id, so the device list can mark itself without another request. */
+    val syncSessionId: String? = null,
+    val syncSessionExpiresAt: Long = 0L,
+    /** Every signed-in device on the account, newest first. Ids only — never a token. */
+    val syncSessions: List<SyncDeviceSession> = emptyList(),
+    val syncSessionsLoading: Boolean = false,
+    val syncSessionsError: String? = null,
+    val syncPasswordBusy: Boolean = false,
+    /**
+     * When a password change last succeeded, as a timestamp.
+     *
+     * The form clears on this rather than on the tap, so a refusal — "that is not your current
+     * password" — leaves what was typed in place to correct. A success is the only thing that
+     * should empty a password field.
+     */
+    val syncPasswordDone: Long = 0L,
+    val syncRepushBusy: Boolean = false,
+    /** True while a server history that went backwards has not been re-pushed. */
+    val syncRollbackWarning: Boolean = false,
     val jellyfinDownloads: Map<String, JellyfinDownloadProgress> = emptyMap(),
-    val youtubeImporting: Boolean = false,
-    val youtubeAutoImportEnabled: Boolean = true,
-    val youtubeLastImportedAt: Long = 0L,
     val offlineAudioFiles: List<OfflineAudioItem> = emptyList(),
     val offlineAudioBusy: Boolean = false,
     val audioStorageBytes: Long = 0L,
     val watchStatus: tech.egrie.soundtrail.automation.WatchStatus = tech.egrie.soundtrail.automation.WatchStatus(),
     /** Automatic on-device snapshots: the switch, the files kept, and whether one is writing. */
     val managedBackups: ManagedBackupStatus = ManagedBackupStatus(),
-    val spotifyAppInstalled: Boolean = false,
-    val soundcloudAppInstalled: Boolean = false,
-    val youtubeAppInstalled: Boolean = false,
     /** The mood reader: what the listener typed, what it meant, and the mix it produced. */
     val mood: MoodUiState = MoodUiState(),
     /** The Ask tab: what was said or typed, and the answer to it. */
-    val assistant: AssistantUiState = AssistantUiState(),
-    /** Health of the saved Google connection; never contains a token value. */
-    val youtubeAuth: GoogleAuthHealth = GoogleAuthHealth(GoogleAuthState.NOT_CONNECTED)
+    val assistant: AssistantUiState = AssistantUiState()
 )
 
 /**
@@ -291,15 +278,11 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
 
     private var managedBackupJob: Job? = null
     private val files = FileStore(application)
-    private val spotify = SpotifyService(application)
-    private val soundcloud = SoundCloudService(application)
     private val jellyfin = JellyfinService(application)
-    private val youtubeData = YouTubeDataService(application)
     private val audioDb = AudioDbService()
     private val locationReader = DeviceLocation(application)
     private val apps = DeviceApps(application)
     private val cloudSync = CloudSyncService(application, pins, playlists, automations, files)
-    private val youtubePrefs = application.getSharedPreferences("soundtrail_youtube", android.content.Context.MODE_PRIVATE)
     private val moodPrefs = MoodStore(application)
 
     // The optional AI reader, and the on-device engine that always backs it up.
@@ -312,7 +295,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
      * different song.
      */
     private val hub = PlaybackHub.shared(application)
-    private val moodPicks = MoodPickResolver(youtubeData, jellyfin, spotify, soundcloud)
+    private val moodPicks = MoodPickResolver(jellyfin)
 
     /**
      * The app's one player, shared with [tech.egrie.soundtrail.playback.PlaybackService] so
@@ -343,17 +326,10 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             offlineAudioFiles = buildOfflineAudioItems(playlists.all()),
             audioStorageBytes = files.totalBytes(),
             syncPendingChanges = cloudSync.pendingChangeCount(),
-            spotifyConnected = spotify.connected,
-            spotifyClientId = spotify.clientId,
-            soundcloudConnected = soundcloud.connected,
-            soundcloudClientId = soundcloud.clientId,
             jellyfinConnected = jellyfin.connected,
             jellyfinServer = jellyfin.serverUrl,
             jellyfinName = jellyfin.userName,
             jellyfinServerName = jellyfin.serverName,
-            youtubeDataConnected = youtubeData.connected,
-            youtubeDataAccount = youtubeData.accountName,
-            youtubeOAuthClientId = youtubeData.oauthClientId,
             managedBackups = ManagedBackupStatus(enabled = localBackups.enabled),
             syncServer = cloudSync.serverUrl,
             syncEffectiveServer = cloudSync.effectiveServerUrl,
@@ -363,6 +339,9 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             syncHasRecoveryKey = cloudSync.hasRecoveryKey,
             syncAutoEnabled = cloudSync.autoSyncEnabled,
             syncLastSyncAt = cloudSync.lastSyncAt,
+            syncSessionId = cloudSync.sessionId,
+            syncSessionExpiresAt = cloudSync.sessionExpiresAt,
+            syncRollbackWarning = cloudSync.hasRollbackWarning,
             mood = MoodUiState(
                 text = moodPrefs.lastText,
                 energyHint = moodPrefs.lastEnergyHint,
@@ -378,8 +357,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 aiConsentAt = moodPrefs.consentAt(),
                 aiReady = moodAi.configured,
                 enrichEnabled = moodPrefs.tagLookupEnabled
-            ),
-            youtubeAuth = youtubeData.authHealth()
+            )
         )
     )
     val state = _state.asStateFlow()
@@ -396,6 +374,30 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     val speech = _speech.asSharedFlow()
 
     init {
+        // An upgrade away from the streaming services: remove what they left behind, once, before
+        // anything else reads the library — and before the first sync, so the rows that go are
+        // tombstoned to the listener's other devices in that same push instead of the next one.
+        viewModelScope.launch {
+            val cleanup = withContext(Dispatchers.IO) {
+                runCatching { LegacyServiceCleanup.runOnce(application, pins, playlists) }.getOrNull()
+            }
+            if (cleanup != null && !cleanup.isEmpty) {
+                val kept = playlists.all()
+                _state.update {
+                    it.copy(playlists = kept, offlineAudioFiles = buildOfflineAudioItems(kept))
+                }
+                recordCloudSyncChanges()
+                notify(cleanup.message())
+            }
+            // On start: ask the server whether this session is still the one it issued, and renew
+            // it if expiry is inside a week. Throttled to once a day inside refreshSession, because
+            // renewing kills the old token and doing that per request would be self-inflicted
+            // sign-out. A lost session is reported before any sync is attempted on top of it.
+            if (cloudSync.connected) refreshSyncSession()
+            if (cloudSync.autoSyncEnabled && cloudSync.connected && cloudSync.hasRecoveryKey) {
+                runCloudSync(showMessages = false)
+            }
+        }
         // Read the snapshot list off the main thread. No snapshot is taken just for opening the
         // app: a launch that changed nothing would only push a real earlier version out of the
         // ten kept. Every store write schedules one, and "Back up now" writes on demand.
@@ -406,26 +408,6 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             _state.update { it.copy(managedBackups = it.managedBackups.copy(backups = kept)) }
         }
         refreshDeviceStatus()
-        if (spotify.connected) loadProfile()
-        if (soundcloud.connected) loadSoundcloudProfile()
-        if (cloudSync.autoSyncEnabled && cloudSync.connected && cloudSync.hasRecoveryKey) {
-            runCloudSync(showMessages = false)
-        }
-        // If the user left auto-import on and YouTube is already connected (after an upgrade or
-        // process restart), do a quiet background refresh. This is a pull, not a mutation of any
-        // remote account: it just adds newly discovered videos to local playlists.
-        if (youtubeData.connected && youtubePrefs.getBoolean("auto_import", true)) {
-            viewModelScope.launch { runCatching { runYouTubeImport(showMessages = false) } }
-        }
-        // Renew the saved Google access token in the background. Nothing here can sign the
-        // listener out: a failure only changes the status line on the Connect tab, and the tokens
-        // stay put for a one-tap reconnect.
-        if (youtubeData.oauthConnected) {
-            viewModelScope.launch {
-                youtubeData.warmUp()
-                _state.update { it.copy(youtubeAuth = youtubeData.authHealth()) }
-            }
-        }
         viewModelScope.launch {
             LocationWatchService.status.collect { live -> _state.update { it.copy(watchStatus = live) } }
         }
@@ -467,18 +449,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     fun refreshDeviceStatus() {
         _state.update {
             it.copy(
-                spotifyAppInstalled = apps.spotifyInstalled,
-                soundcloudAppInstalled = apps.soundcloudInstalled,
-                youtubeAppInstalled = apps.youtubeMusicPackage != null,
-                spotifyConnected = spotify.connected,
-                soundcloudConnected = soundcloud.connected,
                 jellyfinConnected = jellyfin.connected,
-                youtubeDataConnected = youtubeData.connected,
-                youtubeDataAccount = youtubeData.accountName,
-                youtubeOAuthClientId = youtubeData.oauthClientId,
-                youtubeAutoImportEnabled = youtubePrefs.getBoolean("auto_import", true),
-                youtubeLastImportedAt = youtubePrefs.getLong("last_imported_at", 0L),
-                youtubeAuth = youtubeData.authHealth(),
                 syncServer = cloudSync.serverUrl,
                 syncEffectiveServer = cloudSync.effectiveServerUrl,
                 syncUsingCustomServer = cloudSync.isUsingCustomServer,
@@ -487,6 +458,9 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 syncHasRecoveryKey = cloudSync.hasRecoveryKey,
                 syncAutoEnabled = cloudSync.autoSyncEnabled,
                 syncLastSyncAt = cloudSync.lastSyncAt,
+                syncSessionId = cloudSync.sessionId,
+                syncSessionExpiresAt = cloudSync.sessionExpiresAt,
+                syncRollbackWarning = cloudSync.hasRollbackWarning,
                 syncPendingChanges = cloudSync.pendingChangeCount()
             )
         }
@@ -505,95 +479,6 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             } finally {
                 _state.update { it.copy(locating = false) }
             }
-        }
-    }
-
-    fun beginSpotify(clientId: String): Uri {
-        val uri = spotify.beginSignIn(clientId)
-        _state.update { it.copy(spotifyClientId = spotify.clientId, spotifyConnected = spotify.connected) }
-        return uri
-    }
-
-    fun cancelSpotify() = spotify.cancelSignIn()
-
-    fun finishSpotify(uri: Uri) {
-        if (_state.value.connecting) return
-        _state.update { it.copy(connecting = true) }
-        viewModelScope.launch {
-            try {
-                spotify.finishSignIn(uri)
-                _state.update { it.copy(spotifyConnected = true, spotifyClientId = spotify.clientId) }
-                notify("Spotify connected. Find a track to pin!")
-                loadProfile()
-            } catch (e: Exception) {
-                notify(e.message ?: "Could not connect Spotify.")
-            } finally {
-                _state.update { it.copy(connecting = false, spotifyConnected = spotify.connected) }
-            }
-        }
-    }
-
-    private fun loadProfile() {
-        viewModelScope.launch {
-            // The connection still works when profile lookup is unavailable/offline.
-            val name = runCatching { spotify.profileName() }.getOrNull()
-            _state.update { it.copy(spotifyName = name, spotifyConnected = spotify.connected) }
-        }
-    }
-
-    fun disconnectSpotify() {
-        spotify.disconnect()
-        _state.update {
-            it.copy(spotifyConnected = false, spotifyName = null, results = emptyList(), searchError = null)
-        }
-        notify("Spotify disconnected on this device.")
-    }
-
-    fun beginSoundcloud(clientId: String, clientSecret: String): Uri {
-        val uri = soundcloud.beginSignIn(clientId, clientSecret)
-        _state.update {
-            it.copy(soundcloudClientId = soundcloud.clientId, soundcloudConnected = soundcloud.connected)
-        }
-        return uri
-    }
-
-    fun cancelSoundcloud() = soundcloud.cancelSignIn()
-
-    fun finishSoundcloud(uri: Uri) {
-        if (_state.value.connectingSoundcloud) return
-        _state.update { it.copy(connectingSoundcloud = true) }
-        viewModelScope.launch {
-            try {
-                soundcloud.finishSignIn(uri)
-                _state.update { it.copy(soundcloudConnected = true, soundcloudClientId = soundcloud.clientId) }
-                notify("SoundCloud connected. Find a track to pin!")
-                loadSoundcloudProfile()
-            } catch (e: Exception) {
-                notify(e.message ?: "Could not connect SoundCloud.")
-            } finally {
-                _state.update { it.copy(connectingSoundcloud = false, soundcloudConnected = soundcloud.connected) }
-            }
-        }
-    }
-
-    private fun loadSoundcloudProfile() {
-        viewModelScope.launch {
-            // The connection still works when profile lookup is unavailable/offline.
-            val name = runCatching { soundcloud.profileName() }.getOrNull()
-            _state.update { it.copy(soundcloudName = name, soundcloudConnected = soundcloud.connected) }
-        }
-    }
-
-    fun disconnectSoundcloud() {
-        // Clear local state first; the server-side sign-out is best-effort and only
-        // invalidates the exact token captured here, so it cannot race a reconnect.
-        val previous = soundcloud.disconnect()
-        _state.update {
-            it.copy(soundcloudConnected = false, soundcloudName = null, results = emptyList(), searchError = null)
-        }
-        notify("SoundCloud disconnected on this device.")
-        if (previous != null) {
-            viewModelScope.launch { soundcloud.revokeAccessToken(previous) }
         }
     }
 
@@ -644,7 +529,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             it.copy(
                 jellyfinConnected = false,
                 jellyfinName = "",
-                results = if (it.searchProvider == SearchProvider.JELLYFIN) emptyList() else it.results,
+                results = emptyList(),
                 searchError = null
             )
         }
@@ -690,7 +575,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         hub.playPlaylistItem(item, playlist.items, playlist.name)
     }
 
-    /** Plays a search result; a preview URL the search already resolved is used as it stands. */
+    /** Plays a search result from the listener's own Jellyfin server. */
     fun playTrackResult(track: TrackResult) {
         hub.playEntry(
             QueueEntry(
@@ -698,8 +583,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 title = track.title,
                 artist = track.artist,
                 provider = track.provider,
-                url = track.url,
-                streamUrl = track.playableUrl
+                url = track.url
             )
         )
     }
@@ -736,8 +620,8 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
      * Takes a request — typed, or what the microphone heard — and answers it.
      *
      * A description of a feeling goes to the mood reader, which is what that engine is for. A
-     * song goes to the listener's own library first, and then — when a Google account is
-     * connected — to YouTube's music catalogue, so the request works even for songs that were
+     * song goes to the listener's own library first, and then — when a Jellyfin server is
+     * connected — to that server's catalogue, so the request works even for songs that were
      * never saved here. Whatever is found is played through the same single player as everything
      * else, queued in the order it is listed.
      */
@@ -748,8 +632,8 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             answer("Say or type what you would like to hear.", emptyList(), said)
             return
         }
-        // "find music on Spotify that fits: rainy sunday" is the request the Mood tab builds for
-        // a model, so the same sentence typed or spoken here goes the same way: the service it
+        // "find music on Jellyfin that fits: rainy sunday" is the request the Mood tab builds for
+        // a model, so the same sentence typed or spoken here goes the same way: the place it
         // names becomes the reading's target, and the words after "that fits" become the mood —
         // rather than the whole sentence being searched for as if it were a song title.
         AssistantParser.findMusic(said)?.let { find ->
@@ -795,23 +679,22 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         viewModelScope.launch {
             val snapshot = _state.value
             val mine = AssistantLibrary.search(request, snapshot.pins, snapshot.playlists)
-            // A request that named somewhere else — "the xx on Spotify" — is about that service,
-            // not YouTube, so the catalogue is left alone and the library answers on its own.
-            val wantsYouTube = request.provider == null ||
-                request.provider == MusicProvider.YOUTUBE ||
-                request.provider == MusicProvider.YOUTUBE_MUSIC
-            val searched = youtubeData.connected && wantsYouTube
+            // A request that named a place to look — "the xx on jellyfin" — is honoured; anything
+            // else searches the listener's own server too, since that is the only catalogue left.
+            val wantsServer = request.provider == null ||
+                request.provider == MusicProvider.JELLYFIN
+            val searched = jellyfin.connected && wantsServer
             var failure: String? = null
             val found = if (searched) {
                 try {
                     // One look at the request as it was understood; a title that a command word
                     // was hiding ("Play That Funky Music") gets a second look as it was said,
                     // but only when the first found nothing at all.
-                    var hits = withContext(Dispatchers.IO) { youtubeData.searchCatalogue(request.phrase) }
+                    var hits = withContext(Dispatchers.IO) { jellyfin.searchTracks(request.phrase) }
                     if (hits.isEmpty() && request.spoken.isNotBlank() &&
                         !request.spoken.equals(request.phrase, ignoreCase = true)
                     ) {
-                        hits = withContext(Dispatchers.IO) { youtubeData.searchCatalogue(request.spoken) }
+                        hits = withContext(Dispatchers.IO) { jellyfin.searchTracks(request.spoken) }
                     }
                     hits.map { track ->
                         AssistantHit(
@@ -819,14 +702,13 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                             artist = track.artist,
                             provider = track.provider,
                             detail = track.provider.label,
-                            url = track.url,
-                            musicUrl = track.url
+                            url = track.url
                         )
                     }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    failure = e.message ?: "YouTube search is unavailable."
+                    failure = e.message ?: "Your Jellyfin server could not be searched."
                     emptyList()
                 }
             } else emptyList()
@@ -979,7 +861,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                         librarySize = candidates.size,
                         untaggedCount = untagged,
                         error = if (mix.isEmpty() && search.hits.isEmpty()) {
-                            "Nothing in your library yet — add a song or a link, or search YouTube Music below."
+                            "Nothing in your library yet — add a song from your Jellyfin server, or attach audio you own."
                         } else null,
                         queueIndex = -1,
                         queuePlaying = false
@@ -1352,7 +1234,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                     aiReady = moodAi.configured,
                     aiNote = when {
                         url.isBlank() -> null
-                        normalized == null -> "That does not look like an address. Try http://192.168.0.20:11434"
+                        normalized == null -> "That does not look like an address. Try https://192.168.0.20:11434"
                         else -> "Using ${MoodAiUrls.display(normalized)}"
                     }
                 )
@@ -1388,9 +1270,8 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             when (target) {
                 MoodSearchTarget.LIBRARY ->
                     "Readings will pick from your own pins and playlists."
-                MoodSearchTarget.YOUTUBE_MUSIC ->
-                    "Readings will name songs on YouTube Music; those rows open that app."
-                else -> "Readings will look ${target.phrase} and play what the search finds."
+                MoodSearchTarget.JELLYFIN ->
+                    "Readings will look ${target.phrase} and play what the search finds."
             }
         )
     }
@@ -1411,21 +1292,10 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     fun playAllMoodFound() {
         val playable = AssistantAnswer.playable(_state.value.mood.found)
         if (playable.isEmpty()) {
-            notify("Nothing in these findings plays on this phone — open one in its own app instead.")
+            notify("Nothing in these findings can play on this phone yet.")
             return
         }
         hub.play(playable.map { it.toQueueEntry() }, 0)
-    }
-
-    /**
-     * Opens a found song where it lives, for the rows this app cannot start itself — a YouTube
-     * Music suggestion, or a catalogue hit whose full version belongs to that app.
-     */
-    fun openMoodFound(hit: AssistantHit) {
-        val url = hit.musicUrl ?: hit.url
-        if (url.isNullOrBlank() || !apps.openWeb(url)) {
-            notify("Nothing on this phone can open that link.")
-        }
     }
 
     /**
@@ -1514,7 +1384,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 return
             }
         } else if (MoodAiUrls.normalize(mood.ollamaUrl) == null) {
-            notify("Add your Ollama server's address first, for example http://192.168.0.20:11434.")
+            notify("Add your Ollama server's address first, for example https://192.168.0.20:11434.")
             return
         }
         if (!openAi) moodPrefs.aiProvider = MoodAiProvider.OLLAMA
@@ -1734,7 +1604,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     private fun missingProviderSetting(provider: MoodAiProvider): String = when (provider) {
         MoodAiProvider.ON_DEVICE -> "The on-device engine needs nothing."
         MoodAiProvider.OLLAMA ->
-            "Add your Ollama server's address (for example http://192.168.0.20:11434). " +
+            "Add your Ollama server's address (for example https://192.168.0.20:11434). " +
                 "Reading on-device until then."
         MoodAiProvider.OPENAI_COMPATIBLE -> when {
             MoodAiUrls.normalizeOpenAi(moodPrefs.openAiUrl) == null ->
@@ -1747,13 +1617,6 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         }
         MoodAiProvider.GEMINI ->
             "Paste a Google AI Studio API key to use ${provider.short}. Reading on-device until then."
-    }
-
-    /** Hands the current mood's search phrases to YouTube Music; never needs a Google sign-in. */
-    fun openMoodInYouTubeMusic(): Boolean {
-        val profile = _state.value.mood.profile
-        val query = profile?.query.orEmpty().ifBlank { _state.value.mood.text }
-        return apps.searchYouTubeMusicForMood(query)
     }
 
     /** Every song the mood engine can choose from: pins first, then each playlist. */
@@ -1823,234 +1686,38 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     fun jellyfinServerUrl(): String = jellyfin.serverUrl
 
     /**
-     * Starts the browser OAuth flow with the user's own Desktop client ID (no GMS needed).
-     * A blank [clientId] means "reconnect with the Client ID this device already remembers",
-     * which is what the Connect tab's one-tap reconnect uses — the ID is never re-typed.
+     * Searches the one catalogue this app still connects to: the listener's own Jellyfin server.
+     *
+     * There is no provider to choose any more, so there is no provider switcher either — the
+     * Search tab asks the server the Connect tab is signed in to, and says so when there is none.
      */
-    fun beginYouTubeOAuth(clientId: String): Uri {
-        val uri = youtubeData.beginOAuthSignIn(clientId)
-        _state.update { it.copy(youtubeOAuthClientId = youtubeData.oauthClientId) }
-        return uri
-    }
-
-    fun cancelYouTubeOAuth() = youtubeData.cancelOAuthSignIn()
-
-    /** Finishes the browser OAuth flow after Google redirects back to the app. */
-    fun finishYouTubeOAuth(uri: Uri) {
-        if (_state.value.connectingYouTubeOAuth) return
-        _state.update { it.copy(connectingYouTubeOAuth = true) }
-        viewModelScope.launch {
-            try {
-                val label = youtubeData.finishOAuthSignIn(uri)
-                _state.update {
-                    it.copy(
-                        youtubeDataConnected = true,
-                        youtubeDataAccount = label,
-                        youtubeOAuthClientId = youtubeData.oauthClientId,
-                        youtubeAuth = youtubeData.authHealth(),
-                        youtubeAutoImportEnabled = youtubePrefs.getBoolean("auto_import", true),
-                        youtubeLastImportedAt = youtubePrefs.getLong("last_imported_at", 0L)
-                    )
-                }
-                notify("YouTube read-only access connected. Playlists will import automatically if that option is on.")
-                maybeAutoImportYouTube()
-            } catch (e: YouTubeReconnectRequiredException) {
-                notify(e.message ?: "Google no longer accepts this connection. Reconnect to continue.")
-                _state.update {
-                    it.copy(
-                        youtubeDataConnected = youtubeData.connected,
-                        youtubeDataAccount = youtubeData.accountName,
-                        youtubeOAuthClientId = youtubeData.oauthClientId,
-                        youtubeAuth = youtubeData.authHealth()
-                    )
-                }
-            } catch (e: Exception) {
-                _state.update {
-                    it.copy(
-                        youtubeDataConnected = youtubeData.connected,
-                        youtubeDataAccount = youtubeData.accountName,
-                        youtubeOAuthClientId = youtubeData.oauthClientId
-                    )
-                }
-                notify(e.message ?: "Could not connect your YouTube account.")
-            } finally {
-                _state.update {
-                    it.copy(
-                        connectingYouTubeOAuth = false,
-                        youtubeDataConnected = youtubeData.connected,
-                        youtubeDataAccount = youtubeData.accountName,
-                        youtubeOAuthClientId = youtubeData.oauthClientId,
-                        youtubeAuth = youtubeData.authHealth()
-                    )
-                }
-            }
-        }
-    }
-
-    fun disconnectYouTubeData() {
-        // Clear local state first; the server-side revocation is best-effort and only
-        // invalidates the exact token captured here, so it cannot race a reconnect.
-        val previousOAuth = youtubeData.disconnect()
-        _state.update {
-            it.copy(
-                youtubeDataConnected = false,
-                youtubeDataAccount = null,
-                youtubeImporting = false,
-                youtubeAuth = youtubeData.authHealth(),
-                results = if (it.searchProvider == SearchProvider.YOUTUBE_DATA) emptyList() else it.results,
-                searchError = null
-            )
-        }
-        notify("YouTube access disconnected on this device; Google was asked to revoke the grant.")
-        if (previousOAuth != null) {
-            viewModelScope.launch { youtubeData.revokeOAuthToken(previousOAuth) }
-        }
-    }
-
-    fun setYouTubeAutoImport(enabled: Boolean) {
-        youtubePrefs.edit().putBoolean("auto_import", enabled).apply()
-        _state.update { it.copy(youtubeAutoImportEnabled = enabled) }
-    }
-
-    /**
-     * Pulls playlists and their videos from the connected YouTube account and merges them into
-     * Soundtrail playlists. Deterministic ids (yt-pl:<playlistId> and yt:<playlistId>:<videoId>)
-     * keep re-imports idempotent: previously imported playlists keep existing items (including
-     * offline files) and only newly discovered videos are appended. YouTube Music library-only
-     * collections (saved songs/albums/mixes) are not reachable via the public Data API and are
-     * therefore not imported; the notice text makes that clear.
-     */
-    fun importYouTubePlaylists() = runYouTubeImport(showMessages = true)
-
-    private fun runYouTubeImport(showMessages: Boolean) {
-        if (_state.value.youtubeImporting) return
-        if (!youtubeData.connected) {
-            if (showMessages) notify("Connect your Google account before importing YouTube playlists.")
-            return
-        }
-        _state.update { it.copy(youtubeImporting = true) }
-        viewModelScope.launch {
-            try {
-                val imported: List<YouTubeImportedPlaylist> = withContext(Dispatchers.IO) { youtubeData.importPlaylists() }
-                val now = System.currentTimeMillis()
-                // One list for likes, whichever account they came from: an import goes into the
-                // liked list that already exists (whatever it is called) rather than creating a
-                // second one beside it.
-                val existingLikes = playlists.all()
-                    .firstOrNull { LikedSongs.isLikedName(it.name) && !it.id.startsWith("yt-pl:") }
-                    ?: playlists.all().firstOrNull { LikedSongs.isLikedName(it.name) }
-                val incoming = imported.map { yt ->
-                    val isLikes = yt.title == "Liked videos"
-                    val distinctName = when {
-                        isLikes -> LikedSongs.NAME
-                        yt.title == "Uploads" -> "YouTube Uploads"
-                        yt.title == "Favorites" -> "YouTube Favorites"
-                        else -> yt.title
-                    }
-                    Playlist(
-                        id = if (isLikes) existingLikes?.id ?: "yt-pl:${yt.playlistId}" else "yt-pl:${yt.playlistId}",
-                        name = distinctName,
-                        items = yt.items.map { video ->
-                            PlaylistItem(
-                                id = "yt:${yt.playlistId}:${video.videoId}",
-                                title = video.title,
-                                artist = video.artist,
-                                url = "https://www.youtube.com/watch?v=${video.videoId}",
-                                provider = MusicProvider.YOUTUBE,
-                                createdAt = now
-                            )
-                        },
-                        createdAt = now
-                    )
-                }
-                val (addedLists, addedItems) = withContext(Dispatchers.IO) { playlists.merge(incoming) }
-                // One list holds likes: a list an earlier import made is folded into the
-                // listener's own (or into the newest import's), and a name the app chose is
-                // renamed to what the list holds. Every row keeps the provider it came from.
-                runCatching {
-                    val lists = playlists.all()
-                    val target = lists.firstOrNull { LikedSongs.isLikedName(it.name) }
-                    if (target != null) {
-                        val (consolidated, moved) = consolidateLikes(lists, target.id)
-                        val renamed = consolidated.map {
-                            if (it.id == target.id && LikedSongs.isImportedName(it.name)) {
-                                it.copy(name = LikedSongs.NAME)
-                            } else {
-                                it
-                            }
-                        }
-                        val changed = moved > 0 || renamed != lists
-                        if (changed) playlists.replaceAll(renamed)
-                    }
-                }
-                youtubePrefs.edit().putLong("last_imported_at", now).apply()
-                refreshOfflineAudioState()
-                recordCloudSyncChanges()
-                _state.update {
-                    it.copy(
-                        playlists = playlists.all(),
-                        youtubeLastImportedAt = now,
-                        youtubeImporting = false
-                    )
-                }
-                if (showMessages) {
-                    val note = buildString {
-                        append("Imported ${incoming.size} YouTube playlist")
-                        if (incoming.size != 1) append('s')
-                        append(" — ${addedItems.coerceAtLeast(0)} new song")
-                        if (addedItems != 1) append('s')
-                        append(" added.")
-                    }
-                    notify(note)
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                _state.update { it.copy(youtubeImporting = false) }
-                if (showMessages) notify(e.message ?: "Could not import YouTube playlists.")
-            }
-        }
-    }
-
-    /** Called after a successful YouTube connect to optionally start an automatic import. */
-    private fun maybeAutoImportYouTube() {
-        if (youtubePrefs.getBoolean("auto_import", true)) runYouTubeImport(showMessages = true)
-    }
-
-    fun selectSearchProvider(provider: SearchProvider) {
-        if (_state.value.searchProvider == provider) return
-        _state.update { it.copy(searchProvider = provider, results = emptyList(), searchError = null) }
-    }
-
     fun search(query: String) {
         if (_state.value.searching) return
         if (query.isBlank()) {
             _state.update { it.copy(results = emptyList(), searchError = null) }
             return
         }
-        val provider = _state.value.searchProvider
+        if (!jellyfin.connected) {
+            _state.update {
+                it.copy(
+                    results = emptyList(),
+                    searchError = "Connect your Jellyfin server on the Connect tab to search its library."
+                )
+            }
+            return
+        }
         _state.update { it.copy(searching = true, results = emptyList(), searchError = null) }
         viewModelScope.launch {
             try {
-                val tracks = when (provider) {
-                    SearchProvider.SPOTIFY -> spotify.searchTracks(query)
-                    SearchProvider.SOUNDCLOUD -> soundcloud.searchTracks(query)
-                    SearchProvider.JELLYFIN -> jellyfin.searchTracks(query)
-                    SearchProvider.YOUTUBE_DATA -> youtubeData.searchTracks(query)
-                }
+                val tracks = withContext(Dispatchers.IO) { jellyfin.searchTracks(query) }
                 _state.update { it.copy(results = tracks) }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _state.update { it.copy(searchError = e.message ?: "Search is unavailable.") }
             } finally {
                 _state.update {
-                    it.copy(
-                        searching = false,
-                        spotifyConnected = spotify.connected,
-                        soundcloudConnected = soundcloud.connected,
-                        jellyfinConnected = jellyfin.connected,
-                        youtubeDataConnected = youtubeData.connected,
-                        youtubeDataAccount = youtubeData.accountName
-                    )
+                    it.copy(searching = false, jellyfinConnected = jellyfin.connected)
                 }
             }
         }
@@ -2143,7 +1810,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             title.isEmpty() -> { notify("Add a song title first."); return }
             playlist == null -> { notify("That playlist no longer exists."); return }
             rawUrl.trim().isNotBlank() && link == null -> {
-                notify("That link is not a supported song URL. Leave it empty or add a valid Spotify, SoundCloud, YouTube Music, or Jellyfin link.")
+                notify("That link is not a song this app can play. Leave it empty, or pick a song from your Jellyfin server.")
                 return
             }
         }
@@ -2265,12 +1932,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             } finally {
                 _state.update { it.copy(offlineAudioBusy = false) }
             }
-
         }
-    }
-
-    fun setAutoSearchYoutube(enabled: Boolean) {
-        _state.update { it.copy(autoSearchYoutube = enabled) }
     }
 
     fun removeOfflineAudio(playlistId: String, itemId: String) {
@@ -2448,7 +2110,10 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                         syncPendingChanges = cloudSync.pendingChangeCount(),
                         syncFailed = false,
                         syncError = null,
-                        syncRecoveryKey = recoveryKey
+                        syncRecoveryKey = recoveryKey,
+                        syncSessionId = cloudSync.sessionId,
+                        syncSessionExpiresAt = cloudSync.sessionExpiresAt,
+                        syncRollbackWarning = cloudSync.hasRollbackWarning
                     )
                 }
                 notify("Sync account created. Save the recovery key shown on the Connect tab before leaving this device.")
@@ -2482,7 +2147,10 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                         syncPendingChanges = cloudSync.pendingChangeCount(),
                         syncFailed = false,
                         syncError = null,
-                        syncRecoveryKey = null
+                        syncRecoveryKey = null,
+                        syncSessionId = cloudSync.sessionId,
+                        syncSessionExpiresAt = cloudSync.sessionExpiresAt,
+                        syncRollbackWarning = cloudSync.hasRollbackWarning
                     )
                 }
                 notify(if (cloudSync.hasRecoveryKey) "Sync account connected." else "Account connected. Enter your saved recovery key to sync this device.")
@@ -2525,6 +2193,223 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
 
     fun dismissCloudRecoveryKey() = _state.update { it.copy(syncRecoveryKey = null) }
 
+    /**
+     * Asks the server whether this device's session is still the one it issued, and renews it when
+     * expiry is inside a week.
+     *
+     * Called on app start and before every sync. The throttle to once a day lives in
+     * [CloudSyncService.refreshSession], because renewing invalidates the old token the moment the
+     * server answers — doing it per request would be a self-inflicted sign-out.
+     *
+     * A network failure here is deliberately quiet: the check is an optimisation, and the sync that
+     * follows reports its own failures. A *lost* session is not quiet, because every later request
+     * would fail against a token the server has already revoked.
+     */
+    private suspend fun refreshSyncSession(force: Boolean = false) {
+        if (!cloudSync.connected) return
+        val outcome = try {
+            withContext(Dispatchers.IO) { cloudSync.refreshSession(force) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return
+        }
+        _state.update {
+            it.copy(
+                syncSessionId = cloudSync.sessionId,
+                syncSessionExpiresAt = cloudSync.sessionExpiresAt
+            )
+        }
+        if (outcome == SessionRenewal.Lost) {
+            cloudSync.forgetSession()
+            _state.update {
+                it.copy(
+                    syncConnected = false,
+                    syncSessionId = null,
+                    syncSessions = emptyList(),
+                    syncError = "Your sync session ended. Sign in again to keep syncing.",
+                    syncFailed = false
+                )
+            }
+            notify("Your sync session ended on the server. Sign in again — your library on this device is untouched.")
+        }
+    }
+
+    /** The account's signed-in devices, newest first. Ids and dates only; never a token. */
+    fun loadSyncSessions() {
+        if (_state.value.syncSessionsLoading || !cloudSync.connected) return
+        _state.update { it.copy(syncSessionsLoading = true, syncSessionsError = null) }
+        viewModelScope.launch {
+            try {
+                val list = withContext(Dispatchers.IO) { cloudSync.sessions() }
+                _state.update { it.copy(syncSessions = list.sessions) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(syncSessionsError = e.message ?: "Could not list the signed-in devices.")
+                }
+            } finally {
+                _state.update { it.copy(syncSessionsLoading = false) }
+            }
+        }
+    }
+
+    /**
+     * Signs one device out.
+     *
+     * If the id turns out to be this device's — which the server says with `signedOut` — this
+     * handles it exactly like signing out here: the credentials go, the local library stays.
+     */
+    fun signOutSyncSession(sessionId: String) {
+        if (_state.value.syncBusy) return
+        _state.update { it.copy(syncBusy = true) }
+        viewModelScope.launch {
+            try {
+                when (val outcome = withContext(Dispatchers.IO) { cloudSync.signOutSession(sessionId) }) {
+                    SessionSignOut.RevokedOther -> {
+                        notify("That device was signed out.")
+                        val list = withContext(Dispatchers.IO) { cloudSync.sessions() }
+                        _state.update { it.copy(syncSessions = list.sessions, syncSessionsError = null) }
+                    }
+                    SessionSignOut.SignedOutThisDevice -> {
+                        _state.update {
+                            it.copy(
+                                syncConnected = false,
+                                syncHasRecoveryKey = cloudSync.hasRecoveryKey,
+                                syncSessions = emptyList(),
+                                syncSessionId = null,
+                                syncRecoveryKey = null
+                            )
+                        }
+                        notify("That was this device's own session, so this device is signed out too. Your library here is untouched.")
+                    }
+                    is SessionSignOut.Refused -> notify(outcome.message)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                notify(e.message ?: "Could not sign that device out.")
+            } finally {
+                _state.update { it.copy(syncBusy = false) }
+            }
+        }
+    }
+
+    /**
+     * Changes the account password.
+     *
+     * The server signs every session out, this one included, and the token in its response is the
+     * only one still working — [CloudSyncService.changePassword] stores that pair before it
+     * returns, so the success message below is never claiming a state the app does not have.
+     *
+     * An unknown outcome claims neither success nor failure. The server may have changed the
+     * password and revoked this device, or may never have seen the request, so the answer comes
+     * from asking the server rather than from guessing.
+     */
+    fun changeSyncPassword(current: String, next: String, confirm: String) {
+        if (_state.value.syncPasswordBusy) return
+        if (next != confirm) {
+            notify("The two new passwords do not match.")
+            return
+        }
+        _state.update { it.copy(syncPasswordBusy = true) }
+        viewModelScope.launch {
+            try {
+                when (val outcome = withContext(Dispatchers.IO) { cloudSync.changePassword(current, next) }) {
+                    is PasswordChange.Changed -> {
+                        // The new token and session id are already stored — changePassword writes
+                        // them before it returns — so this state update is a report, not the thing
+                        // that makes the sign-in real.
+                        _state.update {
+                            it.copy(
+                                syncSessionId = cloudSync.sessionId,
+                                syncSessionExpiresAt = cloudSync.sessionExpiresAt,
+                                syncSessions = emptyList(),
+                                syncPasswordDone = System.currentTimeMillis()
+                            )
+                        }
+                        val revoked = if (outcome.revokedSessions > 0) {
+                            " (${outcome.revokedSessions} ${if (outcome.revokedSessions == 1) "session" else "sessions"})"
+                        } else ""
+                        notify(
+                            "Password changed. All other devices have been signed out$revoked. " +
+                                "Your recovery key is unchanged — the password signs you in, it never decrypts anything."
+                        )
+                    }
+                    PasswordChange.WrongCurrentPassword -> notify("That is not your current password.")
+                    is PasswordChange.Refused -> notify(outcome.message)
+                    PasswordChange.Unknown -> {
+                        val check = withContext(Dispatchers.IO) {
+                            runCatching { cloudSync.refreshSession(force = true) }.getOrNull()
+                        }
+                        if (check == SessionRenewal.Lost || !cloudSync.connected) {
+                            cloudSync.forgetSession()
+                            _state.update {
+                                it.copy(syncConnected = false, syncSessions = emptyList(), syncSessionId = null)
+                            }
+                            notify(
+                                "The password change did not come back, and this device is no longer signed in. " +
+                                    "The server may have changed it and signed every device out. Sign in again to " +
+                                    "find out which — your library on this device is untouched."
+                            )
+                        } else {
+                            _state.update {
+                                it.copy(
+                                    syncSessionId = cloudSync.sessionId,
+                                    syncSessionExpiresAt = cloudSync.sessionExpiresAt
+                                )
+                            }
+                            notify(
+                                "The server did not answer, so the password may or may not have changed. This " +
+                                    "device is still signed in. If your other devices ask for a password, use the new one."
+                            )
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                notify(e.message ?: "Could not change the password.")
+            } finally {
+                _state.update { it.copy(syncPasswordBusy = false) }
+            }
+        }
+    }
+
+    /**
+     * Puts the library back on a server whose history went backwards.
+     *
+     * Offered only when [CloudSyncService.sync] reported a rollback, and it is an offer rather than
+     * something the app does on its own: a server restored from a backup is a legitimate thing for
+     * the person who runs it to have done, and re-pushing writes to their server.
+     */
+    fun repushSyncJournal() {
+        if (_state.value.syncRepushBusy) return
+        _state.update { it.copy(syncRepushBusy = true) }
+        viewModelScope.launch {
+            try {
+                val uploaded = withContext(Dispatchers.IO) { cloudSync.repushJournal() }
+                _state.update {
+                    it.copy(
+                        syncRollbackWarning = cloudSync.hasRollbackWarning,
+                        syncPendingChanges = cloudSync.pendingChangeCount()
+                    )
+                }
+                notify(
+                    if (uploaded == 0) "Nothing needed re-pushing — this device has no stored changes."
+                    else "Re-pushed $uploaded encrypted ${if (uploaded == 1) "record" else "records"} to the server."
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                notify(e.message ?: "Could not re-push your library to the server.")
+            } finally {
+                _state.update { it.copy(syncRepushBusy = false) }
+            }
+        }
+    }
+
     fun syncCloudData() = runCloudSync(showMessages = true)
 
     fun setCloudSyncAutoEnabled(enabled: Boolean) {
@@ -2552,6 +2437,10 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         _state.update { it.copy(syncBusy = true, syncError = null, syncFailed = false) }
         viewModelScope.launch {
             try {
+                // Renew before pushing rather than after a 401 has already cost the listener a
+                // sync: the old token is dead the moment the server answers a renewal.
+                refreshSyncSession()
+                if (!cloudSync.connected) return@launch
                 val result = withContext(Dispatchers.IO) { cloudSync.sync() }
                 _state.update {
                     it.copy(
@@ -2563,16 +2452,21 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                         syncLastSyncAt = cloudSync.lastSyncAt,
                         syncPendingChanges = cloudSync.pendingChangeCount(),
                         syncFailed = false,
-                        syncError = result.compactionWarning
+                        syncError = result.compactionWarning ?: result.rollbackWarning,
+                        syncRollbackWarning = cloudSync.hasRollbackWarning
                     )
                 }
                 refreshOfflineAudioState()
                 if (showMessages) {
                     val warning = result.compactionWarning?.let { " History checkpoint warning: $it" }.orEmpty()
+                    // A server whose history went backwards is a warning, not a failure: the sync
+                    // completed, the library here is intact, and restoring a server is a legitimate
+                    // thing for its owner to have done.
+                    val rollback = result.rollbackWarning?.let { " $it" }.orEmpty()
                     notify(
                         "Synced ${counted(result.pins, "pin")}, ${counted(result.playlists, "playlist")}, " +
                             "${counted(result.automations, "automation")}. " +
-                            "${result.uploaded} changes sent, ${result.downloaded} received.$warning"
+                            "${result.uploaded} changes sent, ${result.downloaded} received.$warning$rollback"
                     )
                 }
             } catch (e: Exception) {
@@ -2605,7 +2499,9 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                         syncConnected = false, syncHasRecoveryKey = false,
                         syncEffectiveServer = cloudSync.effectiveServerUrl,
                         syncUsingCustomServer = cloudSync.isUsingCustomServer,
-                        syncRecoveryKey = null, syncLastSyncAt = cloudSync.lastSyncAt
+                        syncRecoveryKey = null, syncLastSyncAt = cloudSync.lastSyncAt,
+                        syncSessions = emptyList(), syncSessionId = null, syncSessionExpiresAt = 0L,
+                        syncRollbackWarning = false
                     )
                 }
                 notify("Signed out of cloud sync on this device. Local pins and playlists are untouched.")
@@ -2627,7 +2523,9 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                         syncEffectiveServer = cloudSync.effectiveServerUrl,
                         syncUsingCustomServer = cloudSync.isUsingCustomServer,
                         syncRecoveryKey = null, syncLastSyncAt = 0L, syncPendingChanges = 0,
-                        syncFailed = false, syncError = null
+                        syncFailed = false, syncError = null,
+                        syncSessions = emptyList(), syncSessionId = null, syncSessionExpiresAt = 0L,
+                        syncRollbackWarning = false
                     )
                 }
                 notify("Sync account and remote encrypted history deleted. This device's library is untouched.")
@@ -2954,7 +2852,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         when {
             input.title.isBlank() -> { notify("Add a song title first."); return false }
             link == null -> {
-                notify("Use a Spotify, SoundCloud, YouTube Music, or Jellyfin song link.")
+                notify("Pick a song from your Jellyfin server, or attach an audio file you own.")
                 return false
             }
             point == null || !point.isValid() -> {

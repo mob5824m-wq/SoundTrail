@@ -1,0 +1,4 @@
+Music now comes from your own Jellyfin server and audio you attach.
+- Spotify, SoundCloud and YouTube are gone: their links, sign-ins and app hand-offs. Pins and songs pointing at them are stripped on upgrade, with a one-time count. A song with audio you attached keeps the file and loses only the link.
+- Sync: list your devices and sign one out, change your password, and the session renews before it expires.
+- Recovery key: no screenshots, sensitive clipboard copy, and unlock to show it again.

@@ -19,13 +19,29 @@ class OllamaClientTest {
     // ----- addresses -----
 
     @Test fun `an address is accepted however it was pasted`() {
-        assertEquals("http://192.168.1.20:11434", MoodAiUrls.normalize("192.168.1.20:11434"))
+        assertEquals("https://192.168.1.20:11434", MoodAiUrls.normalize("192.168.1.20:11434"))
         assertEquals("http://192.168.1.20:11434", MoodAiUrls.normalize("  http://192.168.1.20:11434/  "))
         assertEquals("http://192.168.1.20:11434", MoodAiUrls.normalize("http://192.168.1.20:11434/api/chat"))
         assertEquals("http://192.168.1.20:11434", MoodAiUrls.normalize("http://192.168.1.20:11434/api/tags/"))
         assertEquals("http://192.168.1.20:11434", MoodAiUrls.normalize("http://192.168.1.20:11434/v1/chat/completions"))
-        assertEquals("http://nas.local:11434", MoodAiUrls.normalize("nas.local:11434"))
+        assertEquals("https://nas.local:11434", MoodAiUrls.normalize("nas.local:11434"))
         assertEquals("https://ollama.example.com", MoodAiUrls.normalize("https://ollama.example.com"))
+    }
+
+    @Test fun `a bare host is given https, whatever the address looks like`() {
+        // Plain HTTP is allowed for one integration in this app - the listener's own Jellyfin
+        // server - and a model server is not it, even on a private address.
+        assertEquals("https://192.168.1.20:11434", MoodAiUrls.normalize("192.168.1.20:11434"))
+        assertEquals("https://localhost:11434", MoodAiUrls.normalize("localhost:11434"))
+        assertEquals("https://ollama", MoodAiUrls.normalize("ollama"))
+    }
+
+    @Test fun `a scheme typed as http is kept as typed, not silently upgraded`() {
+        // Upgrading it would hide the mistake: the request would go somewhere the listener never
+        // wrote and fail in a way that points at the server rather than at the address. Kept as
+        // typed, EndpointPolicy refuses it with a sentence naming the host and the scheme it needs.
+        assertEquals("http://192.168.1.20:11434", MoodAiUrls.normalize("http://192.168.1.20:11434"))
+        assertEquals("http://192.168.1.20:11434", MoodAiUrls.normalize("http://192.168.1.20:11434/api/chat"))
     }
 
     @Test fun `a path prefix in front of the server is kept`() {
@@ -185,14 +201,14 @@ class OllamaClientTest {
         val prompt = MoodAiPrompts.full(
             "tired but I want something warm for the drive home",
             MoodContext(hourOfDay = 17, energyHint = 0.55, motion = "Driving"),
-            MoodSearchTarget.YOUTUBE
+            MoodSearchTarget.JELLYFIN
         )
         assertTrue(prompt.contains("tired but I want something warm for the drive home"))
-        // The request it is asked to answer, naming the service the listener picked.
+        // The request it is asked to answer, naming the place the listener picked.
         assertTrue(prompt.startsWith("You are the music finder inside a music app"))
         assertTrue(
             prompt.contains(
-                "find music on YouTube that fits: \"tired but I want something warm for the drive home\""
+                "find music on your Jellyfin server that fits: \"tired but I want something warm for the drive home\""
             )
         )
         assertTrue(prompt.contains("JSON only"))
@@ -223,7 +239,7 @@ class OllamaClientTest {
         val prompt = MoodAiPrompts.full(
             "something happy",
             MoodContext(),
-            MoodSearchTarget.SOUNDCLOUD
+            MoodSearchTarget.JELLYFIN
         )
         assertFalse(prompt.contains("Local time"))
         assertFalse(prompt.contains("They are "))

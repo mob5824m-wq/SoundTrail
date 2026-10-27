@@ -40,14 +40,23 @@ class OpenAiCompatibleClientTest {
         )
     }
 
-    @Test fun `a machine on the listener's network is assumed to speak plain http`() {
-        assertEquals("http://192.168.0.20:8000/v1", MoodAiUrls.normalizeOpenAi("192.168.0.20:8000"))
-        assertEquals("http://192.168.0.20:8000/v1", MoodAiUrls.normalizeOpenAi("http://192.168.0.20:8000/v1"))
-        assertEquals("http://localhost:8080/v1", MoodAiUrls.normalizeOpenAi("localhost:8080/v1"))
-        assertEquals("http://nas.local:8000/v1", MoodAiUrls.normalizeOpenAi("nas.local:8000"))
-        assertEquals("http://myserver:8000/v1", MoodAiUrls.normalizeOpenAi("myserver:8000"))
-        // A public host with a port is still public, and this provider sends a key to it.
+    @Test fun `a bare host is given https, including one on the listener's own network`() {
+        // This provider sends an API key to whatever is on the other end, and a private address is
+        // not a promise about who is listening on it: 192.168.0.20 can be a flatmate's laptop, a
+        // printer with a web server, or a network the phone joined somewhere else. Plain HTTP is
+        // allowed for exactly one integration in this app, and it is the Jellyfin server.
+        assertEquals("https://192.168.0.20:8000/v1", MoodAiUrls.normalizeOpenAi("192.168.0.20:8000"))
+        assertEquals("https://localhost:8080/v1", MoodAiUrls.normalizeOpenAi("localhost:8080/v1"))
+        assertEquals("https://nas.local:8000/v1", MoodAiUrls.normalizeOpenAi("nas.local:8000"))
+        assertEquals("https://myserver:8000/v1", MoodAiUrls.normalizeOpenAi("myserver:8000"))
         assertEquals("https://api.example.com:8443/v1", MoodAiUrls.normalizeOpenAi("api.example.com:8443"))
+    }
+
+    @Test fun `a scheme typed as http is kept as typed, not silently upgraded`() {
+        // The listener wrote it, so it is kept and refused at request time with a sentence that
+        // names the host and the scheme it needs. Quietly rewriting the address would send the
+        // request somewhere nobody typed and make the failure look like the server's.
+        assertEquals("http://192.168.0.20:8000/v1", MoodAiUrls.normalizeOpenAi("http://192.168.0.20:8000/v1"))
     }
 
     @Test fun `junk is rejected rather than turned into a request to nowhere`() {
@@ -207,8 +216,8 @@ class OpenAiCompatibleClientTest {
 
     @Test fun `the two routes this provider uses are built from the base`() {
         val base = MoodAiUrls.normalizeOpenAi("192.168.0.20:8000")!!
-        assertEquals("http://192.168.0.20:8000/v1/chat/completions", MoodAiUrls.openAiChatUrl(base))
-        assertEquals("http://192.168.0.20:8000/v1/models", MoodAiUrls.openAiModelsUrl(base))
+        assertEquals("https://192.168.0.20:8000/v1/chat/completions", MoodAiUrls.openAiChatUrl(base))
+        assertEquals("https://192.168.0.20:8000/v1/models", MoodAiUrls.openAiModelsUrl(base))
     }
 
     // ----- model names -----

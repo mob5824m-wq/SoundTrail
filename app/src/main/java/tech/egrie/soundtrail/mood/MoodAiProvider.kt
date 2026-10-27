@@ -114,7 +114,11 @@ internal object MoodAiUrls {
     fun normalize(input: String): String? {
         val typed = input.trim()
         if (typed.isBlank()) return null
-        val withScheme = if (typed.contains("://")) typed else "http://$typed"
+        // A bare host is given https:// whatever it looks like. Plain HTTP is allowed for exactly
+        // one integration in this app — the listener's own Jellyfin server — and this is not it. An
+        // address typed with an explicit http:// is kept as typed rather than silently upgraded, so
+        // the refusal at request time can name the address the listener actually entered.
+        val withScheme = if (typed.contains("://")) typed else "https://$typed"
         val scheme = withScheme.substringBefore("://").lowercase()
         if (scheme != "http" && scheme != "https") return null
         var value = withScheme.substringAfter("://").trimEnd('/')
@@ -143,17 +147,17 @@ internal object MoodAiUrls {
      * a prefix is part of the address here (`/v1`, or `/openai/v1` behind a proxy), and appends
      * `/v1` when the listener typed only a host, since every one of these APIs lives under it.
      *
-     * A host typed with no scheme defaults to plain HTTP only when it is plainly local — a
-     * loopback name, a private address, `something.local`, or a bare machine name with no dot.
-     * Those are the model servers and bridges people actually run at home, and they usually have
-     * no TLS. Everything else is assumed to be public and HTTPS, because this provider sends a
-     * key to whatever is on the other end.
+     * A host typed with no scheme is given `https://`, including a machine on the listener's own
+     * network. This provider sends an API key to whatever is on the other end, and a private
+     * address is not a promise about who is listening on it — so a model server at home needs a
+     * certificate, or a tunnel that supplies one. An address typed as `http://` is kept as typed and
+     * refused at request time with a sentence that says to use HTTPS, which beats quietly rewriting
+     * it into something the listener never wrote.
      */
     fun normalizeOpenAi(input: String): String? {
         val typed = input.trim()
         if (typed.isBlank()) return null
-        val withScheme =
-            if (typed.contains("://")) typed else "${if (looksLocal(typed)) "http" else "https"}://$typed"
+        val withScheme = if (typed.contains("://")) typed else "https://$typed"
         val scheme = withScheme.substringBefore("://").lowercase()
         if (scheme != "http" && scheme != "https") return null
         var value = withScheme.substringAfter("://").trim()
@@ -252,25 +256,6 @@ internal object MoodAiUrls {
     /** True when an address is Arena's gateway, so the app can offer its keys page. */
     fun isArena(base: String?): Boolean =
         base != null && hostOf(base) == "api.preview.arena.ai"
-
-    /** True when a host with no scheme is plainly a machine on the listener's own network. */
-    private fun looksLocal(input: String): Boolean {
-        val typed = input.substringAfter("://").substringBefore('/')
-        val host = (if (typed.startsWith("[")) {
-            typed.substringBefore(']') + "]"
-        } else {
-            typed.substringBefore(':')
-        }).lowercase()
-        if (host.isBlank()) return false
-        if (host == "localhost" || host == "[::1]" || host == "::1") return true
-        if (host.endsWith(".local") || host.endsWith(".localhost")) return true
-        if (host.startsWith("127.") || host.startsWith("10.") || host.startsWith("192.168.")) return true
-        if (host.startsWith("172.") && host.substringAfter("172.").substringBefore('.').toIntOrNull()
-                ?.let { it in 16..31 } == true
-        ) return true
-        // A bare machine name is a LAN name; a public host nearly always carries a dot.
-        return !host.contains('.') && !host.contains(':')
-    }
 
     fun hostOf(url: String): String =
         url.substringAfter("://").substringBefore('/').substringBefore(':').lowercase()

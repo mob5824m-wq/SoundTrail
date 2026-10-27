@@ -1,0 +1,21 @@
+# Minimal stand-in for the fdroiddata `config.yml`, so `fdroid lint` and
+# fdroidserver's source scanner can run against this repository's recipe in CI and on a
+# developer machine.
+#
+# This is NOT a copy of fdroiddata's configuration. It carries only the two things those
+# commands need to judge one recipe: the identifier lists F-Droid's schema defines
+# (config/categories.yml, config/antiFeatures.yml) and which signature data the scanner
+# should use. F-Droid's own CI validates the submitted recipe against the real
+# configuration in https://gitlab.com/fdroid/fdroiddata; passing here means the recipe is
+# ready to submit, not that it has been accepted.
+#
+# scanner_signature_sources is limited to 'suss' (Suspicious/Unwanted Software Signatures)
+# because that data set ships inside fdroidserver and the check must work offline. Adding
+# 'exodus' or 'etip' here would need network access to those services.
+repo_url: https://f-droid.org/repo
+repo_name: Soundtrail recipe check
+repo_description: Stub configuration used only to lint fdroid/tech.egrie.soundtrail.yml
+repo_icon: fdroid-icon.png
+archive_older: 0
+scanner_signature_sources:
+  - suss

@@ -8,10 +8,10 @@ import org.junit.Test
 import tech.egrie.soundtrail.integrations.MusicProvider
 
 class PlaybackQueueTest {
-    private val track = "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT"
+    private val track = "jellyfin:item:4cOdK2wGLETKBW3PvgPWqT"
 
     private fun entry(id: String) = QueueEntry(
-        mediaId = id, title = id, artist = "Someone", provider = MusicProvider.SPOTIFY, url = track
+        mediaId = id, title = id, artist = "Someone", provider = MusicProvider.JELLYFIN, url = track
     )
 
     private val three = listOf(entry("a"), entry("b"), entry("c"))
@@ -80,7 +80,7 @@ class PlaybackQueueTest {
         assertFalse(bare.hasSource)
         assertTrue(entry("a").hasSource)
         assertTrue(bare.copy(localFile = "1.mp3").hasSource)
-        assertTrue(bare.copy(streamUrl = track).hasSource)
+        assertTrue(bare.copy(url = track).hasSource)
         // The second line of a row prefers the artist, and falls back to where it came from.
         assertEquals("Someone", entry("a").subtitle)
         assertEquals("Trip mix", bare.copy(detail = "Trip mix").subtitle)

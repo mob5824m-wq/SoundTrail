@@ -18,8 +18,8 @@ class AssistantLibraryTest {
         artist = artist,
         place = place,
         note = "",
-        url = "https://open.spotify.com/track/${"a".repeat(22)}",
-        provider = MusicProvider.SPOTIFY,
+        url = "jellyfin:item:${"a".repeat(22)}",
+        provider = MusicProvider.JELLYFIN,
         point = GeoPoint(43.45, -80.49),
         createdAt = 0L
     )
@@ -28,8 +28,8 @@ class AssistantLibraryTest {
         id = id,
         title = title,
         artist = artist,
-        url = "https://soundcloud.com/someone/$title",
-        provider = MusicProvider.SOUNDCLOUD,
+        url = "jellyfin:item:${"b".repeat(22)}",
+        provider = MusicProvider.JELLYFIN,
         createdAt = 0L,
         localFile = offline
     )
@@ -138,15 +138,15 @@ class AssistantLibraryTest {
         val connected = AssistantAnswer.sentence(emptyList(), searched = true, error = null)
         val offline = AssistantAnswer.sentence(emptyList(), searched = false, error = null)
         assertTrue(connected.contains("Nothing matched"))
-        assertTrue(offline.contains("Connect your Google account"))
+        assertTrue(offline.contains("Connect your Jellyfin server"))
     }
 
     @Test
     fun `a search that failed is only worth mentioning when it found nothing`() {
-        val withSongs = AssistantAnswer.sentence(listOf(hit("Sunsets", "The xx")), true, "YouTube said no.")
+        val withSongs = AssistantAnswer.sentence(listOf(hit("Sunsets", "The xx")), true, "The server said no.")
         assertEquals("Playing Sunsets by The xx.", withSongs)
-        val alone = AssistantAnswer.sentence(emptyList(), searched = true, error = "YouTube said no.")
-        assertEquals("YouTube said no.", alone)
+        val alone = AssistantAnswer.sentence(emptyList(), searched = true, error = "The server said no.")
+        assertEquals("The server said no.", alone)
     }
 
     @Test
@@ -177,8 +177,8 @@ class AssistantLibraryTest {
     private fun hit(title: String, artist: String) = AssistantHit(
         title = title,
         artist = artist,
-        provider = MusicProvider.YOUTUBE_MUSIC,
-        detail = "YouTube Music",
-        url = "https://music.youtube.com/watch?v=abcdefghijk"
+        provider = MusicProvider.JELLYFIN,
+        detail = "Jellyfin",
+        url = "jellyfin:item:abcdefghabcdefghabcd"
     )
 }

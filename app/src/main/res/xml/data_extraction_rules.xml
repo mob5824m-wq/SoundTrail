@@ -4,11 +4,23 @@
 
   The same allowlist as backup_rules.xml: the listener's own pins, playlists, and automation
   rules may go to their Google account or travel to a new phone. Credentials (Keystore
-  ciphertext in soundtrail_secrets, the cloud-sync session, Google auth status), server settings,
-  the mood settings and last mood description, the activity-recognition opt-in, audio files, and
-  Soundtrail's own managed snapshots never do. Auto Backup is best-effort and entirely controlled
-  by the phone's system settings; the app's managed snapshots on the Connect tab are the backup
-  that does not depend on it.
+  ciphertext in soundtrail_secrets, and the cloud-sync session), server settings, the mood
+  settings and last mood description, the activity-recognition opt-in, audio files, and
+  Soundtrail's own managed snapshots never do — an <include> makes each block an allowlist,
+  so anything not listed is already out. Auto Backup is best-effort and entirely controlled
+  by the phone's system settings; the app's managed snapshots on the Connect tab are the
+  backup that does not depend on it.
+
+  RULE FOR ANYONE ADDING A PREFERENCE FILE: a new file travels only if it is added to BOTH
+  blocks below. A new preference file that can hold a credential — a token, a secret, a
+  password, an API key, or a recovery key — must be added to NEITHER. Leaving it out is the
+  exclusion, and BackupRulesTest fails the build if an included path looks like it
+  could hold one.
+
+  The redundant <exclude> entries this file used to carry were fatal Android lint errors
+  (FullBackupContent: "X is not in an included path"), which fail :app:lintVitalRelease and
+  therefore `assembleRelease` — the variant F-Droid builds from a tag. The exclusions are
+  listed as comments instead; see backup_rules.xml for the full rationale.
 -->
 <data-extraction-rules>
     <cloud-backup>
@@ -16,17 +28,12 @@
         <include domain="sharedpref" path="soundtrail_playlists.xml" />
         <include domain="sharedpref" path="soundtrail_automations.xml" />
 
-        <exclude domain="sharedpref" path="soundtrail_secrets.xml" />
-        <exclude domain="sharedpref" path="soundtrail_mood.xml" />
-        <exclude domain="sharedpref" path="soundtrail_mood_consent.xml" />
-        <exclude domain="sharedpref" path="soundtrail_activity_recognition.xml" />
-        <exclude domain="sharedpref" path="soundtrail_cloud_sync.xml" />
-        <exclude domain="sharedpref" path="soundtrail_google_auth.xml" />
-        <exclude domain="sharedpref" path="soundtrail_settings.xml" />
-        <exclude domain="sharedpref" path="soundtrail_youtube.xml" />
-        <exclude domain="sharedpref" path="soundtrail_backups.xml" />
-        <exclude domain="file" path="audio" />
-        <exclude domain="file" path="managed-backups" />
+        <!-- Deliberately NOT included, and therefore never uploaded: soundtrail_secrets,
+             soundtrail_cloud_sync, soundtrail_settings, soundtrail_mood,
+             soundtrail_mood_consent, soundtrail_activity_recognition, soundtrail_backups,
+             file/audio, file/managed-backups. The soundtrail_youtube and
+             soundtrail_google_auth files this list used to name were removed with the
+             streaming services and are deleted on upgrade. -->
     </cloud-backup>
 
     <device-transfer>
@@ -34,16 +41,7 @@
         <include domain="sharedpref" path="soundtrail_playlists.xml" />
         <include domain="sharedpref" path="soundtrail_automations.xml" />
 
-        <exclude domain="sharedpref" path="soundtrail_secrets.xml" />
-        <exclude domain="sharedpref" path="soundtrail_mood.xml" />
-        <exclude domain="sharedpref" path="soundtrail_mood_consent.xml" />
-        <exclude domain="sharedpref" path="soundtrail_activity_recognition.xml" />
-        <exclude domain="sharedpref" path="soundtrail_cloud_sync.xml" />
-        <exclude domain="sharedpref" path="soundtrail_google_auth.xml" />
-        <exclude domain="sharedpref" path="soundtrail_settings.xml" />
-        <exclude domain="sharedpref" path="soundtrail_youtube.xml" />
-        <exclude domain="sharedpref" path="soundtrail_backups.xml" />
-        <exclude domain="file" path="audio" />
-        <exclude domain="file" path="managed-backups" />
+        <!-- Same allowlist as cloud-backup: a new phone receives the library the listener
+             built, and none of the credentials, server settings or audio files. -->
     </device-transfer>
 </data-extraction-rules>

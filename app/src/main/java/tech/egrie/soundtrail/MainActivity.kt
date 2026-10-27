@@ -1,11 +1,16 @@
 package tech.egrie.soundtrail
 
 import android.Manifest
-import android.content.ActivityNotFoundException
+import android.app.KeyguardManager
+import android.content.ClipData
+import android.content.ClipDescription
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.PersistableBundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -27,10 +32,7 @@ import tech.egrie.soundtrail.data.GeoPoint
 import tech.egrie.soundtrail.data.MusicPin
 import tech.egrie.soundtrail.data.PlaylistItem
 import tech.egrie.soundtrail.integrations.DeviceApps
-import tech.egrie.soundtrail.integrations.MusicLink
 import tech.egrie.soundtrail.integrations.MusicLinkParser
-import tech.egrie.soundtrail.integrations.MusicProvider
-import tech.egrie.soundtrail.integrations.YouTubeSearch
 import tech.egrie.soundtrail.location.DeviceLocation
 import tech.egrie.soundtrail.ui.AssistantActions
 import tech.egrie.soundtrail.ui.ListsActions
@@ -51,6 +53,26 @@ class MainActivity : ComponentActivity() {
     private lateinit var apps: DeviceApps
     private var incomingDraft by mutableStateOf<PinDraft?>(null)
     private var listsOpenSignal by mutableStateOf(0)
+
+    /**
+     * What to run once the device unlock has been confirmed.
+     *
+     * Held here rather than captured by the launcher, because the launcher has to be registered
+     * before `onCreate` and cannot close over a lambda that does not exist yet. If the process is
+     * recreated while the system's unlock screen is up, this is lost and nothing is shown when the
+     * result comes back — which is the safe direction, and one more tap away.
+     */
+    private var pendingUnlockAction: (() -> Unit)? = null
+
+    private val unlockLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val action = pendingUnlockAction
+        pendingUnlockAction = null
+        // Only a confirmed credential runs the action. A cancellation runs nothing and says
+        // nothing: backing out of an unlock prompt is a decision, not a failure to report.
+        if (result.resultCode == RESULT_OK) action?.invoke()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -168,6 +190,23 @@ class MainActivity : ComponentActivity() {
             val importBackupLauncher = rememberLauncherForActivityResult(
                 ActivityResultContracts.OpenDocument()
             ) { uri -> if (uri != null) model.importBackup(uri) }
+            // The recovery key decrypts the whole synced library, so while it is on screen this
+            // window is FLAG_SECURE: no screenshot, no screen recording, no thumbnail in recents.
+            // It is cleared the moment the key is hidden and again on dispose, so leaving the
+            // screen with the key showing cannot leave the rest of the app un-capturable.
+            val recoveryKeyVisible = state.syncRecoveryKey != null
+            DisposableEffect(recoveryKeyVisible) {
+                if (recoveryKeyVisible) {
+                    window.setFlags(
+                        WindowManager.LayoutParams.FLAG_SECURE,
+                        WindowManager.LayoutParams.FLAG_SECURE
+                    )
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                }
+                onDispose { window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
+            }
+
             SoundtrailTheme {
                 SoundtrailApp(
                     state = state,
@@ -178,7 +217,6 @@ class MainActivity : ComponentActivity() {
                     nowPlaying = model.player.state,
                     lists = ListsActions(
                         onToggleWatch = toggleWatch,
-                        onToggleAutoSearch = model::setAutoSearchYoutube,
                         onNewPlaylist = model::createPlaylist,
                         onDeletePlaylist = model::deletePlaylist,
                         onAddSong = { playlistId, title, artist, url ->
@@ -186,21 +224,6 @@ class MainActivity : ComponentActivity() {
                         },
                         onRemoveSong = model::removePlaylistItem,
                         onPlaySong = ::playPlaylistItem,
-                        onSearchSong = { item ->
-                            // All playback is now in-app; searching YouTube Music externally is optional.
-                            // For now, just play the item directly in-app if possible.
-                            playPlaylistItem(item)
-                        },
-                        onGetSong = { item ->
-                            // This external action shares a link only.
-                            val link = item.url?.let(MusicLinkParser::parse)
-                            val target = if (link != null && link.provider == MusicProvider.JELLYFIN) {
-                                model.jellyfinWebUrl(link) ?: link.url
-                            } else {
-                                item.url ?: YouTubeSearch.searchUrl(item.title, item.artist)
-                            }
-                            if (!apps.shareUrl(target)) model.notify("Nothing can receive this link.")
-                        },
                         onDownloadJellyfin = model::downloadJellyfinOffline,
                         onRemoveOfflineAudio = model::removeOfflineAudio,
                         onRemoveOfflineFile = model::removeStoredOfflineAudio,
@@ -245,34 +268,14 @@ class MainActivity : ComponentActivity() {
                         onClearAiKey = model::clearMoodAiKey,
                         onSetSearchTarget = model::setMoodSearchTarget,
                         onPlayFound = model::playMoodFound,
-                        onPlayAllFound = model::playAllMoodFound,
-                        onOpenFound = model::openMoodFound,
-                        onOpenInYouTubeMusic = {
-                            if (!model.openMoodInYouTubeMusic()) {
-                                model.notify("No YouTube Music app or browser found.")
-                            }
-                        }
+                        onPlayAllFound = model::playAllMoodFound
                     ),
                     onLocate = onLocate,
                     onSearch = model::search,
-                    onSelectSearchProvider = model::selectSearchProvider,
                     onLookup = model::lookupSong,
-                    onConnect = ::connectSpotify,
-                    onDisconnect = model::disconnectSpotify,
-                    onConnectSoundcloud = ::connectSoundcloud,
-                    onDisconnectSoundcloud = model::disconnectSoundcloud,
                     onConnectJellyfin = model::connectJellyfin,
                     onDisconnectJellyfin = model::disconnectJellyfin,
                     onOpenJellyfin = { if (!apps.openWeb(model.jellyfinServerUrl())) model.notify("No browser found.") },
-                    onConnectYouTubeOAuth = ::connectYouTubeOAuth,
-                    onDisconnectYouTubeData = model::disconnectYouTubeData,
-                    onOpenYouTubeSetup = {
-                        if (!apps.openWeb("https://console.cloud.google.com/apis/credentials")) {
-                            model.notify("No browser found.")
-                        }
-                    },
-                    onImportYouTubePlaylists = model::importYouTubePlaylists,
-                    onSetYouTubeAutoImport = model::setYouTubeAutoImport,
                     backupBusy = state.backupBusy,
                     onExportBackup = {
                         val stamp = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
@@ -302,10 +305,20 @@ class MainActivity : ComponentActivity() {
                     onSignInCloudSync = model::signInCloudSync,
                     onUnlockCloudSync = model::unlockCloudSync,
                     onSyncCloudData = model::syncCloudData,
-                    onShowCloudRecoveryKey = model::showCloudRecoveryKey,
+                    // Re-displaying a *stored* key is gated on this device's own unlock. The key
+                    // shown once at account creation is not: nobody has had a chance to save it
+                    // yet, and putting a prompt in front of that would be a way to lose it.
+                    onShowCloudRecoveryKey = {
+                        requireUnlock("your saved recovery key") { model.showCloudRecoveryKey() }
+                    },
+                    onCopyRecoveryKey = ::copyRecoveryKey,
                     onForgetCloudRecoveryKey = model::forgetCloudRecoveryKey,
                     onDismissCloudRecoveryKey = model::dismissCloudRecoveryKey,
                     onSetCloudSyncAutoEnabled = model::setCloudSyncAutoEnabled,
+                    onLoadSyncSessions = model::loadSyncSessions,
+                    onSignOutSyncSession = model::signOutSyncSession,
+                    onChangeSyncPassword = model::changeSyncPassword,
+                    onRepushSyncJournal = model::repushSyncJournal,
                     onDisconnectCloudSync = model::disconnectCloudSync,
                     onDeleteCloudSyncAccount = model::deleteCloudSyncAccount,
                     onTogglePlayback = model::togglePlayback,
@@ -313,54 +326,15 @@ class MainActivity : ComponentActivity() {
                     onPlay = ::play,
                     onMap = ::showMap,
                     onDelete = model::deletePin,
-                    onOpenSpotify = { if (!apps.openSpotify()) model.notify("No app can open Spotify.") },
-                    onOpenYoutube = { if (!apps.openYouTubeMusic()) model.notify("No app can open YouTube Music.") },
-                    onSearchYoutubeMusic = { query ->
-                        if (!apps.searchYouTubeMusic(query)) {
-                            model.notify("No YouTube Music app or browser found.")
-                        }
-                    },
-                    onPlayTrack = { track ->
-                        // The whole track in Spotify: a hand-off to an app the listener is
-                        // already signed in to, which is the only way a third-party app can
-                        // play a full Spotify song rather than its preview.
-                        val link = MusicLinkParser.parse(track.url)
-                        if (link == null || !apps.play(link)) {
-                            model.notify("Nothing can open ${track.provider.label} on this device.")
-                        }
-                    },
-                    onOpenYoutubeLibrary = {
-                        if (!apps.openYouTubeMusicLibrary()) {
-                            model.notify("No YouTube Music app or browser found.")
-                        }
-                    },
-                    onOpenSoundcloud = { if (!apps.openSoundCloud()) model.notify("No app can open SoundCloud.") },
-                    onOpenDashboard = {
-                        if (!apps.openWeb("https://developer.spotify.com/dashboard")) model.notify("No browser found.")
-                    },
-                    onOpenMicroG = {
-                        if (!apps.openWeb("https://microg.org/")) model.notify("No browser found.")
-                    },
-                    onOpenMicroGRe = {
-                        if (!apps.openWeb("https://github.com/MorpheApp/MicroG-RE")) model.notify("No browser found.")
-                    },
-                    onOpenSoundcloudApps = {
-                        if (!apps.openWeb("https://developers.soundcloud.com/docs/api/register-app")) {
-                            model.notify("No browser found.")
-                        }
-                    },
+                    // Every search result is a song on the listener's own server, so a tap plays
+                    // it here through the same player as everything else. Nothing is handed off.
+                    onPlayTrack = model::playTrackResult,
                     assistant = AssistantActions(
                         onInput = model::setAssistantInput,
                         onAsk = { text -> model.ask(text) },
                         onMic = toggleMic,
                         onSetSpeakReplies = model::setAssistantSpeakReplies,
                         onPlayHit = model::playAssistantHit,
-                        onOpenHitInYouTubeMusic = { hit ->
-                            val url = hit.musicUrl
-                            if (url == null || !apps.openYouTubeMusicSong(url)) {
-                                model.notify("Nothing can open YouTube Music on this device.")
-                            }
-                        },
                         // Soundtrail fills this in itself: the Mood tab lives inside the app
                         // shell, and the shell is what knows which tab is showing.
                         onOpenMood = {},
@@ -401,80 +375,104 @@ class MainActivity : ComponentActivity() {
             if (first == null) model.notify("That playlist is empty or missing.")
             else playPlaylistItem(first)
         }
-        when (intent?.action) {
-            Intent.ACTION_VIEW -> if (intent.data?.scheme == "app.soundtrail") {
-                intent.data?.let { uri ->
-                    // YouTube OAuth uses Google's scheme:/path form (host-less) or scheme://host.
-                    when {
-                        uri.host == "spotify-auth" -> model.finishSpotify(uri)
-                        uri.host == "soundcloud-auth" -> model.finishSoundcloud(uri)
-                        uri.host == "youtube-auth" || uri.path == "/youtube-auth" -> model.finishYouTubeOAuth(uri)
-                    }
-                }
-                clearHandledIntent()
-            }
-            Intent.ACTION_SEND -> if (intent.type == "text/plain") {
-                val text = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
-                val link = MusicLinkParser.fromText(text)
-                if (link != null) incomingDraft = PinDraft(url = link.url)
-                else model.notify("Share a Spotify, SoundCloud, or YouTube Music song link.")
-                clearHandledIntent()
-            }
+        // No authorization redirect is caught here any more: the browser sign-in flows that
+        // needed an app.soundtrail:// deep link belonged to the removed streaming services.
+        // What is left is a shared piece of text, which can still start a pin.
+        if (intent?.action == Intent.ACTION_SEND && intent.type == "text/plain") {
+            val text = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
+            val link = MusicLinkParser.fromText(text)
+            if (link != null) incomingDraft = PinDraft(url = link.url)
+            else model.notify("That shared text is not a song this app can play. Pick a song from your Jellyfin server instead.")
+            clearHandledIntent()
         }
     }
 
     private fun clearHandledIntent() {
-        // Avoid consuming a single-use OAuth code or share intent again on activity recreation.
+        // Avoid consuming a share intent a second time on activity recreation.
         setIntent(Intent(this, MainActivity::class.java).apply { action = Intent.ACTION_MAIN })
     }
 
-    private fun connectSpotify(id: String) {
-        try {
-            val uri = model.beginSpotify(id)
-            startActivity(Intent(Intent.ACTION_VIEW, uri).addCategory(Intent.CATEGORY_BROWSABLE))
-        } catch (e: ActivityNotFoundException) {
-            model.cancelSpotify()
-            model.notify("Install a browser to sign in with Spotify.")
-        } catch (e: SecurityException) {
-            model.cancelSpotify()
-            model.notify("Could not open Spotify sign-in in a browser.")
-        } catch (e: Exception) {
-            model.notify(e.message ?: "Could not start Spotify sign-in.")
+    /**
+     * Runs [action] only after the listener has unlocked this device.
+     *
+     * The PIN, pattern or password the listener already set, on the system's own confirm-credential
+     * screen, which offers an enrolled biometric first on a device that has one. This is the gate on
+     * re-displaying a stored recovery key: the
+     * key decrypts the entire synced library, so "the app happened to be open" is not sufficient
+     * authority to read it out, and a phone handed to somebody else must not become a way to copy
+     * it.
+     *
+     * A device with no screen lock at all fails **closed**. There is nothing to authenticate
+     * against, so the key is not shown and the listener is told what to set up; showing it anyway
+     * would make the gate decorative.
+     *
+     * This is the platform's own confirm-device-credential screen through [KeyguardManager], not
+     * `androidx.biometric`. The library would do the same job but drags in a `FragmentActivity`
+     * base class and an AppCompat theme parent, and this app adds no dependency for it: what the
+     * gate has to prove is that the person holding the phone is the person who locked it, and the
+     * keyguard proves exactly that, with the biometric the listener enrolled offered first on a
+     * device that has one.
+     */
+    private fun requireUnlock(what: String, action: () -> Unit) {
+        val keyguard = getSystemService(KeyguardManager::class.java)
+        if (keyguard == null || !keyguard.isDeviceSecure) {
+            model.notify(
+                "This device has no screen lock, so $what cannot be shown again here. Set a PIN, " +
+                    "pattern or password in Android's settings, or use the copy you saved when the " +
+                    "account was created."
+            )
+            return
         }
-    }
-
-    private fun connectSoundcloud(id: String, secret: String) {
-        try {
-            val uri = model.beginSoundcloud(id, secret)
-            startActivity(Intent(Intent.ACTION_VIEW, uri).addCategory(Intent.CATEGORY_BROWSABLE))
-        } catch (e: ActivityNotFoundException) {
-            model.cancelSoundcloud()
-            model.notify("Install a browser to sign in with SoundCloud.")
-        } catch (e: SecurityException) {
-            model.cancelSoundcloud()
-            model.notify("Could not open SoundCloud sign-in in a browser.")
-        } catch (e: Exception) {
-            model.notify(e.message ?: "Could not start SoundCloud sign-in.")
+        val prompt = keyguard.createConfirmDeviceCredentialIntent(
+            "Unlock Soundtrail",
+            "Confirm it is you to show $what."
+        )
+        if (prompt == null) {
+            // No credential to confirm against, so the key is not shown: a gate that opens itself
+            // when it cannot be locked is not a gate.
+            model.notify("This device cannot ask for its unlock, so $what cannot be shown again here.")
+            return
         }
+        pendingUnlockAction = action
+        unlockLauncher.launch(prompt)
     }
 
     /**
-     * Browser-based YouTube OAuth with the user's own Desktop client ID. It needs no Google
-     * services, account, or SDK on the device: only a browser.
+     * Copies the recovery key as a *sensitive* clipboard item, then clears it again.
+     *
+     * On Android 13 and later `EXTRA_IS_SENSITIVE` is what keeps the system from showing the key in
+     * the clipboard preview and tells whatever reads it next what it is holding. Below 13 there is
+     * no such flag, so the copy still works and the delayed clear is the only protection available
+     * — hence "where Android allows it" in the wording the listener sees.
+     *
+     * The clear is best-effort and has to be: Android 10 and later refuse clipboard writes from an
+     * app that is not in focus, so a listener who switches to their password manager before the
+     * minute is up keeps the key, which is what they were doing. It is attempted only when the clip
+     * still holds this exact key, so it can never overwrite something copied afterwards.
      */
-    private fun connectYouTubeOAuth(id: String) {
-        try {
-            val uri = model.beginYouTubeOAuth(id)
-            startActivity(Intent(Intent.ACTION_VIEW, uri).addCategory(Intent.CATEGORY_BROWSABLE))
-        } catch (e: ActivityNotFoundException) {
-            model.cancelYouTubeOAuth()
-            model.notify("Install a browser to sign in with YouTube.")
-        } catch (e: SecurityException) {
-            model.cancelYouTubeOAuth()
-            model.notify("Could not open YouTube sign-in in a browser.")
-        } catch (e: Exception) {
-            model.notify(e.message ?: "Could not start YouTube sign-in.")
+    private fun copyRecoveryKey(key: String) {
+        val clipboard = getSystemService(ClipboardManager::class.java)
+        if (clipboard == null) {
+            model.notify("This device has no clipboard to copy to.")
+            return
         }
+        val clip = ClipData.newPlainText("Soundtrail recovery key", key)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            runCatching {
+                clip.description.extras = PersistableBundle().apply {
+                    putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+                }
+            }
+        }
+        clipboard.setPrimaryClip(clip)
+        model.notify("Recovery key copied. Save it somewhere private — it leaves the clipboard in a minute.")
+        window.decorView.postDelayed({
+            runCatching {
+                val current = clipboard.primaryClip
+                    ?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text
+                if (current == key) clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
+            }
+        }, CLIPBOARD_CLEAR_AFTER_MS)
     }
 
     /** All music now plays directly in the app via the unified player. */
@@ -482,12 +480,17 @@ class MainActivity : ComponentActivity() {
         model.playPin(pin)
     }
 
-    /** Plays directly in-app: local files, Jellyfin, Spotify previews, SoundCloud, YouTube via server. */
+    /** Plays directly in-app: a song from the listener's Jellyfin server, or an attached file. */
     private fun playPlaylistItem(item: PlaylistItem) {
         model.playPlaylistItemUnified(item)
     }
 
     private fun showMap(point: GeoPoint) {
         if (!apps.showOnMap(point)) model.notify("No maps app or browser found.")
+    }
+
+    private companion object {
+        /** How long a copied recovery key stays on the clipboard before the clear is attempted. */
+        const val CLIPBOARD_CLEAR_AFTER_MS = 60_000L
     }
 }

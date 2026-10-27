@@ -3,28 +3,50 @@
   Android Auto Backup (Android 11 and lower; see data_extraction_rules.xml for 12+).
 
   Only the library the listener built is eligible: pins, playlists, and automation rules.
-  Everything else is outside the includes, so it is never copied to the listener's Google
-  account — most importantly the Keystore-encrypted token store, the cloud-sync session and
-  recovery-key state, the mood settings and last mood description, the activity-recognition
-  opt-in, and the audio files themselves. A backup restored on another device could not decrypt the tokens anyway, and
-  uploading ciphertext that cannot be opened would only be a privacy claim without a use.
+  An <include> turns this file into an allowlist, so everything not listed here is already
+  left out of the backup and there is nothing to exclude. That covers the Keystore-encrypted
+  token store, the cloud-sync session and recovery-key state, the mood settings and last mood
+  description, the activity-recognition opt-in, server settings, the audio files, and
+  Soundtrail's own managed snapshots. A backup restored on another device could not decrypt
+  the tokens anyway, and uploading ciphertext that cannot be opened would only be a privacy
+  claim without a use.
+
+  RULE FOR ANYONE ADDING A PREFERENCE FILE: because this is an allowlist, a new file is
+  backed up only if it is added here. So a new preference file that can hold a credential —
+  a token, a secret, a password, an API key, or a recovery key — must NOT be added to this
+  file or to either block of data_extraction_rules.xml. Leaving it out is the exclusion.
+  BackupRulesTest enforces that: it fails the build if any included path looks like
+  it could hold a credential.
+
+  This file used to list the exclusions as <exclude> entries. They were redundant — an
+  allowlist cannot contain a path it never included — and Android lint treats a redundant
+  exclude as a fatal FullBackupContent error ("X is not in an included path"). Fatal lint
+  findings fail :app:lintVitalRelease, which `assembleRelease` depends on: the release
+  variant would not build at all, for F-Droid's buildserver or for anyone else. The
+  exclusions are recorded here as comments instead, where they document the intent without
+  claiming a rule the platform ignores.
 -->
 <full-backup-content>
     <include domain="sharedpref" path="soundtrail_pins.xml" />
     <include domain="sharedpref" path="soundtrail_playlists.xml" />
     <include domain="sharedpref" path="soundtrail_automations.xml" />
 
-    <exclude domain="sharedpref" path="soundtrail_secrets.xml" />
-    <exclude domain="sharedpref" path="soundtrail_mood.xml" />
-    <exclude domain="sharedpref" path="soundtrail_activity_recognition.xml" />
-    <exclude domain="sharedpref" path="soundtrail_mood_consent.xml" />
-    <exclude domain="sharedpref" path="soundtrail_cloud_sync.xml" />
-    <exclude domain="sharedpref" path="soundtrail_google_auth.xml" />
-    <exclude domain="sharedpref" path="soundtrail_settings.xml" />
-    <exclude domain="sharedpref" path="soundtrail_youtube.xml" />
-    <exclude domain="sharedpref" path="soundtrail_backups.xml" />
+    <!-- Deliberately NOT included, and therefore never backed up:
+         sharedpref/soundtrail_secrets.xml                Keystore-encrypted tokens and API keys
+         sharedpref/soundtrail_cloud_sync.xml              sync session, cursor and recovery-key state
+         sharedpref/soundtrail_settings.xml                server addresses and preferences
+         sharedpref/soundtrail_mood.xml                    mood settings and last description
+         sharedpref/soundtrail_mood_consent.xml            mood provider consent records
+         sharedpref/soundtrail_activity_recognition.xml    motion opt-in
+         sharedpref/soundtrail_backups.xml                 managed-snapshot bookkeeping
+         file/audio                                        imported audio the listener owns
+         file/managed-backups                              Soundtrail's own on-device snapshots
 
-    <!-- Audio and the app's own snapshots are deliberately not duplicated into a cloud backup. -->
-    <exclude domain="file" path="audio" />
-    <exclude domain="file" path="managed-backups" />
+         Two files this list used to carry are gone rather than merely excluded:
+         soundtrail_youtube.xml and soundtrail_google_auth.xml belonged to the YouTube and
+         Google sign-in that were removed with the streaming services, and
+         LegacyServiceCleanup deletes them on the first launch after that upgrade. A device
+         that restored an older backup may still hold them; neither is in the allowlist, so
+         neither is backed up from here either.
+    -->
 </full-backup-content>

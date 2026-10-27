@@ -16,14 +16,12 @@ internal data class QueueEntry(
     /** Where the song came from, for the second line of a row: a place, or a playlist name. */
     val detail: String = "",
     val provider: MusicProvider? = null,
-    /** A provider link (`jellyfin:item:<id>`, a Spotify/SoundCloud/YouTube URL), if any. */
+    /** A provider link (`jellyfin:item:<id>`), if any. */
     val url: String? = null,
-    /** A stream URL a search already resolved, so it is not looked up a second time. */
-    val streamUrl: String? = null,
     /** The name of an attached offline copy in private storage, if any. */
     val localFile: String? = null
 ) {
-    val hasSource: Boolean get() = localFile != null || url != null || streamUrl != null
+    val hasSource: Boolean get() = localFile != null || url != null
 
     /** What a hop from the car's list shows under the title. */
     val subtitle: String get() = artist.ifBlank { detail }

@@ -1,11 +1,19 @@
 package tech.egrie.soundtrail.integrations
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Test
 
+/**
+ * TheAudioDB as this app uses it: a metadata source.
+ *
+ * The API answers with a Spotify id and a music-video URL as well as the names and tags. This
+ * parser reads the names and tags and ignores both links, because a link to a service the app no
+ * longer supports is not something it can pin or play — offering one would be a promise the rest
+ * of the app cannot keep. The payloads below still carry those fields, on purpose: they are what
+ * the real API sends, and ignoring them is the behaviour under test.
+ */
 class AudioDbParserTest {
-    @Test fun `parses track metadata into canonical playable links`() {
+    @Test fun `parses track metadata and ignores the service links the API also sends`() {
         val payload = """
             {"track":[{
               "strTrack":"Yellow",
@@ -25,12 +33,9 @@ class AudioDbParserTest {
         assertEquals("Parachutes", song.album)
         assertEquals("Pop-Rock", song.genre)
         assertEquals("Relaxed", song.mood)
-        assertEquals("https://open.spotify.com/track/3AJwUDP919kvQ9QcozQPxg", song.spotifyUrl)
-        assertEquals("https://www.youtube.com/watch?v=yKNxeF4KMsY", song.youtubeUrl)
-        assertEquals("https://open.spotify.com/track/3AJwUDP919kvQ9QcozQPxg", song.url)
     }
 
-    @Test fun `malformed ids null fields and unsupported video hosts yield metadata only`() {
+    @Test fun `null and blank fields read as empty metadata, never as the string "null"`() {
         val payload = """
             {"track":[{
               "strTrack":"Demo",
@@ -49,20 +54,19 @@ class AudioDbParserTest {
         assertEquals("", song.album)
         assertEquals("", song.genre)
         assertEquals("", song.mood)
-        assertNull(song.spotifyUrl)
-        assertNull(song.youtubeUrl)
-        assertNull(song.url)
     }
 
-    @Test fun `youtube only tracks still offer a pin link`() {
+    @Test fun `a track with no service links at all parses exactly the same`() {
         val payload = """
-            {"track":[{"strTrack":"Song","strArtist":"Artist",
-              "strMusicVid":"https://youtu.be/dQw4w9WgXcQ"}]}
+            {"track":[{"strTrack":"Song","strArtist":"Artist","strAlbum":"Album",
+              "strGenre":"Ambient","strMood":"Calm"}]}
         """.trimIndent()
         val song = AudioDbParser.parse(payload).single()
-        assertNull(song.spotifyUrl)
-        assertEquals("https://www.youtube.com/watch?v=dQw4w9WgXcQ", song.youtubeUrl)
-        assertEquals("https://www.youtube.com/watch?v=dQw4w9WgXcQ", song.url)
+        assertEquals("Song", song.title)
+        assertEquals("Artist", song.artist)
+        assertEquals("Album", song.album)
+        assertEquals("Ambient", song.genre)
+        assertEquals("Calm", song.mood)
     }
 
     @Test fun `duplicates collapse and the list stays short`() {

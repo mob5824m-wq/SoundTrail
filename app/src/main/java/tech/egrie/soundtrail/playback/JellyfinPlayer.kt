@@ -26,7 +26,8 @@ internal data class NowPlaying(
     val title: String,
     val artist: String,
     val itemId: String,
-    val provider: MusicProvider = MusicProvider.JELLYFIN,
+    /** Where the song came from; null for a file the listener attached themselves. */
+    val provider: MusicProvider? = null,
     val playing: Boolean,
     val buffering: Boolean,
     val positionMs: Long,
@@ -37,13 +38,14 @@ internal data class NowPlaying(
 )
 
 /**
- * Unified in-app player: Jellyfin, local files, remote URLs (Spotify previews, SoundCloud streams,
- * etc.) all play inside Soundtrail without handing off to another app.
+ * The app's single player: a song from the listener's own Jellyfin server, or an audio file they
+ * attached themselves. Both play inside Soundtrail; nothing is handed to another app.
  *
- * Previously this was Jellyfin-only; it now handles any source while keeping the same foreground
- * service, audio-focus, and notification behavior. The name JellyfinPlayer is retained for
- * compatibility with PlaybackService and ViewModel, but it is now the app's single player for
- * every provider.
+ * The name is historical. This began as a Jellyfin-only player and is now the one player behind
+ * every surface the app has — the in-app bar, the notification, the lockscreen and Android Auto —
+ * so [PlaybackService] and the view model both still refer to it by this name. The remote-URL and
+ * "resolving a stream" paths it grew for the removed streaming services are gone with them: the
+ * only sources left are a Jellyfin stream and a local file.
  */
 internal class JellyfinPlayer private constructor(context: Context) {
     companion object {
@@ -93,7 +95,7 @@ internal class JellyfinPlayer private constructor(context: Context) {
     }
 
     /** Plays a local file stored in private app storage (imported audio or offline cache). */
-    fun playLocalFile(title: String, artist: String, itemId: String, file: File, provider: MusicProvider) {
+    fun playLocalFile(title: String, artist: String, itemId: String, file: File, provider: MusicProvider?) {
         if (!file.isFile || !file.canRead()) {
             _state.value = NowPlaying(
                 title = title, artist = artist, itemId = itemId,
@@ -115,38 +117,8 @@ internal class JellyfinPlayer private constructor(context: Context) {
         PlaybackService.ensureStarted(appContext)
     }
 
-    /** Plays a remote URL directly (Spotify preview, SoundCloud stream, etc.). */
-    fun playRemoteUrl(
-        title: String,
-        artist: String,
-        itemId: String,
-        url: String,
-        provider: MusicProvider,
-        headers: Map<String, String> = emptyMap()
-    ) {
-        if (url.isBlank()) {
-            _state.value = NowPlaying(
-                title = title, artist = artist, itemId = itemId,
-                provider = provider,
-                playing = false, buffering = false, positionMs = 0, durationMs = 0,
-                error = "No playable audio URL for this song."
-            )
-            return
-        }
-        release()
-        sources = listOf(Source(uri = url, headers = headers))
-        sourceIndex = 0
-        _state.value = NowPlaying(
-            title = title, artist = artist, itemId = itemId,
-            provider = provider,
-            playing = false, buffering = true, positionMs = 0, durationMs = 0
-        )
-        openCurrentSource()
-        PlaybackService.ensureStarted(appContext)
-    }
-
-    /** Shows buffering state while resolving a stream (e.g. YouTube via server). */
-    fun setBuffering(title: String, artist: String, itemId: String, provider: MusicProvider) {
+    /** Shows buffering state while a stream is being resolved. */
+    fun setBuffering(title: String, artist: String, itemId: String, provider: MusicProvider?) {
         release()
         sources = emptyList()
         sourceIndex = 0
@@ -231,15 +203,7 @@ internal class JellyfinPlayer private constructor(context: Context) {
     private fun openCurrentSource() {
         val src = sources.getOrNull(sourceIndex)
         if (src == null) {
-            val provider = _state.value?.provider ?: MusicProvider.JELLYFIN
-            val msg = when (provider) {
-                MusicProvider.JELLYFIN -> "Couldn't stream this song. It may have been moved on the server."
-                MusicProvider.SPOTIFY -> "No Spotify preview available for this track. Spotify full playback requires their app, but previews play here when available."
-                MusicProvider.SOUNDCLOUD -> "Couldn't stream this SoundCloud track. It may be private or removed."
-                MusicProvider.YOUTUBE_MUSIC -> "Couldn't play this YouTube Music track. Open it in YouTube Music, or use an offline copy."
-                MusicProvider.YOUTUBE -> "Couldn't play this YouTube track. Open it in YouTube Music, or use an offline copy."
-            }
-            fail(msg)
+            fail(noSourceMessage("Couldn't stream this song. It may have been moved on the server."))
             return
         }
         val media = MediaPlayer()
@@ -305,17 +269,20 @@ internal class JellyfinPlayer private constructor(context: Context) {
         if (sourceIndex < sources.size) {
             openCurrentSource()
         } else {
-            val provider = _state.value?.provider ?: MusicProvider.JELLYFIN
-            val msg = when (provider) {
-                MusicProvider.JELLYFIN -> "Couldn't stream this song. The server may be offline or the file unplayable here."
-                MusicProvider.SPOTIFY -> "Couldn't play Spotify preview for this track."
-                MusicProvider.SOUNDCLOUD -> "Couldn't stream this SoundCloud track."
-                MusicProvider.YOUTUBE_MUSIC -> "Couldn't play this YouTube Music track in-app."
-                MusicProvider.YOUTUBE -> "Couldn't play this YouTube track in-app."
-            }
-            fail(msg)
+            fail(noSourceMessage("Couldn't stream this song. The server may be offline or the file unplayable here."))
         }
     }
+
+    /**
+     * The reason nothing played, worded for the source that was actually attempted: a song from
+     * the listener's Jellyfin server, or a file they attached themselves.
+     */
+    private fun noSourceMessage(streamed: String): String =
+        if (_state.value?.provider == null) {
+            "Couldn't play that audio file. It may have been removed or renamed on this device."
+        } else {
+            streamed
+        }
 
     private fun fail(message: String) {
         ticker?.cancel()

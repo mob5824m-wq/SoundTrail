@@ -77,14 +77,20 @@ internal object SyncPayloads {
                 if (id != record.entityId) return@mapNotNull null
                 val playlistId = json.getString("playlistId")
                 if (playlistId !in playlists) return@mapNotNull null
-                val url = json.optString("url").takeIf { it.isNotBlank() && it != "null" }
+                val storedUrl = json.optString("url").takeIf { it.isNotBlank() && it != "null" }
                 val localFile = oldItems[record.entityId]?.localFile?.takeIf(localFileExists)
+                // An event written by an older version can carry a link to a service this one no
+                // longer supports. The rule matches the local stores and the backup reader, so a
+                // dead link cannot arrive from another device either.
+                val dead = MusicLinkParser.isUnplayable(storedUrl)
+                if (dead && localFile == null) return@mapNotNull null
+                val link = if (dead) null else storedUrl?.let(MusicLinkParser::parse)
                 playlistId to PlaylistItem(
                     id = id,
                     title = json.getString("title"),
                     artist = json.optString("artist"),
-                    url = url,
-                    provider = url?.let { MusicLinkParser.parse(it)?.provider },
+                    url = link?.url,
+                    provider = link?.provider,
                     createdAt = json.getLong("createdAt"),
                     localFile = localFile
                 )

@@ -26,8 +26,8 @@ android {
         applicationId = "tech.egrie.soundtrail"
         minSdk = 26
         targetSdk = 35
-        versionCode = 17
-        versionName = "1.0.16"
+        versionCode = 18
+        versionName = "1.0.17"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -72,14 +72,21 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // No dependency for the recovery-key gate. Re-displaying a stored key is gated on the device's
+    // own unlock through KeyguardManager.createConfirmDeviceCredentialIntent, which is platform API
+    // since well before minSdk: androidx.biometric would do the same job but would drag in a
+    // FragmentActivity base class and an AppCompat theme parent, and this app adds no dependency
+    // for it. That keeps the acceptance criterion honest and keeps res/values/themes.xml on the
+    // framework theme.
     // Android Auto browses and controls Soundtrail through a MediaBrowserService, and the
     // lockscreen/Bluetooth/Auto controls all need one shared MediaSession. media1 (not media3)
     // is deliberate: Soundtrail already plays through its own resolver and MediaPlayer, so the
     // app needs a browse tree and a session bridge, not a player framework.
     implementation("androidx.media:media:1.7.0")
     // F-Droid builds use only free software: Google Play services (Sign-In, Location/Activity
-    // Recognition) is deliberately not a dependency. The YouTube connection uses the browser
-    // OAuth flow with the listener's own Desktop client ID, and motion comes from GPS speed.
+    // Recognition) is deliberately not a dependency, and motion comes from GPS speed. There is no
+    // third-party HTTP client either — every request goes through integrations/Http.kt, which is
+    // where the transport policy and the no-redirects rule are enforced.
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")

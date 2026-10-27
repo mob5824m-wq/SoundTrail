@@ -144,18 +144,25 @@ internal object BackupFormat {
             items = (0 until items.length()).mapNotNull { index ->
                 runCatching {
                     val item = items.getJSONObject(index)
-                    // A song with an unusable link is still a song: links are optional on
-                    // playlist entries, exactly as when they were created by hand.
-                    val url = item.optString("url").takeIf { it.isNotBlank() && it != "null" }
+                    // A song with no link is still a song: links are optional on playlist
+                    // entries, exactly as when they were created by hand. A link this version
+                    // cannot play is not a song, though — it came from a service that is gone —
+                    // so it is dropped, and the row goes with it unless the listener attached
+                    // audio of their own.
+                    val storedUrl = item.optString("url").takeIf { it.isNotBlank() && it != "null" }
+                    val localFile = item.optString("localFile")
+                        .takeIf { it.isNotBlank() && it != "null" }
+                    val dead = MusicLinkParser.isUnplayable(storedUrl)
+                    if (dead && localFile == null) return@runCatching null
+                    val link = if (dead) null else storedUrl?.let(MusicLinkParser::parse)
                     PlaylistItem(
                         id = item.getString("id"),
                         title = item.getString("title"),
                         artist = item.optString("artist"),
-                        url = url,
-                        provider = url?.let { MusicLinkParser.parse(it)?.provider },
+                        url = link?.url,
+                        provider = link?.provider,
                         createdAt = item.getLong("createdAt"),
-                        localFile = item.optString("localFile")
-                            .takeIf { it.isNotBlank() && it != "null" }
+                        localFile = localFile
                     )
                 }.getOrNull()
             }

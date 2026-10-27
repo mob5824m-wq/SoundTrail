@@ -12,18 +12,18 @@ import tech.egrie.soundtrail.integrations.MusicProvider
 import tech.egrie.soundtrail.playback.LibraryMedia
 
 class AutoTreeTest {
-    private val trackUrl = "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT"
+    private val trackUrl = "jellyfin:item:4cOdK2wGLETKBW3PvgPWqT"
 
     private fun pin(id: String, title: String, place: String = "Lookout point") = MusicPin(
         id = id, title = title, artist = "An artist", place = place, note = "",
-        url = trackUrl, provider = MusicProvider.SPOTIFY,
+        url = trackUrl, provider = MusicProvider.JELLYFIN,
         point = GeoPoint(43.65, -79.38), createdAt = 1L
     )
 
     private fun item(id: String, title: String, url: String? = trackUrl, localFile: String? = null) =
         PlaylistItem(
             id = id, title = title, artist = "An artist", url = url,
-            provider = url?.let { MusicProvider.SPOTIFY }, createdAt = 1L, localFile = localFile
+            provider = url?.let { MusicProvider.JELLYFIN }, createdAt = 1L, localFile = localFile
         )
 
     private val pins = listOf(pin("pin-1", "Nightcall"), pin("pin-2", "Midnight City"))
@@ -71,7 +71,7 @@ class AutoTreeTest {
         assertEquals(1, selection?.index)
         assertEquals("st:song:song-2", selection?.entries?.get(1)?.mediaId)
         // Each row knows which list it came from, under the artist.
-        assertEquals("Spotify · Road trip", selection?.entries?.first()?.detail)
+        assertEquals("Jellyfin · Road trip", selection?.entries?.first()?.detail)
         assertEquals("An artist", selection?.entries?.first()?.subtitle)
     }
 

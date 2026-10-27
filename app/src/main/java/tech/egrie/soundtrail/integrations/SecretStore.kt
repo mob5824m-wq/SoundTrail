@@ -44,6 +44,16 @@ internal enum class SecretState {
  */
 internal class SecretStore(context: Context) {
     private val prefs = context.getSharedPreferences("soundtrail_secrets", Context.MODE_PRIVATE)
+    /**
+     * The Android Keystore alias every secret in this store is wrapped with.
+     *
+     * The name is a leftover from when this store was first written for a Spotify token, and it
+     * is deliberately **not** renamed: the alias identifies the key material itself, so changing
+     * it would strand every secret already on a device — the Jellyfin access token, the mood
+     * provider API keys, and the cloud-sync token and recovery key — behind a key the app no
+     * longer looks for. Those values decrypt to UNREADABLE and the listener is signed out of
+     * everything at once. The string is an identifier, not a claim about what is stored.
+     */
     private val alias = "soundtrail_spotify_aes_v1"
 
     private fun key(): SecretKey {

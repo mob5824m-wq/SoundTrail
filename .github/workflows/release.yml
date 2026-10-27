@@ -47,9 +47,62 @@ jobs:
         id: bump
         run: python3 .github/scripts/bump_version.py
 
+      # The step above moved versionCode and versionName, and the recipe in fdroid/ names
+      # the version F-Droid builds from a tag. tools/fdroid_check.py requires the two to
+      # agree, so without this every release after the first would fail its own gate: no
+      # pull request can carry the recipe for a version the release workflow has not
+      # chosen yet. The output stays in `fdroid rewritemeta` format, which the lint step
+      # below verifies.
+      - name: Point the F-Droid recipe at this release
+        run: python3 tools/fdroid_recipe_sync.py
+
+      # Runs after the version is selected, so it checks the version that is about to be
+      # tagged. F-Droid publishes "What's new" per versionCode and truncates anything over
+      # its 500 character limit without failing, so a tag with no changelog (or a too-long
+      # one) would put a broken listing on f-droid.org and nothing there would report it.
+      # --write-missing-changelog fills the gap from the merged pull request title; a
+      # changelog committed by hand always wins, because an existing file is left alone.
+      - name: Check the F-Droid requirements for this version
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          set -eu
+          python3 tools/fdroid_check.py --write-missing-changelog \
+            --text "${PR_TITLE:-Soundtrail $VERSION}"
+
+      - name: Run F-Droid's own tools on the recipe and the source tree
+        run: |
+          set -eu
+          # fdroidserver's dependencies do not all publish wheels for the newest Python
+          # yet, and this job's setup-python is 3.14, so build the virtualenv from the
+          # runner's system Python (3.12 on ubuntu-24.04) when it is there.
+          py=python3
+          if [ -x /usr/bin/python3 ]; then py=/usr/bin/python3; fi
+          # Outside the checkout: the source scanner walks the tree, and fdroidserver's own
+          # dependencies read to it as prebuilt binaries.
+          venv="${RUNNER_TEMP:-/tmp}/fdroid-venv"
+          # An unavailable fdroidserver must not block a release: the step above already
+          # checked every requirement in this repository's own code, and the `fdroid` job
+          # in the Android build workflow runs the real tools strictly on the same commit.
+          # A finding, as opposed to a failed install, does block the release.
+          if ! "$py" -m venv "$venv" \
+            || ! "$venv/bin/pip" install --quiet --disable-pip-version-check fdroidserver; then
+            echo "::warning title=F-Droid tools not run::fdroidserver could not be installed, so 'fdroid lint' and the source scanner were skipped for this release. tools/fdroid_check.py did run."
+            exit 0
+          fi
+          "$venv/bin/python" tools/fdroid_lint.py --require
+
       # Tests and APK build finish before anything is pushed, so a failure leaves main untouched.
+      # assembleRelease is the variant F-Droid builds from the tag, so it has to work here
+      # and it has to stay unsigned - F-Droid signs what it publishes with its own key.
       - name: Test and build the release APK
-        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
+        run: |
+          set -eu
+          ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest \
+            :app:assembleRelease --stacktrace
+          test -f app/build/outputs/apk/release/app-release-unsigned.apk
+          test ! -f app/build/outputs/apk/release/app-release.apk
 
       - name: Commit, tag, and push the release version
         env:
@@ -58,10 +111,16 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- app/build.gradle.kts; then
+          # The version bump edits app/build.gradle.kts, the F-Droid gate above may have
+          # added a changelog under fastlane/.../changelogs/, and the recipe sync repoints
+          # fdroid/*.yml at this release. Stage all three explicitly: the old `git commit -a`
+          # only commits tracked files, so a generated changelog would have stayed out of the
+          # commit and out of the tag F-Droid builds from.
+          git add app/build.gradle.kts fastlane/metadata/android/en-US/changelogs fdroid/*.yml
+          if git diff --cached --quiet; then
             echo "Using existing version $VERSION; no version bump commit is needed."
           else
-            git commit -am "Bump version to $VERSION [skip ci]"
+            git commit -m "Bump version to $VERSION [skip ci]"
             if ! git push origin HEAD:main; then
               echo "::error title=Cannot push the version bump::Direct pushes to main were rejected. Allow GitHub Actions to bypass the branch protection rule for main (Settings, Branches), or push the version bump yourself."
               exit 1

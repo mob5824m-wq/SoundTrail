@@ -22,9 +22,15 @@ internal object Palette {
     val muted = Color(0xFF797D7B)
     val coral = Color(0xFFFFB69A)
     val lilac = Color(0xFFC6B5FA)
-    val spotify = Color(0xFF1ED760)
-    val youtube = Color(0xFFFF645E)
-    val soundcloud = Color(0xFFFF7A45)
+
+    /**
+     * A warm accent for the reading's own bars (energy, tempo).
+     *
+     * This used to be a streaming service's brand red. The services are gone, and with them every
+     * brand colour but one; the accent stays because the mood card still wants a second hue next
+     * to the primary, and nothing about it says whose app it came from.
+     */
+    val ember = Color(0xFFFF645E)
 
     /** Jellyfin's own purple, for the server the user runs themselves. */
     val jellyfin = Color(0xFFAA5CC3)

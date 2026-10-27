@@ -17,6 +17,5 @@ internal fun AssistantHit.toQueueEntry(): QueueEntry = QueueEntry(
     detail = detail,
     provider = provider,
     url = url,
-    streamUrl = streamUrl,
     localFile = localFile
 )

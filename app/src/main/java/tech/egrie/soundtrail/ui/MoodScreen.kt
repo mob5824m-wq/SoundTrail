@@ -97,9 +97,7 @@ internal data class MoodActions(
     /** Where a reading looks for music, and what to do with the songs it turns up. */
     val onSetSearchTarget: (MoodSearchTarget) -> Unit,
     val onPlayFound: (AssistantHit) -> Unit,
-    val onPlayAllFound: () -> Unit,
-    val onOpenFound: (AssistantHit) -> Unit,
-    val onOpenInYouTubeMusic: () -> Unit
+    val onPlayAllFound: () -> Unit
 )
 
 @Composable
@@ -150,15 +148,11 @@ internal fun MoodScreen(state: AppState, actions: MoodActions, onNotice: (String
                 Text("Nothing to play from your library yet", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "Pins and playlist songs are what a mix is built from. Add a song on the Pins tab, " +
-                        "import your YouTube playlists on Connect, or start from a search below — " +
-                        "YouTube Music needs no Google sign-in for that.",
+                    "Pins and playlist songs are what a mix is built from. Search your Jellyfin " +
+                        "server on the Search tab and pin what fits, attach audio you already own, " +
+                        "or point the reading at your server below.",
                     color = Palette.secondary, style = MaterialTheme.typography.bodyMedium
                 )
-                Spacer(Modifier.height(8.dp))
-                TextButton(onClick = actions.onOpenInYouTubeMusic) {
-                    Text("Search this mood in YouTube Music  \u2197", color = Palette.youtube)
-                }
             }
             Spacer(Modifier.height(10.dp))
         }
@@ -316,7 +310,7 @@ private fun MoodReadingCard(mood: MoodUiState, actions: MoodActions, onNotice: (
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     label = { Text("Ollama address") },
-                    placeholder = { Text("http://192.168.0.20:11434") },
+                    placeholder = { Text("https://192.168.0.20:11434") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
                 )
                 Spacer(Modifier.height(8.dp))
@@ -358,10 +352,12 @@ private fun MoodReadingCard(mood: MoodUiState, actions: MoodActions, onNotice: (
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "Ollama has to be reachable from this device: start it with " +
-                        "OLLAMA_HOST=0.0.0.0:11434, and on a phone use the computer's address on " +
-                        "your network \u2014 \u201Clocalhost\u201D here means this device. Local models " +
-                        "can take up to a minute; the app waits three.",
+                    "Ollama has to be reachable from this device, and over HTTPS: start it with " +
+                        "OLLAMA_HOST=0.0.0.0:11434 and put a TLS reverse proxy or a tunnel in " +
+                        "front of it, because plain http:// is refused here for every server " +
+                        "except your own Jellyfin. On a phone use the computer's address on your " +
+                        "network \u2014 \u201Clocalhost\u201D here means this device. Local models can " +
+                        "take up to a minute; the app waits three.",
                     color = Palette.muted, style = MaterialTheme.typography.labelMedium
                 )
                 Spacer(Modifier.height(4.dp))
@@ -467,8 +463,9 @@ private fun MoodReadingCard(mood: MoodUiState, actions: MoodActions, onNotice: (
                         "own machine, or a bridge in front of a service that has no API of its " +
                         "own. Paste the address however you found it \u2014 a whole " +
                         "\u2026/v1/chat/completions endpoint is trimmed for you, and a bare host " +
-                        "gets /v1. A server that wants no key is fine: leave the key empty and " +
-                        "none is sent.",
+                        "gets /v1 and https://, because this card sends an API key and plain " +
+                        "http:// is refused for every endpoint except your own Jellyfin server. A " +
+                        "server that wants no key is fine: leave the key empty and none is sent.",
                     color = Palette.muted, style = MaterialTheme.typography.labelMedium
                 )
             }
@@ -518,11 +515,11 @@ private fun MoodReadingCard(mood: MoodUiState, actions: MoodActions, onNotice: (
 /**
  * Where a reading goes looking, and what it came back with.
  *
- * The first thing on the card is the request itself, word for word: "find music on YouTube that
- * fits: …". The listener asked for the music, so they get to see the sentence that was asked on
- * their behalf — and changing the pills changes that sentence. Under it sit the songs that were
- * found, each resolved to something real: a stored song that plays here, a search result that
- * plays here, or a row that opens the app which owns it.
+ * The first thing on the card is the request itself, word for word: "find music on your Jellyfin
+ * server that fits: …". The listener asked for the music, so they get to see the sentence that was
+ * asked on their behalf — and changing the pills changes that sentence. Under it sit the songs
+ * that were found, each resolved to something real that plays here: a stored song, or a result
+ * from the listener's own server.
  */
 @Composable
 private fun MoodFindCard(
@@ -537,12 +534,7 @@ private fun MoodFindCard(
     // Choosing a provider that is not connected yet is a legitimate choice — it says where the
     // next reading should look — but the listener should hear about it now, not from a failed
     // search after they have typed out how they feel.
-    val missing = target.missingConnection(
-        spotify = state.spotifyConnected,
-        soundcloud = state.soundcloudConnected,
-        jellyfin = state.jellyfinConnected,
-        youtube = state.youtubeDataConnected
-    )
+    val missing = target.missingConnection(jellyfin = state.jellyfinConnected)
 
     SurfaceCard(Modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -574,12 +566,7 @@ private fun MoodFindCard(
                     selected = target == option,
                     onClick = {
                         actions.onSetSearchTarget(option)
-                        option.missingConnection(
-                            spotify = state.spotifyConnected,
-                            soundcloud = state.soundcloudConnected,
-                            jellyfin = state.jellyfinConnected,
-                            youtube = state.youtubeDataConnected
-                        )?.let(onNotice)
+                        option.missingConnection(jellyfin = state.jellyfinConnected)?.let(onNotice)
                     }
                 )
             }
@@ -622,15 +609,6 @@ private fun MoodFindCard(
             Spacer(Modifier.height(2.dp))
             Text(note, color = Palette.secondary, style = MaterialTheme.typography.labelMedium)
         }
-        if (target == MoodSearchTarget.YOUTUBE_MUSIC) {
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "YouTube Music rows are suggestions with a search link, because that service " +
-                    "publishes no API this app may search with. Everything else here plays in " +
-                    "Soundtrail itself.",
-                color = Palette.muted, style = MaterialTheme.typography.labelSmall
-            )
-        }
     }
 }
 
@@ -668,10 +646,6 @@ private fun MoodFoundRow(hit: AssistantHit, actions: MoodActions) {
         if (hit.playable) {
             IconButton(onClick = { actions.onPlayFound(hit) }, modifier = Modifier.size(38.dp)) {
                 Icon(Icons.Rounded.PlayArrow, "Play ${hit.title}", tint = Palette.primary)
-            }
-        } else if (hit.musicUrl != null || hit.url != null) {
-            TextButton(onClick = { actions.onOpenFound(hit) }) {
-                Text("Open", color = Palette.lilac)
             }
         }
     }
@@ -830,7 +804,7 @@ private fun MoodResultCard(
         Spacer(Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             MoodFeatureBar("Mood", profile.valence, Palette.coral, Modifier.weight(1f))
-            MoodFeatureBar("Energy", profile.energy, Palette.youtube, Modifier.weight(1f))
+            MoodFeatureBar("Energy", profile.energy, Palette.ember, Modifier.weight(1f))
         }
         Spacer(Modifier.height(10.dp))
         Text(
@@ -873,13 +847,6 @@ private fun MoodResultCard(
                     Spacer(Modifier.width(6.dp))
                     Text("Save this mix as a playlist", color = Palette.primary)
                 }
-            }
-        }
-        TextButton(onClick = actions.onOpenInYouTubeMusic) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Rounded.Search, null, tint = Palette.youtube, modifier = Modifier.size(17.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("Open this mood in YouTube Music  \u2197", color = Palette.youtube)
             }
         }
     }

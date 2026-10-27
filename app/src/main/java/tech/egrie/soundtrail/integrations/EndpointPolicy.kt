@@ -8,26 +8,30 @@ internal class EndpointPolicyException(message: String) : Exception(message)
 /**
  * Which transport rule one request is made under.
  *
- * The default is the strict one, so a new integration gets HTTPS by doing nothing at all and has
- * to ask, in writing, for the exception.
+ * The default is the strict one — HTTPS, with no exception at all — so a new integration is safe
+ * by doing nothing and has to ask, in writing, for the one exception that exists.
  */
 internal enum class TransportRule {
     /**
-     * HTTPS, unless the host is plainly the listener's own machine or network.
+     * HTTPS, and nothing else.
      *
-     * This is the rule for everything that carries a credential or personal data to somewhere
-     * else: the sync server, the mood AI providers, TheAudioDB. A model server on `localhost` or
-     * `192.168.1.20` is the same situation as a LAN Jellyfin box and is allowed to stay plain
-     * HTTP, because that is how those servers are actually run at home — and refusing it would
-     * break a setup that works today without making anything safer.
+     * This is the rule for everything that carries a credential or personal data somewhere else:
+     * the sync server, the mood AI providers, TheAudioDB. A private address is **not** an
+     * exception to it. "It is only my own network" is the assumption that fails quietly: a
+     * `192.168.1.20` can be a flatmate's laptop, a printer with a web server on it, a router
+     * answering for a name it should not, or a network that is not the listener's at all because
+     * the phone joined a café's — and this is precisely the traffic carrying an API key or a
+     * bearer token. Where the address really is the listener's own box, HTTPS costs one
+     * certificate on one machine.
      */
-    HTTPS_UNLESS_LOCAL,
+    HTTPS,
 
     /**
      * The listener's own Jellyfin server, wherever it is.
      *
-     * Plain HTTP is allowed for this one integration even on a public host, because a self-hosted
-     * server without a certificate is the normal case and the app has no other music source. The
+     * Plain HTTP is allowed for this one integration, and only this one, even on a public host,
+     * because a self-hosted server without a certificate is the normal case and the app has no
+     * other music source: refusing it would leave the app with nothing to play at all. The
      * address itself is still normalized and validated by [EndpointPolicy.jellyfinServer], which
      * refuses credentials in the authority, queries, fragments and traversal segments.
      */
@@ -44,52 +48,25 @@ internal enum class TransportRule {
  * is the absence of one — so the rule lives here instead, at the single funnel every request in
  * the app goes through ([httpRequest]), where it cannot be forgotten by a new integration.
  *
- * In short: **HTTPS for everything, plain HTTP only for the listener's own Jellyfin server or a
- * host on their own machine or network.** What is never allowed is a credential crossing the
- * public internet in the clear.
+ * In short: **HTTPS for everything, plain HTTP only for the listener's own Jellyfin server.** A
+ * private or local-looking address is not an exception — see [TransportRule.HTTPS] for why that
+ * exception is not as safe as it looks. What is never allowed is a credential crossing a network
+ * in the clear.
  *
- * The sync server is stricter still — HTTPS with no local exception at all — because it carries an
- * account password, a bearer token and the encrypted library, and its own deployment docs say to
- * put a TLS proxy in front of it and never expose the port directly. See [syncServer].
+ * The sync server does not go through this rule at all. [syncServer] requires `https://` outright
+ * and refuses an address carrying credentials, a query, a fragment or a `..` segment, because that
+ * one endpoint holds an account password, a bearer token and the encrypted library, and its own
+ * deployment docs say to put a TLS proxy in front of it and never expose the port directly.
  */
 internal object EndpointPolicy {
-
-    /**
-     * True when a host is plainly the listener's own machine or their own network.
-     *
-     * A name with no dot in it is treated as local because that is how people address a box on
-     * their LAN (`http://jellyfin:8096`, `http://ollama:11434`); a public host always has one.
-     */
-    fun isOnPremises(host: String): Boolean {
-        val value = host.trim().lowercase().removeSuffix(".")
-        if (value.isEmpty()) return false
-        val bare = value.removePrefix("[").removeSuffix("]")
-        if (bare == "localhost" || value.endsWith(".localhost")) return true
-        if (bare == "::1") return true
-        // IPv6 unique-local (fc00::/7) and link-local (fe80::/10).
-        if (bare.startsWith("fc") || bare.startsWith("fd") || bare.startsWith("fe8")) return true
-        if (value.endsWith(".local") || value.endsWith(".lan")) return true
-        val parts = bare.split('.')
-        if (parts.size == 4 && parts.all { it.toIntOrNull() in 0..255 }) {
-            val first = parts[0].toInt()
-            val second = parts[1].toInt()
-            return first == 10 ||
-                first == 127 ||
-                (first == 192 && second == 168) ||
-                (first == 172 && second in 16..31) ||
-                (first == 169 && second == 254)
-        }
-        // A bare machine name with no dot: a box on the listener's own network.
-        return '.' !in bare && ':' !in bare
-    }
 
     /**
      * The reason an address may not be requested as it stands, or null when it may.
      *
      * Under [TransportRule.JELLYFIN] only a non-HTTP(S) scheme is a problem; under the default
-     * rule, plain HTTP to a host that is not the listener's own is.
+     * rule, plain HTTP is a problem wherever the host happens to live.
      */
-    fun cleartextProblem(address: String, rule: TransportRule = TransportRule.HTTPS_UNLESS_LOCAL): String? {
+    fun cleartextProblem(address: String, rule: TransportRule = TransportRule.HTTPS): String? {
         val url = runCatching { URL(address) }.getOrNull()
             ?: return "That address is not a usable URL."
         val scheme = url.protocol.lowercase()
@@ -98,12 +75,9 @@ internal object EndpointPolicy {
         if (rule == TransportRule.JELLYFIN) return null
         val host = url.host?.lowercase().orEmpty()
         if (host.isBlank()) return "That address has no host."
-        return if (isOnPremises(host)) {
-            null
-        } else {
-            "Plain HTTP is only allowed for a server on this device or your own network. " +
-                "Use https:// for $host."
-        }
+        // Worded as what to do rather than as what was refused: the listener typed an address that
+        // looks right, and the useful answer is the scheme it needs.
+        return "Plain HTTP is only allowed for your own Jellyfin server. Use https:// for $host."
     }
 
     /**
@@ -111,7 +85,7 @@ internal object EndpointPolicy {
      * to somewhere the rule does not cover. Called by [httpRequest] before the connection is
      * opened, so nothing is ever sent in order to decide whether to send it.
      */
-    fun requireSecureTransport(address: String, rule: TransportRule = TransportRule.HTTPS_UNLESS_LOCAL) {
+    fun requireSecureTransport(address: String, rule: TransportRule = TransportRule.HTTPS) {
         cleartextProblem(address, rule)?.let { throw EndpointPolicyException(it) }
     }
 

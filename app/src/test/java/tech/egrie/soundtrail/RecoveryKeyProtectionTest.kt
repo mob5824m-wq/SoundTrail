@@ -25,7 +25,8 @@ import org.junit.Test
  * 2. the clipboard copy is marked sensitive on Android 13+, still works below it, and is cleared
  *    again — but only while it still holds this key;
  * 3. revealing a stored key again requires the device unlock, while the one shown at creation does
- *    not, because it was just generated on this device and has never been anywhere else.
+ *    not, because it was just generated on this device and has never been anywhere else;
+ * 4. that gate costs no dependency, no activity base class and no theme change.
  */
 class RecoveryKeyProtectionTest {
 
@@ -166,68 +167,111 @@ class RecoveryKeyProtectionTest {
         )
     }
 
-    @Test fun `the unlock accepts a strong biometric or the device credential`() {
+    @Test fun `the gate is the platform's own confirm-credential screen`() {
+        // The keyguard offers the enrolled biometric first on a device that has one and the PIN,
+        // pattern or password otherwise, which is the same choice androidx.biometric would present
+        // - without the dependency, and without the app having to decide which authenticators
+        // count as strong enough on every API level it supports.
         val unlock = body(main, "private fun requireUnlock(", "requireUnlock")
         assertTrue(
-            "BIOMETRIC_STRONG, so a face-only device does not silently downgrade the gate",
-            unlock.contains("BiometricManager.Authenticators.BIOMETRIC_STRONG")
+            "it must ask the keyguard",
+            unlock.contains("getSystemService(KeyguardManager::class.java)")
         )
         assertTrue(
-            "DEVICE_CREDENTIAL, so a phone with no enrolled biometric can still show the key",
-            unlock.contains("BiometricManager.Authenticators.DEVICE_CREDENTIAL")
+            "and use the confirm-device-credential screen",
+            unlock.contains("createConfirmDeviceCredentialIntent(")
         )
-        assertTrue(unlock.contains("prompt.authenticate("))
+        assertTrue(
+            "a confirmed result is what runs the action",
+            main.contains("if (result.resultCode == RESULT_OK) action?.invoke()")
+        )
+        // Asserted as the coupling, not as the word: the KDoc above requireUnlock explains why the
+        // library is not used here, and prose naming it is not a dependency on it.
+        assertFalse("no androidx.biometric import", main.contains("import androidx.biometric"))
+        assertFalse("no prompt is constructed", main.contains("BiometricPrompt("))
+        assertFalse("no authenticator is queried", main.contains("BiometricManager."))
+        assertFalse("no FragmentActivity base class", main.contains(": FragmentActivity"))
+    }
+
+    @Test fun `the gate costs no dependency, no base class and no theme change`() {
+        // androidx.biometric was used here once, and it brought two things with it that had nothing
+        // to do with the recovery key: a FragmentActivity base class for MainActivity, and an
+        // AppCompat theme parent, because below API 28 the library inflates its prompt through an
+        // AppCompatDialogFragment that throws on any other theme. That made the app's own theme
+        // hostage to a library's dependency graph. All three are gone, and this is what keeps them
+        // gone - a dependency added back for one feature compiles and passes every functional test.
+        // Again the declaration rather than the word: the comment beside it names the library to
+        // explain why it is absent, which is the point of the comment.
+        val build = MainSources.moduleDir().resolve("build.gradle.kts").readText()
+        listOf("androidx.biometric", "androidx.appcompat", "androidx.fragment").forEach { library ->
+            assertFalse(
+                "$library must not be declared",
+                build.contains("implementation(\"$library")
+            )
+        }
+        assertTrue(
+            "MainActivity stays a ComponentActivity",
+            main.contains("class MainActivity : ComponentActivity()")
+        )
+        val theme = MainSources.mainDir().resolve("res/values/themes.xml").readText()
+        assertTrue(
+            "the theme stays on the framework parent",
+            theme.contains("parent=\"android:style/Theme.Material.NoActionBar\"")
+        )
     }
 
     @Test fun `a device with no screen lock fails closed`() {
+        // There is nothing to authenticate against, so the key is not shown and the listener is
+        // told what to set up. Showing it anyway would make the gate decorative.
         val unlock = body(main, "private fun requireUnlock(", "requireUnlock")
-        val refused = body(
-            unlock,
-            "if (BiometricManager.from(this).canAuthenticate(authenticators) !=",
-            "the no-lock branch"
-        )
+        val refused = body(unlock, "if (keyguard == null || !keyguard.isDeviceSecure)", "the no-lock branch")
         assertTrue(
             "the refusal must explain what to set up",
             refused.contains("has no screen lock") && refused.contains("model.notify(")
         )
-        assertFalse(
-            "and must not run the action anyway",
-            refused.contains("action()")
-        )
+        assertFalse("and must not run the action anyway", refused.contains("action()"))
         assertTrue(
             "the function must return there rather than falling through to the prompt",
             refused.removeSuffix("}").trimEnd().endsWith("return")
         )
     }
 
-    @Test fun `the prompt sets no negative button beside the device credential`() {
-        // Combining setNegativeButtonText with DEVICE_CREDENTIAL throws at runtime, and the
-        // credential prompt brings its own cancel. This is a crash, not a style question.
+    @Test fun `a device that cannot produce a prompt also fails closed`() {
+        // createConfirmDeviceCredentialIntent can return null; treating that as "no gate needed"
+        // would open the key on exactly the devices where the gate is least likely to work.
         val unlock = body(main, "private fun requireUnlock(", "requireUnlock")
-        assertFalse(
-            "setNegativeButtonText must not be used with DEVICE_CREDENTIAL",
-            unlock.contains("setNegativeButtonText")
-        )
+        val refused = body(unlock, "if (prompt == null)", "the no-prompt branch")
+        assertTrue(refused.contains("model.notify("))
+        assertFalse(refused.contains("action()"))
+        assertTrue(refused.removeSuffix("}").trimEnd().endsWith("return"))
     }
 
-    @Test fun `backing out of the prompt is not reported as a failure`() {
-        val unlock = body(main, "private fun requireUnlock(", "requireUnlock")
-        listOf("ERROR_USER_CANCELED", "ERROR_NEGATIVE_BUTTON", "ERROR_CANCELED").forEach { code ->
-            assertTrue(
-                "$code is a decision, not an error the listener needs told about",
-                unlock.contains(code)
-            )
-        }
+    @Test fun `a cancelled unlock runs nothing and says nothing`() {
+        val launcher = body(
+            main,
+            "private val unlockLauncher = registerForActivityResult(",
+            "the unlock launcher"
+        )
         assertTrue(
-            "a genuine failure is still reported",
-            unlock.contains("Could not unlock this device")
+            "only a confirmed credential runs the action",
+            launcher.contains("result.resultCode == RESULT_OK")
+        )
+        assertTrue(
+            "the pending action is dropped before the result is read, so a redelivered result " +
+                "cannot run an old action a second time",
+            launcher.indexOf("pendingUnlockAction = null") < launcher.indexOf("RESULT_OK")
+        )
+        assertFalse(
+            "backing out of an unlock prompt is a decision, not a failure to report",
+            launcher.contains("model.notify(")
         )
     }
 
     @Test fun `the unlock says what it is protecting`() {
-        // A prompt that does not name the thing it gates reads as the app demanding a fingerprint
-        // for no reason, which is how people learn to dismiss them.
+        // A prompt that does not name the thing it gates reads as the system demanding a
+        // fingerprint for no reason, which is how people learn to dismiss them.
         val unlock = body(main, "private fun requireUnlock(", "requireUnlock")
+        assertTrue(unlock.contains("\"Unlock Soundtrail\""))
         assertTrue(unlock.contains("Confirm it is you to show \$what."))
         assertNotNull(main.lines().firstOrNull { it.contains("\"your saved recovery key\"") })
     }

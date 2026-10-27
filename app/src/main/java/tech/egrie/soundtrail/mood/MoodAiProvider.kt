@@ -1,7 +1,5 @@
 package tech.egrie.soundtrail.mood
 
-import tech.egrie.soundtrail.integrations.EndpointPolicy
-
 /** The model that answers a mood reading when the listener has not named one. */
 internal const val DEFAULT_OLLAMA_MODEL = "llama3.2"
 
@@ -116,11 +114,11 @@ internal object MoodAiUrls {
     fun normalize(input: String): String? {
         val typed = input.trim()
         if (typed.isBlank()) return null
-        // A bare host defaults to plain HTTP only when it is plainly local, exactly as
-        // [normalizeOpenAi] does. Defaulting a public name to http:// would produce an address
-        // that EndpointPolicy refuses at request time — a stored URL that can never be used.
-        val withScheme =
-            if (typed.contains("://")) typed else "${if (looksLocal(typed)) "http" else "https"}://$typed"
+        // A bare host is given https:// whatever it looks like. Plain HTTP is allowed for exactly
+        // one integration in this app — the listener's own Jellyfin server — and this is not it. An
+        // address typed with an explicit http:// is kept as typed rather than silently upgraded, so
+        // the refusal at request time can name the address the listener actually entered.
+        val withScheme = if (typed.contains("://")) typed else "https://$typed"
         val scheme = withScheme.substringBefore("://").lowercase()
         if (scheme != "http" && scheme != "https") return null
         var value = withScheme.substringAfter("://").trimEnd('/')
@@ -149,17 +147,17 @@ internal object MoodAiUrls {
      * a prefix is part of the address here (`/v1`, or `/openai/v1` behind a proxy), and appends
      * `/v1` when the listener typed only a host, since every one of these APIs lives under it.
      *
-     * A host typed with no scheme defaults to plain HTTP only when it is plainly local — a
-     * loopback name, a private address, `something.local`, or a bare machine name with no dot.
-     * Those are the model servers and bridges people actually run at home, and they usually have
-     * no TLS. Everything else is assumed to be public and HTTPS, because this provider sends a
-     * key to whatever is on the other end.
+     * A host typed with no scheme is given `https://`, including a machine on the listener's own
+     * network. This provider sends an API key to whatever is on the other end, and a private
+     * address is not a promise about who is listening on it — so a model server at home needs a
+     * certificate, or a tunnel that supplies one. An address typed as `http://` is kept as typed and
+     * refused at request time with a sentence that says to use HTTPS, which beats quietly rewriting
+     * it into something the listener never wrote.
      */
     fun normalizeOpenAi(input: String): String? {
         val typed = input.trim()
         if (typed.isBlank()) return null
-        val withScheme =
-            if (typed.contains("://")) typed else "${if (looksLocal(typed)) "http" else "https"}://$typed"
+        val withScheme = if (typed.contains("://")) typed else "https://$typed"
         val scheme = withScheme.substringBefore("://").lowercase()
         if (scheme != "http" && scheme != "https") return null
         var value = withScheme.substringAfter("://").trim()
@@ -258,23 +256,6 @@ internal object MoodAiUrls {
     /** True when an address is Arena's gateway, so the app can offer its keys page. */
     fun isArena(base: String?): Boolean =
         base != null && hostOf(base) == "api.preview.arena.ai"
-
-    /**
-     * True when a host with no scheme is plainly a machine on the listener's own network.
-     *
-     * The classification itself is [EndpointPolicy.isOnPremises], so what counts as local is
-     * decided in one place and cannot drift from what the transport rule will actually allow.
-     */
-    private fun looksLocal(input: String): Boolean {
-        val typed = input.substringAfter("://").substringBefore('/')
-        val host = (if (typed.startsWith("[")) {
-            typed.substringBefore(']') + "]"
-        } else {
-            typed.substringBefore(':')
-        }).lowercase()
-        if (host.isBlank()) return false
-        return EndpointPolicy.isOnPremises(host)
-    }
 
     fun hostOf(url: String): String =
         url.substringAfter("://").substringBefore('/').substringBefore(':').lowercase()

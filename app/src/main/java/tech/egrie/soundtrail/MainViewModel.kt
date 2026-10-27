@@ -1234,7 +1234,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                     aiReady = moodAi.configured,
                     aiNote = when {
                         url.isBlank() -> null
-                        normalized == null -> "That does not look like an address. Try http://192.168.0.20:11434"
+                        normalized == null -> "That does not look like an address. Try https://192.168.0.20:11434"
                         else -> "Using ${MoodAiUrls.display(normalized)}"
                     }
                 )
@@ -1384,7 +1384,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 return
             }
         } else if (MoodAiUrls.normalize(mood.ollamaUrl) == null) {
-            notify("Add your Ollama server's address first, for example http://192.168.0.20:11434.")
+            notify("Add your Ollama server's address first, for example https://192.168.0.20:11434.")
             return
         }
         if (!openAi) moodPrefs.aiProvider = MoodAiProvider.OLLAMA
@@ -1604,7 +1604,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     private fun missingProviderSetting(provider: MoodAiProvider): String = when (provider) {
         MoodAiProvider.ON_DEVICE -> "The on-device engine needs nothing."
         MoodAiProvider.OLLAMA ->
-            "Add your Ollama server's address (for example http://192.168.0.20:11434). " +
+            "Add your Ollama server's address (for example https://192.168.0.20:11434). " +
                 "Reading on-device until then."
         MoodAiProvider.OPENAI_COMPATIBLE -> when {
             MoodAiUrls.normalizeOpenAi(moodPrefs.openAiUrl) == null ->

@@ -56,7 +56,8 @@ internal data class HttpResponse(
  *    answers for it, move a request — and the credentials in its headers — to a host the caller
  *    never chose. Callers treat [HttpResponse.isRedirect] as an error.
  * 2. **Cleartext is refused** for anything the request's [TransportRule] does not cover, by
- *    [EndpointPolicy.requireSecureTransport], before the connection is opened.
+ *    [EndpointPolicy.requireSecureTransport], before the connection is opened — and only
+ *    [TransportRule.JELLYFIN] covers it, so a caller has to name that rule in writing.
  * 3. **Nothing is logged.** In particular the [authorization] argument — a bearer token, a
  *    Jellyfin authorization header, or an API key — is set on the connection and never written
  *    anywhere else; `CredentialLoggingTest` fails the build if that changes.
@@ -71,8 +72,8 @@ internal suspend fun httpRequest(
     headers: Map<String, String> = emptyMap(),
     connectTimeoutMs: Int = 10_000,
     readTimeoutMs: Int = 10_000,
-    /** How this endpoint may be reached. The default requires HTTPS off the listener's network. */
-    transport: TransportRule = TransportRule.HTTPS_UNLESS_LOCAL
+    /** How this endpoint may be reached. The default requires HTTPS, with no local exception. */
+    transport: TransportRule = TransportRule.HTTPS
 ): HttpResponse = withContext(Dispatchers.IO) {
     EndpointPolicy.requireSecureTransport(address, transport)
     val connection = (URL(address).openConnection() as HttpURLConnection).apply {

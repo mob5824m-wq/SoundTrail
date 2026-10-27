@@ -15,6 +15,6 @@ Features:
 
 Privacy: pins, coordinates, playlists and automations stay on the device unless you turn on cloud sync. With sync on, they are encrypted before upload with a 256-bit recovery key only you hold. The app has no ads, analytics or tracking libraries, and it contains no Google Play services code.
 
-Network: HTTPS is required for every endpoint except a Jellyfin server on your own machine or network, which is enforced in the code and not only in the manifest. Certificates are validated against the system trust store; nothing is pinned, so a self-hosted server can rotate its certificate without breaking the app. No request is ever sent to a server the app did not choose — redirects are not followed.
+Network: HTTPS is required for every endpoint except your own Jellyfin server, which is enforced in the code and not only in the manifest. Certificates are validated against the system trust store; nothing is pinned, so a self-hosted server can rotate its certificate without breaking the app. No request is ever sent to a server the app did not choose — redirects are not followed.
 
 Requires Android 8.0 or newer.

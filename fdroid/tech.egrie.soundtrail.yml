@@ -61,14 +61,21 @@ MaintainerNotes: |-
 
   network_security_config.xml permits cleartext HTTP because the listener types the address
   of their own Jellyfin server, which is usually plain HTTP on a LAN. The code enforces a
-  stricter policy than the manifest on top of it: integrations/EndpointPolicy.kt requires
-  HTTPS for every address a listener enters and allows plain HTTP only for a Jellyfin
-  server or another on-premises host (loopback, RFC 1918, link-local, .local/.lan or a
-  bare machine name). The sync server has no cleartext exception, never accepts
-  credentials embedded in its URL, and a redirect is reported as an error rather than
-  followed silently. Certificates are still validated against the system trust store
-  only; user-installed CAs are not trusted, there is no pinning and no custom
-  TrustManager.
+  stricter policy than the manifest on top of it: integrations/EndpointPolicy.kt allows
+  plain HTTP for a Jellyfin server and for nothing else. A private address is not an
+  exception, because 192.168.0.20 can be a flatmate's laptop or a network the phone joined
+  somewhere else, and those are exactly the requests that carry an API key or a bearer
+  token. The exception has to be declared at the call site as TransportRule.JELLYFIN, so a
+  new integration defaults to HTTPS-only and cannot inherit it by accident. The sync
+  server has no cleartext exception, never accepts credentials embedded in its URL, and a
+  redirect is reported as an error rather than followed silently. Certificates are still
+  validated against the system trust store only; user-installed CAs are not trusted, there
+  is no pinning and no custom TrustManager.
+
+  No dependency is added for the gate on re-showing a stored sync recovery key. It asks the
+  platform KeyguardManager for a confirm-device-credential intent rather than using
+  androidx.biometric, which would have brought a FragmentActivity base class and an
+  AppCompat theme parent with it. A unit test fails if any of the three comes back.
 
   The tree passes fdroidserver's source scanner with zero problems and this recipe passes
   `fdroid lint`; tools/fdroid_check.py and tools/fdroid_lint.py re-run both in CI on every

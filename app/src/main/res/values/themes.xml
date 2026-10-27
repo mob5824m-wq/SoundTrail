@@ -1,17 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  The parent is an AppCompat theme rather than the framework's Material one, and that is not a
-  stylistic choice: on API 26 and 27 androidx.biometric draws its own prompt through an
-  AppCompatDialogFragment, which refuses to inflate unless the activity theme descends from
-  Theme.AppCompat. minSdk is 26, so with the framework theme the recovery-key prompt would crash
-  those devices instead of asking for the unlock. On API 28+ the platform prompt is used and the
-  parent makes no difference.
+  The parent is the framework's Material theme, and it stays that way on purpose. Every colour this
+  app shows comes from Compose (ui/Theme.kt), so this style only carries the window chrome below —
+  the status and navigation bar colours and the light/dark icon choice.
 
-  Every colour this app shows comes from Compose (ui/Theme.kt), so the XML theme only carries the
-  window chrome below — which is why the switch is invisible.
+  It is worth recording what would change it: an AppCompat parent is only needed if something in
+  the app inflates an AppCompatDialogFragment, which is what androidx.biometric does below API 28.
+  The recovery-key unlock goes through KeyguardManager instead, so nothing here needs AppCompat and
+  no androidx.appcompat dependency comes with it.
 -->
 <resources>
-    <style name="Theme.Soundtrail" parent="Theme.AppCompat.NoActionBar">
+    <style name="Theme.Soundtrail" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
         <item name="android:statusBarColor">#101114</item>

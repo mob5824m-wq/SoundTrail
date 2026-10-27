@@ -25,7 +25,7 @@ class MoodConsentTest {
         )
 
         assertEquals(MoodAiProvider.OLLAMA, destination?.provider)
-        assertEquals("http://192.168.0.20:11434", destination?.endpoint)
+        assertEquals("https://192.168.0.20:11434", destination?.endpoint)
     }
 
     @Test
@@ -49,13 +49,13 @@ class MoodConsentTest {
     }
 
     @Test
-    fun `a host on the listener's own network becomes plain http plus v1`() {
+    fun `a bare host becomes https plus v1, on the listener's own network or not`() {
         val destination = MoodAiConsent.destination(
             provider = MoodAiProvider.OPENAI_COMPATIBLE,
             ollamaUrl = "",
             openAiUrl = "192.168.0.20:8000"
         )
-        assertEquals("http://192.168.0.20:8000/v1", destination?.endpoint)
+        assertEquals("https://192.168.0.20:8000/v1", destination?.endpoint)
     }
 
     @Test

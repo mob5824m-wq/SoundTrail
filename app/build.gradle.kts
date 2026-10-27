@@ -72,19 +72,12 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-    // Re-authenticating before the saved sync recovery key is shown again. The key decrypts the
-    // whole synced library, so re-displaying it is gated on the device's own unlock: biometric
-    // where one is enrolled, the PIN/pattern/password otherwise. androidx.biometric is first-party
-    // AndroidX and free software, so this costs F-Droid nothing.
-    implementation("androidx.biometric:biometric:1.1.0")
-    // androidx.biometric attaches its prompt to a FragmentActivity, which is what MainActivity
-    // extends for that reason. Declared directly rather than left to come in transitively.
-    implementation("androidx.fragment:fragment-ktx:1.8.5")
-    // Declared directly because res/values/themes.xml now inherits from Theme.AppCompat: below
-    // API 28 androidx.biometric inflates its prompt through an AppCompatDialogFragment, which
-    // throws on any other theme. Depending on it transitively through biometric would make the
-    // app's own theme hostage to another library's dependency graph.
-    implementation("androidx.appcompat:appcompat:1.7.0")
+    // No dependency for the recovery-key gate. Re-displaying a stored key is gated on the device's
+    // own unlock through KeyguardManager.createConfirmDeviceCredentialIntent, which is platform API
+    // since well before minSdk: androidx.biometric would do the same job but would drag in a
+    // FragmentActivity base class and an AppCompat theme parent, and this app adds no dependency
+    // for it. That keeps the acceptance criterion honest and keeps res/values/themes.xml on the
+    // framework theme.
     // Android Auto browses and controls Soundtrail through a MediaBrowserService, and the
     // lockscreen/Bluetooth/Auto controls all need one shared MediaSession. media1 (not media3)
     // is deliberate: Soundtrail already plays through its own resolver and MediaPlayer, so the

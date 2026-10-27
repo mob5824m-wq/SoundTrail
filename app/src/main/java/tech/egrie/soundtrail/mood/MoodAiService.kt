@@ -2,6 +2,7 @@ package tech.egrie.soundtrail.mood
 
 import org.json.JSONArray
 import org.json.JSONObject
+import tech.egrie.soundtrail.integrations.EndpointPolicyException
 import tech.egrie.soundtrail.integrations.HttpResponse
 import tech.egrie.soundtrail.integrations.httpRequest
 import kotlin.math.roundToInt
@@ -264,7 +265,7 @@ internal class MoodAiService(private val store: MoodStore) {
         val raw = store.openAiUrl
         return MoodAiUrls.normalizeOpenAi(raw) ?: throw MoodAiException(
             "Add the endpoint's address first, for example https://api.openai.com/v1 or " +
-                "http://192.168.0.20:8000/v1."
+                "https://192.168.0.20:8000/v1."
         )
     }
 
@@ -341,6 +342,10 @@ internal class MoodAiService(private val store: MoodStore) {
         )
     } catch (e: kotlinx.coroutines.CancellationException) {
         throw e
+    } catch (e: EndpointPolicyException) {
+        // Refused before a connection was ever opened. "Couldn't reach" would send the listener
+        // off to check the endpoint instead of the one thing actually wrong: the scheme they typed.
+        throw MoodAiException(e.message ?: "That address may not be used as it stands.")
     } catch (e: Exception) {
         throw MoodAiException(MoodAiParser.describeOpenAiNetworkFailure(base, e))
     }
@@ -391,7 +396,7 @@ internal class MoodAiService(private val store: MoodStore) {
     private fun requireOllamaBase(): String {
         val raw = store.ollamaUrl
         return MoodAiUrls.normalize(raw) ?: throw MoodAiException(
-            "Add your Ollama server's address first, for example http://192.168.0.20:11434."
+            "Add your Ollama server's address first, for example https://192.168.0.20:11434."
         )
     }
 
@@ -405,6 +410,11 @@ internal class MoodAiService(private val store: MoodStore) {
             )
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
+        } catch (e: EndpointPolicyException) {
+            // Refused before a connection was ever opened. "Couldn't reach" would send the
+            // listener off to check their router and their OLLAMA_HOST instead of the one thing
+            // that is actually wrong, which is the scheme in the address they typed.
+            throw MoodAiException(e.message ?: "That address may not be used as it stands.")
         } catch (e: Exception) {
             throw MoodAiException(MoodAiParser.describeNetworkFailure(address, e))
         }
@@ -448,6 +458,11 @@ internal class MoodAiService(private val store: MoodStore) {
             )
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
+        } catch (e: EndpointPolicyException) {
+            // Refused before a connection was ever opened. "Couldn't reach" would send the
+            // listener off to check their router and their OLLAMA_HOST instead of the one thing
+            // that is actually wrong, which is the scheme in the address they typed.
+            throw MoodAiException(e.message ?: "That address may not be used as it stands.")
         } catch (e: Exception) {
             throw MoodAiException(MoodAiParser.describeNetworkFailure(address, e))
         }

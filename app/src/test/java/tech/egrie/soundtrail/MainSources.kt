@@ -26,6 +26,18 @@ internal object MainSources {
         return File("src/main/java")
     }
 
+    /** The `src/main` directory of the app module, for the resources beside the code. */
+    fun mainDir(): File = root().parentFile ?: File("src/main")
+
+    /**
+     * The app module's own directory, which holds `build.gradle.kts`.
+     *
+     * A test that reads the build file is a test about dependencies, and "no new third-party
+     * dependency" is a requirement that nothing else in the suite can see: a library added for one
+     * feature compiles, passes every functional test, and quietly changes what the app ships.
+     */
+    fun moduleDir(): File = mainDir().parentFile?.parentFile ?: File(".")
+
     /** Every Kotlin file in the app's main sources. */
     fun kotlinFiles(): List<File> = root().walkTopDown()
         .filter { it.isFile && it.extension == "kt" }

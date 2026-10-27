@@ -310,7 +310,7 @@ private fun MoodReadingCard(mood: MoodUiState, actions: MoodActions, onNotice: (
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     label = { Text("Ollama address") },
-                    placeholder = { Text("http://192.168.0.20:11434") },
+                    placeholder = { Text("https://192.168.0.20:11434") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
                 )
                 Spacer(Modifier.height(8.dp))
@@ -352,10 +352,12 @@ private fun MoodReadingCard(mood: MoodUiState, actions: MoodActions, onNotice: (
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "Ollama has to be reachable from this device: start it with " +
-                        "OLLAMA_HOST=0.0.0.0:11434, and on a phone use the computer's address on " +
-                        "your network \u2014 \u201Clocalhost\u201D here means this device. Local models " +
-                        "can take up to a minute; the app waits three.",
+                    "Ollama has to be reachable from this device, and over HTTPS: start it with " +
+                        "OLLAMA_HOST=0.0.0.0:11434 and put a TLS reverse proxy or a tunnel in " +
+                        "front of it, because plain http:// is refused here for every server " +
+                        "except your own Jellyfin. On a phone use the computer's address on your " +
+                        "network \u2014 \u201Clocalhost\u201D here means this device. Local models can " +
+                        "take up to a minute; the app waits three.",
                     color = Palette.muted, style = MaterialTheme.typography.labelMedium
                 )
                 Spacer(Modifier.height(4.dp))
@@ -461,8 +463,9 @@ private fun MoodReadingCard(mood: MoodUiState, actions: MoodActions, onNotice: (
                         "own machine, or a bridge in front of a service that has no API of its " +
                         "own. Paste the address however you found it \u2014 a whole " +
                         "\u2026/v1/chat/completions endpoint is trimmed for you, and a bare host " +
-                        "gets /v1. A server that wants no key is fine: leave the key empty and " +
-                        "none is sent.",
+                        "gets /v1 and https://, because this card sends an API key and plain " +
+                        "http:// is refused for every endpoint except your own Jellyfin server. A " +
+                        "server that wants no key is fine: leave the key empty and none is sent.",
                     color = Palette.muted, style = MaterialTheme.typography.labelMedium
                 )
             }

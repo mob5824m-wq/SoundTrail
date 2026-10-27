@@ -86,24 +86,7 @@ class EndpointPolicyTest {
         assertTrue(message, message.contains("https://sync.example.net"))
     }
 
-    // ----- which hosts count as the listener's own -----
-
-    @Test fun `loopback and private ranges are on premises`() {
-        listOf(
-            "localhost", "LOCALHOST", "127.0.0.1", "127.1.2.3", "10.0.0.5", "192.168.1.20",
-            "172.16.0.1", "172.31.255.254", "169.254.1.1", "::1", "[::1]", "nas.local",
-            "printer.lan", "jellyfin", "ollama", "fd12:3456::1", "fe80::1"
-        ).forEach { assertTrue("$it should be on premises", EndpointPolicy.isOnPremises(it)) }
-    }
-
-    @Test fun `public hosts are not on premises`() {
-        listOf(
-            "example.com", "api.openai.com", "sync.example.net", "soundtrail.duckdns.org",
-            "172.32.0.1", "172.15.0.1", "11.0.0.1", "192.169.1.1", "notlocal.com.au", ""
-        ).forEach { assertTrue("$it should not be on premises", !EndpointPolicy.isOnPremises(it)) }
-    }
-
-    // ----- what may be plain HTTP -----
+    // ----- what may be plain HTTP: one integration, and it has to ask in writing -----
 
     @Test fun `jellyfin still accepts a plain http address on a home network`() {
         assertEquals("http://192.168.1.20:8096", EndpointPolicy.jellyfinServer("http://192.168.1.20:8096"))
@@ -111,27 +94,51 @@ class EndpointPolicyTest {
         assertEquals("https://media.example.net", EndpointPolicy.jellyfinServer("https://media.example.net"))
     }
 
-    @Test fun `cleartext is allowed for a host on the listener's own machine or network`() {
-        assertNull(EndpointPolicy.cleartextProblem("http://192.168.1.20:8096"))
-        assertNull(EndpointPolicy.cleartextProblem("http://localhost:11434"))
-        assertNull(EndpointPolicy.cleartextProblem("http://ollama:11434"))
+    @Test fun `cleartext is refused everywhere except jellyfin`() {
+        // The exception is the integration, not the address. Loopback, the private ranges, a
+        // .local name and a bare machine name are all refused under the default rule: "it is only
+        // my own network" is an assumption the app cannot check from where it sits, and this is
+        // exactly the traffic that carries an API key or a bearer token.
+        listOf(
+            "http://192.168.1.20:8096", "http://localhost:11434", "http://127.0.0.1:8000",
+            "http://[::1]:11434", "http://10.0.0.5:9000", "http://172.16.0.1:8000",
+            "http://169.254.1.1:80", "http://ollama:11434", "http://nas.local:11434",
+            "http://printer.lan:8080", "http://api.openai.com/v1", "http://soundtrail.duckdns.org"
+        ).forEach { address ->
+            assertNotNull("$address must be refused under the default rule",
+                EndpointPolicy.cleartextProblem(address))
+        }
+        // And HTTPS is accepted for every one of them, which is the fix the message asks for.
+        assertNull(EndpointPolicy.cleartextProblem("https://192.168.1.20:11434"))
         assertNull(EndpointPolicy.cleartextProblem("https://api.openai.com/v1"))
+        assertNull(EndpointPolicy.cleartextProblem("https://nas.local:11434"))
     }
 
-    @Test fun `cleartext is refused for a public host`() {
+    @Test fun `the default rule is the strict one, so forgetting to declare a rule is safe`() {
+        // A new integration gets HTTPS by doing nothing at all and has to ask, in writing, for the
+        // one exception that exists. The default is what makes that true.
+        assertNotNull(EndpointPolicy.cleartextProblem("http://192.168.1.20:11434"))
+        assertNull(EndpointPolicy.cleartextProblem("http://192.168.1.20:11434", TransportRule.JELLYFIN))
+    }
+
+    @Test fun `a refused cleartext address says to use https and names the host`() {
         val problem = EndpointPolicy.cleartextProblem("http://api.openai.com/v1")
         assertNotNull(problem)
         assertTrue(problem!!, problem.contains("https://"))
         assertTrue(problem, problem.contains("api.openai.com"))
+        // Naming the one integration that may use plain HTTP is what stops this reading as a bug.
+        assertTrue(problem, problem.contains("Jellyfin"))
         assertNotNull(EndpointPolicy.cleartextProblem("http://soundtrail.duckdns.org"))
     }
 
     @Test fun `jellyfin is the one integration allowed cleartext anywhere`() {
         // A self-hosted server on a public name without a certificate is unusual but legitimate,
-        // and Jellyfin is the app's only music source — so this one caller may ask for the
-        // exception. Everything else has to be on premises to be plain HTTP.
+        // and Jellyfin is the app's only music source: refusing plain HTTP here would leave the app
+        // with nothing to play. So this one caller may ask for the exception — at the call site, in
+        // writing — and a public host is no different from a private one under that rule.
         assertNull(EndpointPolicy.cleartextProblem("http://media.example.net", TransportRule.JELLYFIN))
         assertNotNull(EndpointPolicy.cleartextProblem("http://media.example.net"))
+        assertNull(EndpointPolicy.cleartextProblem("http://192.168.1.20:8096", TransportRule.JELLYFIN))
     }
 
     @Test fun `a scheme that is not http or https is refused outright`() {
@@ -147,9 +154,19 @@ class EndpointPolicyTest {
         } catch (expected: EndpointPolicyException) {
             assertTrue(expected.message!!.contains("https://"))
         }
-        // And the permitted cases do not throw.
+        // A private address is not a permitted case under the default rule either.
+        try {
+            EndpointPolicy.requireSecureTransport("http://192.168.1.20:11434/api/tags")
+            fail("a cleartext model server on a private address should be refused too")
+        } catch (expected: EndpointPolicyException) {
+            assertTrue(expected.message!!.contains("https://"))
+        }
+        // And the permitted cases do not throw: HTTPS anywhere, plain HTTP only for Jellyfin.
         EndpointPolicy.requireSecureTransport("https://api.openai.com/v1/chat/completions")
-        EndpointPolicy.requireSecureTransport("http://192.168.1.20:8096/Audio/x/universal")
+        EndpointPolicy.requireSecureTransport("https://192.168.1.20:11434/api/tags")
+        EndpointPolicy.requireSecureTransport(
+            "http://192.168.1.20:8096/Audio/x/universal", TransportRule.JELLYFIN
+        )
         EndpointPolicy.requireSecureTransport("http://media.example.net", TransportRule.JELLYFIN)
     }
 

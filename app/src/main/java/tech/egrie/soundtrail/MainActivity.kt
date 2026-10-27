@@ -1,6 +1,7 @@
 package tech.egrie.soundtrail
 
 import android.Manifest
+import android.app.KeyguardManager
 import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
@@ -10,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.PersistableBundle
 import android.view.WindowManager
+import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -23,10 +25,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.toArgb
-import androidx.biometric.BiometricManager
-import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
-import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.ViewModelProvider
 import tech.egrie.soundtrail.automation.LocationWatchService
 import tech.egrie.soundtrail.data.GeoPoint
@@ -49,11 +48,31 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-class MainActivity : FragmentActivity() {
+class MainActivity : ComponentActivity() {
     private lateinit var model: MainViewModel
     private lateinit var apps: DeviceApps
     private var incomingDraft by mutableStateOf<PinDraft?>(null)
     private var listsOpenSignal by mutableStateOf(0)
+
+    /**
+     * What to run once the device unlock has been confirmed.
+     *
+     * Held here rather than captured by the launcher, because the launcher has to be registered
+     * before `onCreate` and cannot close over a lambda that does not exist yet. If the process is
+     * recreated while the system's unlock screen is up, this is lost and nothing is shown when the
+     * result comes back — which is the safe direction, and one more tap away.
+     */
+    private var pendingUnlockAction: (() -> Unit)? = null
+
+    private val unlockLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val action = pendingUnlockAction
+        pendingUnlockAction = null
+        // Only a confirmed credential runs the action. A cancellation runs nothing and says
+        // nothing: backing out of an unlock prompt is a decision, not a failure to report.
+        if (result.resultCode == RESULT_OK) action?.invoke()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -376,8 +395,9 @@ class MainActivity : FragmentActivity() {
     /**
      * Runs [action] only after the listener has unlocked this device.
      *
-     * Biometric where one is enrolled and the PIN/pattern/password otherwise, both through the one
-     * prompt via `DEVICE_CREDENTIAL`. This is the gate on re-displaying a stored recovery key: the
+     * The PIN, pattern or password the listener already set, on the system's own confirm-credential
+     * screen, which offers an enrolled biometric first on a device that has one. This is the gate on
+     * re-displaying a stored recovery key: the
      * key decrypts the entire synced library, so "the app happened to be open" is not sufficient
      * authority to read it out, and a phone handed to somebody else must not become a way to copy
      * it.
@@ -385,13 +405,17 @@ class MainActivity : FragmentActivity() {
      * A device with no screen lock at all fails **closed**. There is nothing to authenticate
      * against, so the key is not shown and the listener is told what to set up; showing it anyway
      * would make the gate decorative.
+     *
+     * This is the platform's own confirm-device-credential screen through [KeyguardManager], not
+     * `androidx.biometric`. The library would do the same job but drags in a `FragmentActivity`
+     * base class and an AppCompat theme parent, and this app adds no dependency for it: what the
+     * gate has to prove is that the person holding the phone is the person who locked it, and the
+     * keyguard proves exactly that, with the biometric the listener enrolled offered first on a
+     * device that has one.
      */
     private fun requireUnlock(what: String, action: () -> Unit) {
-        val authenticators = BiometricManager.Authenticators.BIOMETRIC_STRONG or
-            BiometricManager.Authenticators.DEVICE_CREDENTIAL
-        if (BiometricManager.from(this).canAuthenticate(authenticators) !=
-            BiometricManager.BIOMETRIC_SUCCESS
-        ) {
+        val keyguard = getSystemService(KeyguardManager::class.java)
+        if (keyguard == null || !keyguard.isDeviceSecure) {
             model.notify(
                 "This device has no screen lock, so $what cannot be shown again here. Set a PIN, " +
                     "pattern or password in Android's settings, or use the copy you saved when the " +
@@ -399,34 +423,18 @@ class MainActivity : FragmentActivity() {
             )
             return
         }
-        val prompt = BiometricPrompt(
-            this,
-            ContextCompat.getMainExecutor(this),
-            object : BiometricPrompt.AuthenticationCallback() {
-                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    action()
-                }
-
-                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                    // Backing out is a decision rather than a failure, and needs no message.
-                    if (errorCode != BiometricPrompt.ERROR_USER_CANCELED &&
-                        errorCode != BiometricPrompt.ERROR_NEGATIVE_BUTTON &&
-                        errorCode != BiometricPrompt.ERROR_CANCELED
-                    ) {
-                        model.notify("Could not unlock this device: $errString")
-                    }
-                }
-            }
+        val prompt = keyguard.createConfirmDeviceCredentialIntent(
+            "Unlock Soundtrail",
+            "Confirm it is you to show $what."
         )
-        prompt.authenticate(
-            BiometricPrompt.PromptInfo.Builder()
-                .setTitle("Unlock Soundtrail")
-                .setDescription("Confirm it is you to show $what.")
-                .setAllowedAuthenticators(authenticators)
-                // No negative button: with DEVICE_CREDENTIAL allowed the prompt brings its own
-                // cancel, and setting one alongside it throws.
-                .build()
-        )
+        if (prompt == null) {
+            // No credential to confirm against, so the key is not shown: a gate that opens itself
+            // when it cannot be locked is not a gate.
+            model.notify("This device cannot ask for its unlock, so $what cannot be shown again here.")
+            return
+        }
+        pendingUnlockAction = action
+        unlockLauncher.launch(prompt)
     }
 
     /**

@@ -19,7 +19,7 @@ signing key, and refuses anything that is not free software. Concretely:
 | An unsigned release APK | The release build type sets no `signingConfig`, so `assembleRelease` produces `app-release-unsigned.apk` for F-Droid to sign. |
 | A build that works from a tag | Gradle wrapper committed, dependencies only from `google()` and `mavenCentral()`, `subdir: app` with the wrapper and settings at the root. |
 | Anti-features declared, not hidden | `NonFreeNet`, with an explanation, in the recipe. `NonFreeAdd` was dropped when the proprietary-player hand-offs were removed: nothing is handed to another app's player any more. |
-| Reviewer questions answered up front | `MaintainerNotes` in the recipe: the debug keystore, the Android Auto meta-data key, the one `<queries>` intent, cleartext HTTP for LAN Jellyfin servers and the stricter policy the code enforces on top of it. |
+| Reviewer questions answered up front | `MaintainerNotes` in the recipe: the debug keystore, the Android Auto meta-data key, the one `<queries>` intent, and why cleartext HTTP is permitted for exactly one thing — the listener's own Jellyfin server — while the code requires HTTPS for every other address. |
 
 Google Play services is not a dependency, in the code, or in the manifest, and no
 third-party OAuth flow is left either: the Spotify, SoundCloud and YouTube integrations

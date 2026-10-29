@@ -1,0 +1,1 @@
+Mood: drop the "Find music on" selector and always search Jellyfin

@@ -34,6 +34,13 @@ Builds:
     gradle:
       - yes
 
+  - versionName: 1.0.18
+    versionCode: 19
+    commit: v1.0.18
+    subdir: app
+    gradle:
+      - yes
+
 MaintainerNotes: |-
   Build: `./gradlew assembleRelease` from the repository root produces an unsigned
   app-release-unsigned.apk (subdir app is the Gradle module; the wrapper and settings are
@@ -86,5 +93,5 @@ MaintainerNotes: |-
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags
-CurrentVersion: 1.0.17
-CurrentVersionCode: 18
+CurrentVersion: 1.0.18
+CurrentVersionCode: 19

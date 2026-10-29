@@ -206,8 +206,6 @@ internal data class MoodUiState(
      * the id is what gets sent.
      */
     val openAiModelLabels: Map<String, String> = emptyMap(),
-    /** Where a reading goes looking for music: the listener's own library, or a provider. */
-    val searchTarget: MoodSearchTarget = MoodSearchTarget.default,
     /**
      * The songs the last reading turned up, resolved to something real: a stored song, a search
      * result with a link, or a row that opens the app that owns it.
@@ -352,7 +350,6 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 ollamaModel = moodPrefs.ollamaModel,
                 openAiUrl = moodPrefs.openAiUrl,
                 openAiModel = moodPrefs.openAiModel,
-                searchTarget = moodPrefs.searchTarget,
                 aiKeySet = moodPrefs.keySet(moodPrefs.aiProvider),
                 aiConsentAt = moodPrefs.consentAt(),
                 aiReady = moodAi.configured,
@@ -633,16 +630,11 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             return
         }
         // "find music on Jellyfin that fits: rainy sunday" is the request the Mood tab builds for
-        // a model, so the same sentence typed or spoken here goes the same way: the place it
-        // names becomes the reading's target, and the words after "that fits" become the mood —
-        // rather than the whole sentence being searched for as if it were a song title.
+        // a model, so the same sentence typed or spoken here goes the same way: the words after
+        // "that fits" become the mood, rather than the whole sentence being searched for as if it
+        // were a song title. Where it looks is not part of the request: every reading searches the
+        // listener's Jellyfin server, whatever service the sentence happens to name.
         AssistantParser.findMusic(said)?.let { find ->
-            find.provider?.let { provider ->
-                val target = MoodSearchTarget.forProvider(provider)
-                if (target != _state.value.mood.searchTarget) {
-                    applyMoodSearchTarget(target, announce = false)
-                }
-            }
             setMoodText(find.text)
             _state.update {
                 it.copy(
@@ -808,7 +800,9 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             }
         }
         _state.update { it.copy(mood = it.mood.copy(analyzing = true, error = null, savedPlaylistName = null)) }
-        val target = mood.searchTarget
+        // Every reading looks on the listener's Jellyfin server. That is the catalogue they can
+        // actually play from here, so there is nothing else to choose between.
+        val target = MoodSearchTarget.JELLYFIN
         viewModelScope.launch {
             val outcome = try {
                 when {
@@ -832,18 +826,13 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             val mix = MoodMixer.build(profile, candidates)
             val untagged = MoodMixer.untagged(candidates).size
             // The songs the answer came with are looked up for real before anything is offered:
-            // a model's suggestion becomes a row only once a search or the listener's own library
-            // has confirmed it exists. With no model in the loop, the reading's own phrases are
-            // what the chosen provider is asked for.
+            // a model's suggestion becomes a row only once a search has confirmed it exists. With
+            // no model in the loop, the reading's own phrases are what the server is asked for.
             val search = try {
-                when {
-                    outcome.picks.isNotEmpty() -> withContext(Dispatchers.IO) {
-                        moodPicks.fromPicks(outcome.picks, target, _state.value.pins, _state.value.playlists)
-                    }
-                    target != MoodSearchTarget.LIBRARY -> withContext(Dispatchers.IO) {
-                        moodPicks.fromTerms(profile.searchTerms, target)
-                    }
-                    else -> MoodPickSearch()
+                if (outcome.picks.isNotEmpty()) {
+                    withContext(Dispatchers.IO) { moodPicks.fromPicks(outcome.picks) }
+                } else {
+                    withContext(Dispatchers.IO) { moodPicks.fromTerms(profile.searchTerms) }
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -857,7 +846,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                         profile = profile,
                         mix = mix,
                         found = search.hits,
-                        foundNote = foundNote(search, target, fromModel = outcome.picks.isNotEmpty()),
+                        foundNote = foundNote(search, fromModel = outcome.picks.isNotEmpty()),
                         librarySize = candidates.size,
                         untaggedCount = untagged,
                         error = if (mix.isEmpty() && search.hits.isEmpty()) {
@@ -1247,35 +1236,6 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         _state.update { it.copy(mood = it.mood.copy(ollamaModel = moodPrefs.ollamaModel, aiNote = null)) }
     }
 
-    /**
-     * Where the next reading looks for music. Changing it re-runs nothing on its own: the pills
-     * say what the next request will ask, and the sentence above them shows it word for word.
-     */
-    fun setMoodSearchTarget(target: MoodSearchTarget) = applyMoodSearchTarget(target, announce = true)
-
-    /** The same, for requests that already said where to look and need no announcement. */
-    private fun applyMoodSearchTarget(target: MoodSearchTarget, announce: Boolean) {
-        moodPrefs.searchTarget = target
-        _state.update {
-            it.copy(
-                mood = it.mood.copy(
-                    searchTarget = target,
-                    found = emptyList(),
-                    foundNote = null
-                )
-            )
-        }
-        if (!announce) return
-        notify(
-            when (target) {
-                MoodSearchTarget.LIBRARY ->
-                    "Readings will pick from your own pins and playlists."
-                MoodSearchTarget.JELLYFIN ->
-                    "Readings will look ${target.phrase} and play what the search finds."
-            }
-        )
-    }
-
     /** Plays one found song, with the rest of the findings queued behind it. */
     fun playMoodFound(hit: AssistantHit) {
         val playable = AssistantAnswer.playable(_state.value.mood.found)
@@ -1451,24 +1411,20 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     /**
      * What to say about a search, in one line, without overstating what happened: how many of the
      * named songs were found, what could not be matched, and — when nothing came back at all —
-     * whether that was the provider's complaint, a missing connection, or simply no match.
+     * whether that was the server's complaint, a missing connection, or simply no match.
      */
-    private fun foundNote(
-        search: MoodPickSearch,
-        target: MoodSearchTarget,
-        fromModel: Boolean
-    ): String? = when {
-        search.hits.isNotEmpty() && search.unmatched > 0 ->
-            "${search.hits.size} of the songs named were found ${target.phrase}; " +
-                "${search.unmatched} could not be matched to anything real and were left out."
-        search.hits.isNotEmpty() -> null
-        search.error != null -> search.error
-        search.unmatched > 0 -> "None of the songs named could be found ${target.phrase}."
-        target == MoodSearchTarget.LIBRARY && fromModel ->
-            "None of the songs named are in your library — the mix below is built from what is."
-        target == MoodSearchTarget.LIBRARY -> null
-        fromModel -> "Nothing that was named could be found ${target.phrase}."
-        else -> "Nothing came back from ${target.short} for that."
+    private fun foundNote(search: MoodPickSearch, fromModel: Boolean): String? {
+        val target = MoodSearchTarget.JELLYFIN
+        return when {
+            search.hits.isNotEmpty() && search.unmatched > 0 ->
+                "${search.hits.size} of the songs named were found ${target.phrase}; " +
+                    "${search.unmatched} could not be matched to anything real and were left out."
+            search.hits.isNotEmpty() -> null
+            search.error != null -> search.error
+            search.unmatched > 0 -> "None of the songs named could be found ${target.phrase}."
+            fromModel -> "Nothing that was named could be found ${target.phrase}."
+            else -> "Nothing came back from ${target.short} for that."
+        }
     }
 
     /**

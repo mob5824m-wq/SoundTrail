@@ -1,10 +1,6 @@
 package tech.egrie.soundtrail.mood
 
 import tech.egrie.soundtrail.assistant.AssistantHit
-import tech.egrie.soundtrail.assistant.AssistantLibrary
-import tech.egrie.soundtrail.assistant.AssistantRequest
-import tech.egrie.soundtrail.data.MusicPin
-import tech.egrie.soundtrail.data.Playlist
 import tech.egrie.soundtrail.integrations.JellyfinService
 import tech.egrie.soundtrail.integrations.TrackResult
 
@@ -21,38 +17,35 @@ internal data class MoodPickSearch(
  * Turns what a model said into what the app can play.
  *
  * A model's answer is a suggestion, never a source. Every song it names is searched for on the
- * listener's own Jellyfin server — or matched against the songs they already have — and only what
- * that search really returns becomes a row. That is what makes "find music on Jellyfin that fits
- * this" honest: the app is holding a real result with a real link, not repeating a model's guess.
- * A song that cannot be matched is counted and reported rather than quietly played as something
- * else.
+ * listener's own Jellyfin server, and only what that search really returns becomes a row. That is
+ * what makes "find music on Jellyfin that fits this" honest: the app is holding a real result with
+ * a real link, not repeating a model's guess. A song that cannot be matched is counted and reported
+ * rather than quietly played as something else.
  *
  * The same path answers a request with no model at all: when the on-device reading supplies only
- * search phrases, those phrases are looked up on the chosen target instead.
+ * search phrases, those phrases are looked up on that server instead.
  */
 internal class MoodPickResolver(
     private val jellyfin: JellyfinService
 ) {
 
-    /** Resolves the songs a model named. */
-    suspend fun fromPicks(
-        picks: List<MoodAiPick>,
-        target: MoodSearchTarget,
-        pins: List<MusicPin>,
-        playlists: List<Playlist>
-    ): MoodPickSearch {
+    /**
+     * Where every search goes: the listener's own Jellyfin server, which is the only catalogue
+     * this app can play from. The words are taken from [MoodSearchTarget] so a row's detail reads
+     * the same as the sentence the reading was asked with.
+     */
+    private val target = MoodSearchTarget.JELLYFIN
+
+    /** Resolves the songs a model named, on the listener's Jellyfin server. */
+    suspend fun fromPicks(picks: List<MoodAiPick>): MoodPickSearch {
         if (picks.isEmpty()) return MoodPickSearch()
-        if (target == MoodSearchTarget.LIBRARY) {
-            val hits = picks.mapNotNull { pick -> libraryHit(pick, pins, playlists) }
-            return MoodPickSearch(hits = hits, unmatched = picks.size - hits.size)
-        }
         var failure: String? = null
         var unmatched = 0
         val hits = mutableListOf<AssistantHit>()
         picks.forEach { pick ->
             val phrase = MoodPickMatch.phrase(pick.title, pick.artist)
             val results = try {
-                search(phrase, target)
+                jellyfin.searchTracks(phrase)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -64,31 +57,24 @@ internal class MoodPickResolver(
             if (match == null) {
                 unmatched++
             } else {
-                hits += providerHit(match, pick, target)
+                hits += providerHit(match, pick)
             }
         }
         return MoodPickSearch(hits = hits, error = failure, unmatched = unmatched)
     }
 
     /**
-     * The no-model path: the reading's own search phrases, looked up on the chosen target. What
+     * The no-model path: the reading's own search phrases, looked up on the Jellyfin server. What
      * comes back is what that server really has for that phrase, which is as close as this app can
-     * honestly get to "find music on X that fits this" without a model in the loop.
+     * honestly get to "find music on Jellyfin that fits this" without a model in the loop.
      */
-    suspend fun fromTerms(
-        terms: List<String>,
-        target: MoodSearchTarget,
-        limit: Int = 6
-    ): MoodPickSearch {
-        if (target == MoodSearchTarget.LIBRARY) {
-            return MoodPickSearch()
-        }
+    suspend fun fromTerms(terms: List<String>, limit: Int = 6): MoodPickSearch {
         var failure: String? = null
         val hits = mutableListOf<AssistantHit>()
         terms.map { it.trim() }.filter { it.isNotBlank() }.take(2).forEach { term ->
             if (hits.size >= limit) return@forEach
             val results = try {
-                search(term, target)
+                jellyfin.searchTracks(term)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -108,32 +94,11 @@ internal class MoodPickResolver(
         return MoodPickSearch(hits = hits, error = failure)
     }
 
-    private suspend fun search(phrase: String, target: MoodSearchTarget): List<TrackResult> =
-        when (target) {
-            MoodSearchTarget.JELLYFIN -> jellyfin.searchTracks(phrase)
-            MoodSearchTarget.LIBRARY -> emptyList()
-        }
-
-    /** A song the listener already has: its stored item, so an offline copy still plays. */
-    private fun libraryHit(
-        pick: MoodAiPick,
-        pins: List<MusicPin>,
-        playlists: List<Playlist>
-    ): AssistantHit? {
-        val request = AssistantRequest(query = MoodPickMatch.phrase(pick.title, pick.artist))
-        val found = AssistantLibrary.search(request, pins, playlists).firstOrNull() ?: return null
-        return found.copy(detail = listOfNotNull(found.detail, pick.why).joinToString(" \u00b7 "))
-    }
-
-    private fun providerHit(
-        track: TrackResult,
-        pick: MoodAiPick,
-        target: MoodSearchTarget
-    ): AssistantHit = AssistantHit(
+    private fun providerHit(track: TrackResult, pick: MoodAiPick): AssistantHit = AssistantHit(
         title = track.title,
         artist = track.artist,
         provider = track.provider,
-        detail = listOfNotNull(target.short, pick.why).joinToString(" \u00b7 "),
+        detail = listOfNotNull(MoodSearchTarget.JELLYFIN.short, pick.why).joinToString(" \u00b7 "),
         url = track.url
     )
 }

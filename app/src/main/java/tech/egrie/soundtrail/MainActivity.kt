@@ -266,7 +266,6 @@ class MainActivity : ComponentActivity() {
                         onTestAi = model::testMoodAi,
                         onSaveAiKey = model::saveMoodAiKey,
                         onClearAiKey = model::clearMoodAiKey,
-                        onSetSearchTarget = model::setMoodSearchTarget,
                         onPlayFound = model::playMoodFound,
                         onPlayAllFound = model::playAllMoodFound
                     ),

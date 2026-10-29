@@ -27,7 +27,6 @@ import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.QueueMusic
-import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -94,8 +93,7 @@ internal data class MoodActions(
     val onTestAi: () -> Unit,
     val onSaveAiKey: (String) -> Unit,
     val onClearAiKey: () -> Unit,
-    /** Where a reading looks for music, and what to do with the songs it turns up. */
-    val onSetSearchTarget: (MoodSearchTarget) -> Unit,
+    /** What to do with the songs a reading turned up. */
     val onPlayFound: (AssistantHit) -> Unit,
     val onPlayAllFound: () -> Unit
 )
@@ -121,9 +119,9 @@ internal fun MoodScreen(state: AppState, actions: MoodActions, onNotice: (String
         )
         Spacer(Modifier.height(14.dp))
 
-        MoodInputCard(mood, actions)
+        MoodInputCard(mood, actions, jellyfinConnected = state.jellyfinConnected)
         Spacer(Modifier.height(12.dp))
-        MoodFindCard(mood, state, actions, onNotice)
+        MoodFoundCard(mood, actions)
         Spacer(Modifier.height(10.dp))
 
         mood.profile?.let { profile ->
@@ -149,8 +147,7 @@ internal fun MoodScreen(state: AppState, actions: MoodActions, onNotice: (String
                 Spacer(Modifier.height(6.dp))
                 Text(
                     "Pins and playlist songs are what a mix is built from. Search your Jellyfin " +
-                        "server on the Search tab and pin what fits, attach audio you already own, " +
-                        "or point the reading at your server below.",
+                        "server on the Search tab and pin what fits, or attach audio you already own.",
                     color = Palette.secondary, style = MaterialTheme.typography.bodyMedium
                 )
             }
@@ -513,83 +510,25 @@ private fun MoodReadingCard(mood: MoodUiState, actions: MoodActions, onNotice: (
 }
 
 /**
- * Where a reading goes looking, and what it came back with.
+ * What a reading came back with.
  *
- * The first thing on the card is the request itself, word for word: "find music on your Jellyfin
- * server that fits: …". The listener asked for the music, so they get to see the sentence that was
- * asked on their behalf — and changing the pills changes that sentence. Under it sit the songs
- * that were found, each resolved to something real that plays here: a stored song, or a result
- * from the listener's own server.
+ * Where a reading looks is not a choice this card offers — every reading searches the listener's
+ * Jellyfin server — so the only thing left to show is the songs that search really returned, each
+ * one thing that plays here. Nothing at all is drawn when a reading turned up no songs and had
+ * nothing to say about it.
  */
 @Composable
-private fun MoodFindCard(
-    mood: MoodUiState,
-    state: AppState,
-    actions: MoodActions,
-    onNotice: (String) -> Unit
-) {
-    val target = mood.searchTarget
+private fun MoodFoundCard(mood: MoodUiState, actions: MoodActions) {
     val playable = mood.found.count { it.playable }
-    val text = mood.text.trim().ifBlank { "how you feel" }
-    // Choosing a provider that is not connected yet is a legitimate choice — it says where the
-    // next reading should look — but the listener should hear about it now, not from a failed
-    // search after they have typed out how they feel.
-    val missing = target.missingConnection(jellyfin = state.jellyfinConnected)
+    val note = mood.foundNote
+
+    if (mood.found.isEmpty() && note == null) return
 
     SurfaceCard(Modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(43.dp).background(Palette.primary.copy(alpha = .14f), CircleShape),
-                contentAlignment = Alignment.Center) {
-                Icon(Icons.Rounded.Search, null, tint = Palette.primary)
-            }
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text("Find music on", style = MaterialTheme.typography.titleLarge)
-                Text(
-                    if (mood.aiEnabled && mood.aiReady && mood.aiProvider != MoodAiProvider.ON_DEVICE) {
-                        "The model is asked for songs, and each one is looked up"
-                    } else {
-                        "Your own reading searches the provider with its phrases"
-                    },
-                    color = Palette.secondary, style = MaterialTheme.typography.bodyMedium
-                )
-            }
-        }
-        Spacer(Modifier.height(10.dp))
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            MoodSearchTarget.values().forEach { option ->
-                MoodPill(
-                    text = option.short,
-                    selected = target == option,
-                    onClick = {
-                        actions.onSetSearchTarget(option)
-                        option.missingConnection(jellyfin = state.jellyfinConnected)?.let(onNotice)
-                    }
-                )
-            }
-        }
-        Spacer(Modifier.height(10.dp))
-        // The request as the model receives it, so nothing is sent on the listener's behalf that
-        // they cannot read here first.
-        Text(
-            MoodSearchTarget.request(text, target),
-            color = Palette.muted, style = MaterialTheme.typography.labelMedium
-        )
-        Spacer(Modifier.height(6.dp))
-        Text(target.blurb, color = Palette.muted, style = MaterialTheme.typography.labelMedium)
-        missing?.let { sentence ->
-            Spacer(Modifier.height(6.dp))
-            Text(sentence, color = Palette.lilac, style = MaterialTheme.typography.labelMedium)
-        }
-
         if (mood.found.isNotEmpty()) {
-            Spacer(Modifier.height(12.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "Found ${target.phrase}",
+                    "Found ${MoodSearchTarget.JELLYFIN.phrase}",
                     style = MaterialTheme.typography.labelMedium, color = Palette.secondary,
                     modifier = Modifier.weight(1f)
                 )
@@ -605,9 +544,9 @@ private fun MoodFindCard(
                 Spacer(Modifier.height(6.dp))
             }
         }
-        mood.foundNote?.let { note ->
-            Spacer(Modifier.height(2.dp))
-            Text(note, color = Palette.secondary, style = MaterialTheme.typography.labelMedium)
+        note?.let { text ->
+            if (mood.found.isNotEmpty()) Spacer(Modifier.height(2.dp))
+            Text(text, color = Palette.secondary, style = MaterialTheme.typography.labelMedium)
         }
     }
 }
@@ -705,7 +644,10 @@ private fun KeyField(
 }
 
 @Composable
-private fun MoodInputCard(mood: MoodUiState, actions: MoodActions) {
+private fun MoodInputCard(mood: MoodUiState, actions: MoodActions, jellyfinConnected: Boolean) {
+    // A reading always looks on the listener's Jellyfin server, so the one thing worth saying
+    // before they type is that there is no server to search yet.
+    val noServer = MoodSearchTarget.JELLYFIN.missingConnection(jellyfin = jellyfinConnected)
     SurfaceCard(Modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(43.dp).background(Palette.primary.copy(alpha = .14f), CircleShape),
@@ -755,6 +697,12 @@ private fun MoodInputCard(mood: MoodUiState, actions: MoodActions) {
             MoodPill("Medium", mood.energyHint == 55) { actions.onEnergyHint(55) }
             MoodPill("High", mood.energyHint == 85) { actions.onEnergyHint(85) }
         }
+        Spacer(Modifier.height(10.dp))
+        Text(
+            noServer ?: "Readings search your Jellyfin server and play what it finds.",
+            color = if (noServer != null) Palette.lilac else Palette.muted,
+            style = MaterialTheme.typography.labelMedium
+        )
         Spacer(Modifier.height(14.dp))
         PrimaryButton(
             if (mood.analyzing) "Reading your mood…" else "Build my mood mix",

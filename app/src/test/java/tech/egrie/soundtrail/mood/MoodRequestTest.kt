@@ -53,25 +53,21 @@ class MoodRequestTest {
         assertTrue(instruction.contains("the app searches for each title and artist"))
     }
 
-    @Test fun `every target reads as a provider and survives a round trip`() {
-        MoodSearchTarget.values().forEach { target ->
-            assertEquals(target, MoodSearchTarget.from(target.id))
-        }
-        // Whatever the phrase is, it has to be the same words in the request and on the tab.
+    @Test fun `every target keeps its words in the request, and readings point at the server`() {
+        // Whatever the phrase is, it has to be the same words in the request and in the app.
         MoodSearchTarget.values().forEach { target ->
             assertTrue(MoodSearchTarget.request("x", target).contains(target.phrase))
         }
-        assertEquals(MoodSearchTarget.LIBRARY, MoodSearchTarget.from(null))
-        assertEquals(MoodSearchTarget.LIBRARY, MoodSearchTarget.from("gpt-9000"))
-        assertEquals(MoodSearchTarget.JELLYFIN, MoodSearchTarget.from(" Jellyfin "))
-        // An id saved by an older version for a service that is gone falls back to the library
-        // instead of selecting something that no longer exists.
-        listOf("youtube", "youtube_music", "spotify", "soundcloud").forEach { gone ->
-            assertEquals(gone, MoodSearchTarget.LIBRARY, MoodSearchTarget.from(gone))
-        }
+        // A reading is never pointed anywhere else: Jellyfin is the target, and there is no
+        // setting left that could select another one.
+        assertEquals(MoodSearchTarget.JELLYFIN, MoodSearchTarget.default)
+        assertEquals(
+            "find music on your Jellyfin server that fits: \"quiet focus\"",
+            MoodSearchTarget.request("quiet focus", MoodSearchTarget.default)
+        )
     }
 
-    @Test fun `picking the server without a server says so, and the library stays quiet`() {
+    @Test fun `an unconnected server says so, and the library stays quiet`() {
         val warned = MoodSearchTarget.JELLYFIN.missingConnection(jellyfin = false)
         assertTrue("Jellyfin should warn without a connection", !warned.isNullOrBlank())
         assertTrue(warned!!.contains(MoodSearchTarget.JELLYFIN.short))

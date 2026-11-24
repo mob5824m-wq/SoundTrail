@@ -81,6 +81,7 @@ internal fun MoodMixTrack.toQueueEntry(): QueueEntry = QueueEntry(
 /** The source of what is playing, for the session's album line and the notification. */
 internal fun MusicProvider?.sourceLabel(): String = when (this) {
     MusicProvider.JELLYFIN -> "Jellyfin"
+    MusicProvider.YOUTUBE_MUSIC -> "YouTube Music"
     // A song with no provider at all is one the listener attached themselves.
     null -> "Soundtrail"
 }

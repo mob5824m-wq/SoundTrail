@@ -34,6 +34,7 @@ internal object Palette {
 
     /** Jellyfin's own purple, for the server the user runs themselves. */
     val jellyfin = Color(0xFFAA5CC3)
+    val youTubeMusic = Color(0xFFFF4D4D)
 }
 
 private val colors = darkColorScheme(

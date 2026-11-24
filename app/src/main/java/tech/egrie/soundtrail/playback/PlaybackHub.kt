@@ -24,6 +24,10 @@ import tech.egrie.soundtrail.integrations.JellyfinService
 import tech.egrie.soundtrail.integrations.MusicLink
 import tech.egrie.soundtrail.integrations.MusicLinkParser
 import tech.egrie.soundtrail.integrations.MusicProvider
+import tech.egrie.soundtrail.integrations.YouTubeMusicRef
+import tech.egrie.soundtrail.integrations.YouTubeMusicService
+import tech.egrie.soundtrail.scrobble.ScrobbleManager
+import tech.egrie.soundtrail.scrobble.ScrobbleTrack
 import tech.egrie.soundtrail.sync.CloudSyncService
 
 /**
@@ -63,6 +67,7 @@ internal class PlaybackHub private constructor(context: Context) : SessionTransp
     private val pins = PinStore(appContext)
     private val playlists = PlaylistStore(appContext)
     private val jellyfin = JellyfinService(appContext)
+    private val youTubeMusic = YouTubeMusicService(appContext)
     private val cloudSync = CloudSyncService(appContext, pins, playlists, AutomationStore(appContext), files)
 
     /** The app's single player, kept public so screens can render it directly. */
@@ -87,10 +92,16 @@ internal class PlaybackHub private constructor(context: Context) : SessionTransp
     /** Told when the library changes, so an open car list can refresh. */
     private var libraryWatcher: (() -> Unit)? = null
 
+    private val scrobbles = ScrobbleManager.get(appContext)
+    private var scrobbleKey: String? = null
+    private var scrobbleTickAtMs: Long = 0L
+
     init {
+        scrobbles.flush()
         scope.launch {
             player.state.collect { state ->
                 session.publish(state, _queueState.value)
+                handleScrobble(state)
                 val current = queue.current
                 if (state?.completed != true) {
                     advancedPast = null
@@ -103,6 +114,66 @@ internal class PlaybackHub private constructor(context: Context) : SessionTransp
                 if (queue.hasNext()) startAt(queue.index + 1)
             }
         }
+    }
+
+    private fun handleScrobble(state: NowPlaying?) {
+        if (state == null) {
+            if (scrobbleKey != null) {
+                scrobbles.playbackPaused()
+                scrobbleKey = null
+            }
+            return
+        }
+        val key = state.itemId
+        if (scrobbleKey != key) {
+            scrobbles.trackChanged(key)
+            scrobbleKey = key
+            scrobbleTickAtMs = 0L
+        }
+        val track = scrobbleTrack(state)
+        when {
+            state.error != null || state.buffering -> {
+                scrobbles.playbackPaused()
+                scrobbleTickAtMs = 0L
+            }
+            state.playing -> {
+                if (scrobbleTickAtMs == 0L) {
+                    scrobbles.playbackStarted(track)
+                    scrobbleTickAtMs = System.currentTimeMillis()
+                } else {
+                    val now = System.currentTimeMillis()
+                    val delta = now - scrobbleTickAtMs
+                    scrobbleTickAtMs = now
+                    scrobbles.playbackTick(track, delta, state.durationMs)
+                }
+            }
+            else -> {
+                scrobbles.playbackPaused()
+                scrobbleTickAtMs = 0L
+            }
+        }
+    }
+
+    private fun scrobbleTrack(state: NowPlaying): ScrobbleTrack {
+        val current = queue.current
+        val url = current?.url
+        val (musicService, originUrl) = when (state.provider) {
+            MusicProvider.YOUTUBE_MUSIC -> {
+                val vid = url?.let(YouTubeMusicRef::videoId)
+                "music.youtube.com" to (vid?.let { "https://music.youtube.com/watch?v=$it" }.orEmpty())
+            }
+            MusicProvider.JELLYFIN -> "" to ""
+            null -> "" to ""
+        }
+        return ScrobbleTrack(
+            key = state.itemId,
+            title = state.title,
+            artist = state.artist,
+            album = "",
+            durationMs = state.durationMs,
+            musicService = musicService,
+            originUrl = originUrl
+        )
     }
 
     // ----- What the app itself plays -----
@@ -261,9 +332,12 @@ internal class PlaybackHub private constructor(context: Context) : SessionTransp
         }
         val link = entry.url?.let(MusicLinkParser::parse)
         if (link == null) {
-            return fail("${entry.title} has no playable link. Add a song from your Jellyfin server, or attach audio you own.")
+            return fail("${entry.title} has no playable link. Add a song from Jellyfin or YouTube Music, or attach audio you own.")
         }
-        return startJellyfin(link, entry)
+        return when (link.provider) {
+            MusicProvider.JELLYFIN -> startJellyfin(link, entry)
+            MusicProvider.YOUTUBE_MUSIC -> startYouTubeMusic(link, entry)
+        }
     }
 
     private fun startJellyfin(link: MusicLink, entry: QueueEntry): Boolean {
@@ -278,6 +352,36 @@ internal class PlaybackHub private constructor(context: Context) : SessionTransp
             playback = playback
         )
         return true
+    }
+
+    private suspend fun startYouTubeMusic(link: MusicLink, entry: QueueEntry): Boolean {
+        val videoId = YouTubeMusicRef.videoId(link.url)
+            ?: return fail("${entry.title} is not a usable YouTube Music link.")
+        player.setBuffering(
+            title = entry.title,
+            artist = entry.artist,
+            itemId = entry.mediaId,
+            provider = MusicProvider.YOUTUBE_MUSIC
+        )
+        return try {
+            val playback = youTubeMusic.resolve(videoId)
+            // The user may have started something else while we were resolving.
+            if (queue.current?.mediaId != entry.mediaId) return false
+            val headers = playback.headers.ifEmpty { emptyMap() }
+            player.playUrls(
+                title = playback.title.ifBlank { entry.title },
+                artist = playback.author.ifBlank { entry.artist },
+                itemId = entry.mediaId,
+                urls = playback.urls,
+                provider = MusicProvider.YOUTUBE_MUSIC,
+                headers = headers
+            )
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            fail(e.message?.takeIf { it.isNotBlank() } ?: "Couldn't play ${entry.title} from YouTube Music.")
+        }
     }
 
     /** Starts the first thing in the library; what pressing play in the car does with nothing chosen. */

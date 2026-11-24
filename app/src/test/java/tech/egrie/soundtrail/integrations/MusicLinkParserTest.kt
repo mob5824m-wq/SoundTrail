@@ -9,37 +9,45 @@ import org.junit.Test
 /**
  * What this app accepts as a song link.
  *
- * One shape is accepted: a reference to an item on the listener's own Jellyfin server. Every
- * other shape is refused, and that includes the Spotify, SoundCloud, YouTube and YouTube Music
- * links an older version stored — a link this app cannot resolve, stream or hand to another app
- * is not a song, and pretending otherwise is how a library fills up with rows that never play.
+ * Accepted shapes are opaque item references: a Jellyfin item on the listener's own server
+ * (`jellyfin:item:<id>`) and a YouTube Music track (`ytmusic:track:<videoId>`). Every other
+ * shape is refused, including https web links an older version stored for removed streaming
+ * services — a link this app cannot resolve or play is not a song.
  *
- * The refusal cases below are the load-bearing ones: [MusicLinkParser.isUnplayable] is what the
- * upgrade cleanup and all three read paths use to decide a stored row's fate, so a link shape
- * that quietly started parsing again would quietly stop being cleaned up.
+ * The refusal cases below are load-bearing: [MusicLinkParser.isUnplayable] is what the upgrade
+ * cleanup and read paths use to decide a stored row's fate.
  */
 class MusicLinkParserTest {
     /** A plausible Jellyfin item id: 16–64 of [A-Za-z0-9-]. */
     private val itemId = "4cOdK2wGLETKBW3PvgPWqT"
-    private val link = MusicLink(MusicProvider.JELLYFIN, "jellyfin:item:$itemId")
+    private val jellyfinLink = MusicLink(MusicProvider.JELLYFIN, "jellyfin:item:$itemId")
+    private val videoId = "dQw4w9WgXcQ"
+    private val ytLink = MusicLink(MusicProvider.YOUTUBE_MUSIC, "ytmusic:track:$videoId")
 
     // ----- what is accepted -----
 
-    @Test fun `a jellyfin item reference is the one accepted link`() {
-        assertEquals(link, MusicLinkParser.parse("jellyfin:item:$itemId"))
-        assertEquals(link, MusicLinkParser.fromText("jellyfin:item:$itemId"))
+    @Test fun `a jellyfin item reference is accepted`() {
+        assertEquals(jellyfinLink, MusicLinkParser.parse("jellyfin:item:$itemId"))
+        assertEquals(jellyfinLink, MusicLinkParser.fromText("jellyfin:item:$itemId"))
     }
 
-    @Test fun `the reference is read case-insensitively and trimmed`() {
-        assertEquals(link, MusicLinkParser.parse("  JELLYFIN:ITEM:$itemId  "))
-        assertEquals(link, MusicLinkParser.parse("Jellyfin:Item:$itemId"))
+    @Test fun `a youtube music track reference is accepted`() {
+        assertEquals(ytLink, MusicLinkParser.parse("ytmusic:track:$videoId"))
+        assertEquals(ytLink, MusicLinkParser.fromText("ytmusic:track:$videoId"))
+    }
+
+    @Test fun `references are read case-insensitively and trimmed`() {
+        assertEquals(jellyfinLink, MusicLinkParser.parse("  JELLYFIN:ITEM:$itemId  "))
+        assertEquals(jellyfinLink, MusicLinkParser.parse("Jellyfin:Item:$itemId"))
+        assertEquals(ytLink, MusicLinkParser.parse("  YTMUSIC:TRACK:$videoId  "))
+        assertEquals(ytLink, MusicLinkParser.parse("YtMusic:Track:$videoId"))
     }
 
     @Test fun `the stored link is canonical, so the same song is the same string everywhere`() {
-        // Two spellings in, one spelling out: pins, playlists, backups and sync all compare the
-        // stored url as text, so a link that round-tripped differently would look like an edit.
         assertEquals("jellyfin:item:$itemId", MusicLinkParser.parse(" jellyfin:item:$itemId ")?.url)
         assertEquals(MusicProvider.JELLYFIN, MusicLinkParser.parse("JELLYFIN:ITEM:$itemId")?.provider)
+        assertEquals("ytmusic:track:$videoId", MusicLinkParser.parse(" YTMUSIC:TRACK:$videoId ")?.url)
+        assertEquals(MusicProvider.YOUTUBE_MUSIC, MusicLinkParser.parse("YTMUSIC:TRACK:$videoId")?.provider)
     }
 
     // ----- what is refused -----
@@ -50,6 +58,10 @@ class MusicLinkParserTest {
         assertNull(MusicLinkParser.parse("jellyfin:playlist:$itemId"))
         assertNull(MusicLinkParser.parse("jellyfin:item:$itemId/../../Users"))
         assertNull(MusicLinkParser.parse("https://jellyfin.example.com/web/index.html#!/details?id=$itemId"))
+        assertNull(MusicLinkParser.parse("ytmusic:track:"))
+        assertNull(MusicLinkParser.parse("ytmusic:track:short"))
+        assertNull(MusicLinkParser.parse("ytmusic:track:$videoId/../x"))
+        assertNull(MusicLinkParser.parse("ytmusic:video:$videoId"))
     }
 
     @Test fun `plain text is not a link`() {
@@ -60,13 +72,11 @@ class MusicLinkParserTest {
     }
 
     /**
-     * The links an older version of this app stored. Each one is refused now, which is what makes
-     * the upgrade cleanup able to find them: [MusicLinkParser.isUnplayable] is true for exactly
-     * these, and the rows that held them are stripped instead of being shown as unplayable.
+     * Links an older version of this app stored as web URLs. Each one is refused now, which is what
+     * makes the upgrade cleanup able to find them: [MusicLinkParser.isUnplayable] is true for these.
      */
-    @Test fun `links from the removed streaming services are refused`() {
+    @Test fun `legacy web links from removed streaming services are refused`() {
         val spotifyId = "4uLU6hMCjMI75M1A2tKUQC"
-        val videoId = "dQw4w9WgXcQ"
         listOf(
             "https://open.spotify.com/track/$spotifyId",
             "https://open.spotify.com/track/$spotifyId?si=tracking",
@@ -91,26 +101,25 @@ class MusicLinkParserTest {
         }
     }
 
-    @Test fun `shared text no longer yields a link from another service`() {
-        // fromText used to scan a pasted sentence for any supported share URL. With one link
-        // shape left, a sentence about a streaming service has nothing in it for this app.
+    @Test fun `shared text no longer yields a link from a legacy web url`() {
         assertNull(MusicLinkParser.fromText("Listen to this: https://open.spotify.com/track/x!"))
         assertNull(MusicLinkParser.fromText("Check it out https://youtu.be/dQw4w9WgXcQ)"))
-        assertEquals(link, MusicLinkParser.fromText("jellyfin:item:$itemId"))
+        assertEquals(jellyfinLink, MusicLinkParser.fromText("jellyfin:item:$itemId"))
+        assertEquals(ytLink, MusicLinkParser.fromText("ytmusic:track:$videoId"))
     }
 
     // ----- the rule the upgrade cleanup is built on -----
 
     @Test fun `isUnplayable is false for a link that plays and for no link at all`() {
         assertFalse(MusicLinkParser.isUnplayable("jellyfin:item:$itemId"))
-        // A playlist row with no link is a song the listener typed in, or one that plays from an
-        // attached file. It has nothing to do with a removed service, so it is never "unplayable".
+        assertFalse(MusicLinkParser.isUnplayable("ytmusic:track:$videoId"))
         assertFalse(MusicLinkParser.isUnplayable(null))
     }
 
     @Test fun `isUnplayable is true for a dead link, whatever else it looks like`() {
         assertTrue(MusicLinkParser.isUnplayable("https://open.spotify.com/track/abc"))
         assertTrue(MusicLinkParser.isUnplayable("jellyfin:item:short"))
+        assertTrue(MusicLinkParser.isUnplayable("ytmusic:track:short"))
         assertTrue(MusicLinkParser.isUnplayable("not a link"))
     }
 }

@@ -72,6 +72,7 @@ import tech.egrie.soundtrail.AppState
 import tech.egrie.soundtrail.PinInput
 import tech.egrie.soundtrail.data.GeoPoint
 import tech.egrie.soundtrail.data.MusicPin
+import tech.egrie.soundtrail.integrations.MusicProvider
 import tech.egrie.soundtrail.integrations.TrackResult
 import tech.egrie.soundtrail.playback.NowPlaying
 import java.io.Serializable
@@ -119,6 +120,7 @@ internal fun SoundtrailApp(
     assistant: AssistantActions,
     onLocate: () -> Unit,
     onSearch: (String) -> Unit,
+    onSelectSearchProvider: (MusicProvider) -> Unit,
     onLookup: (String, String) -> Unit,
     onConnectJellyfin: (String, String, String) -> Unit,
     onDisconnectJellyfin: () -> Unit,
@@ -143,6 +145,9 @@ internal fun SoundtrailApp(
     onRepushSyncJournal: () -> Unit,
     onDisconnectCloudSync: () -> Unit,
     onDeleteCloudSyncAccount: () -> Unit,
+    onSetListenBrainzEnabled: (Boolean) -> Unit,
+    onSaveListenBrainzToken: (String) -> Unit,
+    onDisconnectListenBrainz: () -> Unit,
     onTogglePlayback: () -> Unit,
     onStopPlayback: () -> Unit,
     onPlay: (MusicPin) -> Unit,
@@ -239,7 +244,8 @@ internal fun SoundtrailApp(
                     onLookup = onLookup,
                     // TheAudioDB answers with words only, so a match starts a pin with the title
                     // and artist filled in; the song itself is then chosen from the server.
-                    onSelectLookup = { draft = PinDraft(title = it.title, artist = it.artist) }
+                    onSelectLookup = { draft = PinDraft(title = it.title, artist = it.artist) },
+                    onSelectProvider = onSelectSearchProvider
                 )
                 Tab.PINS -> PinsScreen(
                     state, onNewPin = { draft = PinDraft() }, onLocate = onLocate,
@@ -268,7 +274,8 @@ internal fun SoundtrailApp(
                     onForgetCloudRecoveryKey, onDismissCloudRecoveryKey, onSetCloudSyncAutoEnabled,
                     onLoadSyncSessions, onSignOutSyncSession, onChangeSyncPassword,
                     onRepushSyncJournal,
-                    onDisconnectCloudSync, onDeleteCloudSyncAccount
+                    onDisconnectCloudSync, onDeleteCloudSyncAccount,
+                    onSetListenBrainzEnabled, onSaveListenBrainzToken, onDisconnectListenBrainz
                 )
             }
         }

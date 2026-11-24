@@ -74,13 +74,15 @@ internal object AssistantParser {
     /**
      * Where the listener said to look.
      *
-     * One entry, because one catalogue is left. The phrases this list used to carry for the
-     * removed streaming services map to nothing now: a listener who still says "on Spotify" gets
-     * their own library and their own server searched, which is the honest answer, rather than a
-     * row that cannot play.
+     * Recognized names map to a provider; an unrecognized "on X" is left alone so a song title
+     * that happens to end in "on ..." is not mangled.
      */
     private val providerHints = listOf(
-        "jellyfin" to MusicProvider.JELLYFIN
+        "jellyfin" to MusicProvider.JELLYFIN,
+        "youtube music" to MusicProvider.YOUTUBE_MUSIC,
+        "yt music" to MusicProvider.YOUTUBE_MUSIC,
+        "ytmusic" to MusicProvider.YOUTUBE_MUSIC,
+        "youtube" to MusicProvider.YOUTUBE_MUSIC
     )
 
     /**
@@ -102,12 +104,12 @@ internal object AssistantParser {
     )
 
     /**
-     * "on Jellyfin" in such a request: the place to look. It may sit right after the lead —
-     * the commonest shape by far, "find music on Jellyfin that fits …" — or at the end, so the
-     * pattern is anchored on either a space or the start of what is left.
+     * "on Jellyfin / on YouTube Music" in such a request: the place to look. It may sit right
+     * after the lead — the commonest shape by far — or at the end, so the pattern is anchored on
+     * either a space or the start of what is left.
      */
     private val findMusicProvider = Regex(
-        "(?:^|\\s+)on\\s+(jellyfin)\\b",
+        "(?:^|\\s+)on\\s+(jellyfin|youtube\\s+music|yt\\s+music|ytmusic|youtube)\\b",
         RegexOption.IGNORE_CASE
     )
 
@@ -132,9 +134,9 @@ internal object AssistantParser {
     private val songWords = listOf("the song ", "the track ", "the tune ")
     private val bareSongWords = listOf("song ", "track ", "tune ")
 
-    /** "on Jellyfin" at the end of a request, and the space before it. */
+    /** "on Jellyfin / on YouTube Music" at the end of a request, and the space before it. */
     private val onProviderSuffix = Regex(
-        "\\s+on\\s+(jellyfin)\\s*$",
+        "\\s+on\\s+(jellyfin|youtube\\s+music|yt\\s+music|ytmusic|youtube)\\s*$",
         RegexOption.IGNORE_CASE
     )
 

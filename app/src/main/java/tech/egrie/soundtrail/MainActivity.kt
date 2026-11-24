@@ -271,6 +271,7 @@ class MainActivity : ComponentActivity() {
                     ),
                     onLocate = onLocate,
                     onSearch = model::search,
+                    onSelectSearchProvider = model::setSearchProvider,
                     onLookup = model::lookupSong,
                     onConnectJellyfin = model::connectJellyfin,
                     onDisconnectJellyfin = model::disconnectJellyfin,
@@ -320,6 +321,9 @@ class MainActivity : ComponentActivity() {
                     onRepushSyncJournal = model::repushSyncJournal,
                     onDisconnectCloudSync = model::disconnectCloudSync,
                     onDeleteCloudSyncAccount = model::deleteCloudSyncAccount,
+                    onSetListenBrainzEnabled = model::setListenBrainzEnabled,
+                    onSaveListenBrainzToken = model::saveListenBrainzToken,
+                    onDisconnectListenBrainz = model::disconnectListenBrainz,
                     onTogglePlayback = model::togglePlayback,
                     onStopPlayback = model::stopPlayback,
                     onPlay = ::play,
@@ -381,7 +385,7 @@ class MainActivity : ComponentActivity() {
             val text = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
             val link = MusicLinkParser.fromText(text)
             if (link != null) incomingDraft = PinDraft(url = link.url)
-            else model.notify("That shared text is not a song this app can play. Pick a song from your Jellyfin server instead.")
+            else model.notify("That shared text is not a song this app can play. Pick a song from YouTube Music or your Jellyfin server instead.")
             clearHandledIntent()
         }
     }

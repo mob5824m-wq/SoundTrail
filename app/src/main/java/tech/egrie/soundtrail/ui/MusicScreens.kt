@@ -1,6 +1,7 @@
 package tech.egrie.soundtrail.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -68,6 +69,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import tech.egrie.soundtrail.AppState
 import tech.egrie.soundtrail.sync.CloudSyncService
 import tech.egrie.soundtrail.sync.SessionPolicy
+import tech.egrie.soundtrail.integrations.MusicProvider
 import tech.egrie.soundtrail.integrations.SongInfo
 import tech.egrie.soundtrail.integrations.TrackResult
 import tech.egrie.soundtrail.data.ManagedBackupStatus
@@ -80,7 +82,8 @@ import java.util.Locale
 internal fun MusicSearchScreen(
     state: AppState, onSearch: (String) -> Unit,
     onConnect: () -> Unit, onSelectTrack: (TrackResult) -> Unit, onPlayTrack: (TrackResult) -> Unit,
-    onLookup: (String, String) -> Unit, onSelectLookup: (SongInfo) -> Unit
+    onLookup: (String, String) -> Unit, onSelectLookup: (SongInfo) -> Unit,
+    onSelectProvider: (MusicProvider) -> Unit
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     var lookupArtist by rememberSaveable { mutableStateOf("") }
@@ -95,8 +98,12 @@ internal fun MusicSearchScreen(
         onLookup(lookupArtist, lookupTitle)
     }
 
+    val provider = state.searchProvider
+    val accent = when (provider) {
+        MusicProvider.JELLYFIN -> Palette.jellyfin
+        MusicProvider.YOUTUBE_MUSIC -> Palette.youTubeMusic
+    }
     val connected = state.jellyfinConnected
-    val accent = Palette.jellyfin
 
     LazyColumn(
         Modifier.fillMaxSize().padding(horizontal = 20.dp),
@@ -110,7 +117,7 @@ internal fun MusicSearchScreen(
             Spacer(Modifier.height(5.dp))
             Text("Find a song", style = MaterialTheme.typography.headlineLarge)
             Spacer(Modifier.height(4.dp))
-            Text("Search the server you run yourself, or look up a song's details below.",
+            Text("Search YouTube Music or the Jellyfin server you run yourself.",
                 style = MaterialTheme.typography.bodyMedium, color = Palette.secondary)
             Spacer(Modifier.height(14.dp))
             SurfaceCard(Modifier.fillMaxWidth()) {
@@ -120,15 +127,33 @@ internal fun MusicSearchScreen(
                         Icon(Icons.Rounded.MusicNote, null, tint = accent, modifier = Modifier.size(19.dp))
                     }
                     Spacer(Modifier.width(10.dp))
-                    Text("Search Jellyfin", style = MaterialTheme.typography.titleLarge)
+                    Text("Search music", style = MaterialTheme.typography.titleLarge)
                 }
                 Spacer(Modifier.height(10.dp))
-                if (connected) {
-                    Text(
-                        "Searches the music library on the server you connected. What comes back is " +
-                            "only what that server lets your account read, and every result plays here.",
-                        color = Palette.secondary, style = MaterialTheme.typography.bodyMedium
-                    )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ProviderChoiceChip("YouTube Music", provider == MusicProvider.YOUTUBE_MUSIC, Palette.youTubeMusic) {
+                        onSelectProvider(MusicProvider.YOUTUBE_MUSIC)
+                    }
+                    ProviderChoiceChip("Jellyfin", provider == MusicProvider.JELLYFIN, Palette.jellyfin) {
+                        onSelectProvider(MusicProvider.JELLYFIN)
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                if (provider == MusicProvider.JELLYFIN && !connected) {
+                    Text("Connect the Jellyfin server you run yourself to search its music library.",
+                        color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(14.dp))
+                    PrimaryButton("Connect Jellyfin", onConnect, Modifier.fillMaxWidth())
+                } else {
+                    val description = when (provider) {
+                        MusicProvider.YOUTUBE_MUSIC ->
+                            "Searches YouTube Music through public endpoints. No sign-in, no account. " +
+                                "Results play directly in Soundtrail."
+                        MusicProvider.JELLYFIN ->
+                            "Searches the music library on the server you connected. What comes back is " +
+                                "only what that server lets your account read, and every result plays here."
+                    }
+                    Text(description, color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
                     Spacer(Modifier.height(13.dp))
                     OutlinedTextField(
                         value = query, onValueChange = { query = it }, modifier = Modifier.fillMaxWidth(),
@@ -138,13 +163,11 @@ internal fun MusicSearchScreen(
                         keyboardActions = KeyboardActions(onSearch = { search() })
                     )
                     Spacer(Modifier.height(11.dp))
-                    PrimaryButton("Search Jellyfin", { search() }, Modifier.fillMaxWidth(),
-                        enabled = !state.searching && query.isNotBlank())
-                } else {
-                    Text("Connect the Jellyfin server you run yourself to search its music library.",
-                        color = Palette.secondary, style = MaterialTheme.typography.bodyMedium)
-                    Spacer(Modifier.height(14.dp))
-                    PrimaryButton("Connect Jellyfin", onConnect, Modifier.fillMaxWidth())
+                    PrimaryButton(
+                        if (provider == MusicProvider.YOUTUBE_MUSIC) "Search YouTube Music" else "Search Jellyfin",
+                        { search() }, Modifier.fillMaxWidth(),
+                        enabled = !state.searching && query.isNotBlank()
+                    )
                 }
             }
             if (state.searching) {
@@ -317,6 +340,21 @@ private fun LookupRow(song: SongInfo, onUse: () -> Unit) {
     }
 }
 
+@Composable
+private fun ProviderChoiceChip(label: String, selected: Boolean, accent: Color, onClick: () -> Unit) {
+    val bg = if (selected) accent.copy(alpha = .18f) else Palette.elevated
+    val border = if (selected) accent.copy(alpha = .55f) else Palette.border
+    val text = if (selected) accent else Palette.secondary
+    Box(
+        Modifier.clip(RoundedCornerShape(50)).background(bg)
+            .border(1.dp, border, RoundedCornerShape(50))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+    ) {
+        Text(label, color = text, style = MaterialTheme.typography.labelMedium)
+    }
+}
+
 /**
  * The managed-backup card's state and the four things it can do. Bundled so the Connect screen's
  * already-long parameter list gains one argument rather than five.
@@ -353,7 +391,10 @@ internal fun ConnectionsScreen(
     onChangeSyncPassword: (String, String, String) -> Unit,
     onRepushSyncJournal: () -> Unit,
     onDisconnectCloudSync: () -> Unit,
-    onDeleteCloudSyncAccount: () -> Unit
+    onDeleteCloudSyncAccount: () -> Unit,
+    onSetListenBrainzEnabled: (Boolean) -> Unit,
+    onSaveListenBrainzToken: (String) -> Unit,
+    onDisconnectListenBrainz: () -> Unit
 ) {
     // When the user has no saved server, pre-fill the field with the default public server so
     // that sign-up and sign-in just work; self-hosters overwrite it with their own URL.
@@ -381,6 +422,7 @@ internal fun ConnectionsScreen(
             passwordConfirm = ""
         }
     }
+    var lbToken by remember { mutableStateOf("") }
     var jellyfinServer by rememberSaveable(state.jellyfinServer) { mutableStateOf(state.jellyfinServer) }
     var jellyfinUser by rememberSaveable(state.jellyfinName) { mutableStateOf(state.jellyfinName) }
     var jellyfinPassword by rememberSaveable { mutableStateOf("") }
@@ -1018,6 +1060,61 @@ internal fun ConnectionsScreen(
                 "accounts and re-attach audio after a restore. Importing keeps everything " +
                 "already here and only adds what the file has.",
                 color = Palette.muted, style = MaterialTheme.typography.labelMedium)
+        }
+        Spacer(Modifier.height(13.dp))
+        SurfaceCard(Modifier.fillMaxWidth()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(43.dp).background(Palette.lilac.copy(alpha = .17f), CircleShape),
+                    contentAlignment = Alignment.Center) {
+                    Icon(Icons.Rounded.MusicNote, null, tint = Palette.lilac)
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("ListenBrainz", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        when {
+                            state.listenBrainzConfigured -> "Connected" + if (state.listenBrainzUser.isNotBlank()) " as ${state.listenBrainzUser}" else ""
+                            state.listenBrainzEnabled -> "Enabled · token needed"
+                            else -> "Off · opt-in scrobbling"
+                        },
+                        color = if (state.listenBrainzConfigured) Palette.primary else Palette.secondary,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                Switch(checked = state.listenBrainzEnabled, onCheckedChange = onSetListenBrainzEnabled)
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "Scrobble what you play to ListenBrainz. Off by default. Your token stays on this device and is never logged.",
+                color = Palette.secondary, style = MaterialTheme.typography.bodyMedium
+            )
+            if (state.listenBrainzConfigured) {
+                Spacer(Modifier.height(8.dp))
+                Text("Token: ${state.listenBrainzTokenMasked}", color = Palette.muted, style = MaterialTheme.typography.labelMedium)
+                if (state.listenBrainzPending > 0) {
+                    Text("${state.listenBrainzPending} listen${if (state.listenBrainzPending == 1) "" else "s"} pending submission", color = Palette.muted, style = MaterialTheme.typography.labelMedium)
+                }
+                if (state.listenBrainzStatus.isNotBlank()) {
+                    Text(state.listenBrainzStatus, color = Palette.muted, style = MaterialTheme.typography.labelMedium)
+                }
+                if (state.listenBrainzError.isNotBlank()) {
+                    Text(state.listenBrainzError, color = Palette.coral, style = MaterialTheme.typography.labelMedium)
+                }
+                Spacer(Modifier.height(8.dp))
+                TextButton(onClick = onDisconnectListenBrainz) { Text("Disconnect ListenBrainz", color = Palette.coral) }
+            } else if (state.listenBrainzEnabled) {
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = lbToken, onValueChange = { lbToken = it.trim() },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true,
+                    label = { Text("ListenBrainz user token") },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done)
+                )
+                Spacer(Modifier.height(8.dp))
+                PrimaryButton("Save token", { onSaveListenBrainzToken(lbToken); lbToken = "" }, Modifier.fillMaxWidth(), enabled = lbToken.isNotBlank())
+                Spacer(Modifier.height(4.dp))
+                Text("Get your token from listenbrainz.org/settings.", color = Palette.muted, style = MaterialTheme.typography.labelMedium)
+            }
         }
         Spacer(Modifier.height(13.dp))
         SurfaceCard(Modifier.fillMaxWidth()) {

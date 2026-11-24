@@ -37,6 +37,7 @@ import tech.egrie.soundtrail.integrations.AudioDbService
 import tech.egrie.soundtrail.integrations.DeviceApps
 import tech.egrie.soundtrail.integrations.JellyfinRef
 import tech.egrie.soundtrail.integrations.JellyfinService
+import tech.egrie.soundtrail.integrations.YouTubeMusicService
 import tech.egrie.soundtrail.integrations.MusicLink
 import tech.egrie.soundtrail.integrations.MusicLinkParser
 import tech.egrie.soundtrail.integrations.MusicProvider
@@ -69,6 +70,7 @@ import tech.egrie.soundtrail.mood.MoodStore
 import tech.egrie.soundtrail.mood.MoodSearchTarget
 import tech.egrie.soundtrail.mood.TrackMoodTags
 import tech.egrie.soundtrail.playback.JellyfinPlayer
+import tech.egrie.soundtrail.scrobble.ScrobbleManager
 import tech.egrie.soundtrail.playback.LibraryMedia
 import tech.egrie.soundtrail.playback.PlaybackHub
 import tech.egrie.soundtrail.playback.QueueEntry
@@ -93,6 +95,7 @@ internal data class AppState(
     val searching: Boolean = false,
     val results: List<TrackResult> = emptyList(),
     val searchError: String? = null,
+    val searchProvider: MusicProvider = MusicProvider.YOUTUBE_MUSIC,
     val lookupSearching: Boolean = false,
     val lookupResults: List<SongInfo> = emptyList(),
     val lookupError: String? = null,
@@ -141,7 +144,15 @@ internal data class AppState(
     /** The mood reader: what the listener typed, what it meant, and the mix it produced. */
     val mood: MoodUiState = MoodUiState(),
     /** The Ask tab: what was said or typed, and the answer to it. */
-    val assistant: AssistantUiState = AssistantUiState()
+    val assistant: AssistantUiState = AssistantUiState(),
+    // ListenBrainz scrobbling (opt-in, off by default)
+    val listenBrainzEnabled: Boolean = false,
+    val listenBrainzTokenMasked: String = "",
+    val listenBrainzUser: String = "",
+    val listenBrainzConfigured: Boolean = false,
+    val listenBrainzPending: Int = 0,
+    val listenBrainzError: String = "",
+    val listenBrainzStatus: String = ""
 )
 
 /**
@@ -277,6 +288,8 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     private var managedBackupJob: Job? = null
     private val files = FileStore(application)
     private val jellyfin = JellyfinService(application)
+    private val youTubeMusic = YouTubeMusicService(application)
+    private val scrobbles = ScrobbleManager.get(application)
     private val audioDb = AudioDbService()
     private val locationReader = DeviceLocation(application)
     private val apps = DeviceApps(application)
@@ -354,7 +367,14 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 aiConsentAt = moodPrefs.consentAt(),
                 aiReady = moodAi.configured,
                 enrichEnabled = moodPrefs.tagLookupEnabled
-            )
+            ),
+            listenBrainzEnabled = scrobbles.settings().enabled,
+            listenBrainzTokenMasked = scrobbles.settings().maskedToken(),
+            listenBrainzUser = scrobbles.settings().userName,
+            listenBrainzConfigured = scrobbles.settings().isConfigured(),
+            listenBrainzPending = scrobbles.pendingCount(),
+            listenBrainzError = scrobbles.lastError,
+            listenBrainzStatus = scrobbles.currentTrackStatusMessage()
         )
     )
     val state = _state.asStateFlow()
@@ -673,37 +693,60 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             val mine = AssistantLibrary.search(request, snapshot.pins, snapshot.playlists)
             // A request that named a place to look — "the xx on jellyfin" — is honoured; anything
             // else searches the listener's own server too, since that is the only catalogue left.
-            val wantsServer = request.provider == null ||
-                request.provider == MusicProvider.JELLYFIN
-            val searched = jellyfin.connected && wantsServer
+            val wantJellyfin = request.provider == null || request.provider == MusicProvider.JELLYFIN
+            val wantYouTube = request.provider == null || request.provider == MusicProvider.YOUTUBE_MUSIC
+            val searchedJellyfin = jellyfin.connected && wantJellyfin
+            val searchedYouTube = wantYouTube
             var failure: String? = null
-            val found = if (searched) {
-                try {
-                    // One look at the request as it was understood; a title that a command word
-                    // was hiding ("Play That Funky Music") gets a second look as it was said,
-                    // but only when the first found nothing at all.
-                    var hits = withContext(Dispatchers.IO) { jellyfin.searchTracks(request.phrase) }
-                    if (hits.isEmpty() && request.spoken.isNotBlank() &&
-                        !request.spoken.equals(request.phrase, ignoreCase = true)
-                    ) {
-                        hits = withContext(Dispatchers.IO) { jellyfin.searchTracks(request.spoken) }
+            val found = buildList {
+                if (searchedJellyfin) {
+                    try {
+                        var hits = withContext(Dispatchers.IO) { jellyfin.searchTracks(request.phrase) }
+                        if (hits.isEmpty() && request.spoken.isNotBlank() &&
+                            !request.spoken.equals(request.phrase, ignoreCase = true)
+                        ) {
+                            hits = withContext(Dispatchers.IO) { jellyfin.searchTracks(request.spoken) }
+                        }
+                        hits.mapTo(this) { track ->
+                            AssistantHit(
+                                title = track.title,
+                                artist = track.artist,
+                                provider = track.provider,
+                                detail = track.provider.label,
+                                url = track.url
+                            )
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        failure = e.message ?: "Your Jellyfin server could not be searched."
                     }
-                    hits.map { track ->
-                        AssistantHit(
-                            title = track.title,
-                            artist = track.artist,
-                            provider = track.provider,
-                            detail = track.provider.label,
-                            url = track.url
-                        )
-                    }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    failure = e.message ?: "Your Jellyfin server could not be searched."
-                    emptyList()
                 }
-            } else emptyList()
+                if (searchedYouTube) {
+                    try {
+                        var hits = youTubeMusic.searchTracks(request.phrase)
+                        if (hits.isEmpty() && request.spoken.isNotBlank() &&
+                            !request.spoken.equals(request.phrase, ignoreCase = true)
+                        ) {
+                            hits = youTubeMusic.searchTracks(request.spoken)
+                        }
+                        hits.mapTo(this) { track ->
+                            AssistantHit(
+                                title = track.title,
+                                artist = track.artist,
+                                provider = track.provider,
+                                detail = track.provider.label,
+                                url = track.url
+                            )
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        if (failure == null) failure = e.message ?: "YouTube Music could not be searched."
+                    }
+                }
+            }
+            val searched = searchedJellyfin || searchedYouTube
 
             val hits = AssistantAnswer.merge(mine, found)
             val playing = AssistantAnswer.playable(hits)
@@ -1642,10 +1685,8 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
     fun jellyfinServerUrl(): String = jellyfin.serverUrl
 
     /**
-     * Searches the one catalogue this app still connects to: the listener's own Jellyfin server.
-     *
-     * There is no provider to choose any more, so there is no provider switcher either — the
-     * Search tab asks the server the Connect tab is signed in to, and says so when there is none.
+     * Searches the selected catalogue: YouTube Music (public, no sign-in) or the listener's own
+     * Jellyfin server. The chosen provider is kept in [AppState.searchProvider].
      */
     fun search(query: String) {
         if (_state.value.searching) return
@@ -1653,7 +1694,8 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
             _state.update { it.copy(results = emptyList(), searchError = null) }
             return
         }
-        if (!jellyfin.connected) {
+        val provider = _state.value.searchProvider
+        if (provider == MusicProvider.JELLYFIN && !jellyfin.connected) {
             _state.update {
                 it.copy(
                     results = emptyList(),
@@ -1665,7 +1707,10 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         _state.update { it.copy(searching = true, results = emptyList(), searchError = null) }
         viewModelScope.launch {
             try {
-                val tracks = withContext(Dispatchers.IO) { jellyfin.searchTracks(query) }
+                val tracks = when (provider) {
+                    MusicProvider.JELLYFIN -> withContext(Dispatchers.IO) { jellyfin.searchTracks(query) }
+                    MusicProvider.YOUTUBE_MUSIC -> youTubeMusic.searchTracks(query)
+                }
                 _state.update { it.copy(results = tracks) }
             } catch (e: CancellationException) {
                 throw e
@@ -1677,6 +1722,10 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
                 }
             }
         }
+    }
+
+    fun setSearchProvider(provider: MusicProvider) {
+        _state.update { it.copy(searchProvider = provider, results = emptyList(), searchError = null) }
     }
 
     fun lookupSong(artist: String, title: String) {
@@ -2808,7 +2857,7 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         when {
             input.title.isBlank() -> { notify("Add a song title first."); return false }
             link == null -> {
-                notify("Pick a song from your Jellyfin server, or attach an audio file you own.")
+                notify("Pick a song from YouTube Music or your Jellyfin server, or attach an audio file you own.")
                 return false
             }
             point == null || !point.isValid() -> {
@@ -2850,5 +2899,70 @@ internal class MainViewModel(application: Application) : AndroidViewModel(applic
         } catch (_: Exception) {
             notify("Couldn't remove that pin.")
         }
+    }
+
+    // ----- ListenBrainz scrobbling -----
+
+    fun refreshListenBrainzState() {
+        val s = scrobbles.settings()
+        _state.update {
+            it.copy(
+                listenBrainzEnabled = s.enabled,
+                listenBrainzTokenMasked = s.maskedToken(),
+                listenBrainzUser = s.userName,
+                listenBrainzConfigured = s.isConfigured(),
+                listenBrainzPending = scrobbles.pendingCount(),
+                listenBrainzError = scrobbles.lastError,
+                listenBrainzStatus = scrobbles.currentTrackStatusMessage()
+            )
+        }
+    }
+
+    fun setListenBrainzEnabled(enabled: Boolean) {
+        scrobbles.settings().enabled = enabled
+        if (enabled) scrobbles.flush()
+        refreshListenBrainzState()
+    }
+
+    fun saveListenBrainzToken(rawToken: String) {
+        val token = rawToken.trim()
+        if (token.isEmpty()) {
+            notify("Enter a ListenBrainz user token.")
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    tech.egrie.soundtrail.scrobble.ListenBrainzApi(getApplication()).validateToken(token)
+                }
+                if (!result.valid) {
+                    notify(result.message.ifBlank { "ListenBrainz rejected that token." })
+                    return@launch
+                }
+                val s = scrobbles.settings()
+                s.token = token
+                s.userName = result.userName
+                s.enabled = true
+                scrobbles.flush()
+                refreshListenBrainzState()
+                notify(
+                    if (result.userName.isNotBlank()) "Connected to ListenBrainz as ${result.userName}."
+                    else "ListenBrainz token saved."
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                notify(e.message ?: "Couldn't validate that ListenBrainz token.")
+            }
+        }
+    }
+
+    fun disconnectListenBrainz() {
+        val s = scrobbles.settings()
+        s.enabled = false
+        s.token = ""
+        s.userName = ""
+        refreshListenBrainzState()
+        notify("ListenBrainz disconnected on this device.")
     }
 }

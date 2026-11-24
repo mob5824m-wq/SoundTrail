@@ -464,6 +464,7 @@ private const val FOCUS_ZOOM = 15.0
 /** Pin colours match the pills used everywhere else in Soundtrail. */
 private fun pinColor(provider: MusicProvider): Color = when (provider) {
     MusicProvider.JELLYFIN -> Palette.jellyfin
+    MusicProvider.YOUTUBE_MUSIC -> Palette.youTubeMusic
 }
 
 /**
